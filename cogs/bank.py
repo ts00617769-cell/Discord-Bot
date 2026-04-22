@@ -25,9 +25,8 @@ class GuildBank(commands.Cog):
         with open(self.file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
-    # --- 指令：記帳 ---
+    # --- 指令：記帳 (已解除權限鎖定，所有人皆可使用) ---
     @commands.command(name="記帳", help="格式: !記帳 [金額] [說明] (例如: !記帳 20000 宇宙鑽石 或 !記帳 -10000 出席分配)")
-    @commands.has_permissions(administrator=True) # 🛡️ 安全機制：只有管理員能記帳
     async def add_record(self, ctx, amount: int, *, description: str):
         data = self.load_data()
         
@@ -61,36 +60,11 @@ class GuildBank(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    # --- 指令：查詢金庫 ---
-    @commands.command(name="金庫", aliases=["銀行", "查帳"], help="查看旅團目前餘額與最近 5 筆帳目明細")
-    async def check_bank(self, ctx):
-        data = self.load_data()
-        balance = data["balance"]
-        history = data["history"]
-
-        embed = discord.Embed(title="🏦 酒團金庫明細", description=f"💎 **目前總結餘：{balance:,} 鑽石**", color=0x3498db)
-
-        if not history:
-            embed.add_field(name="近期帳目", value="目前還沒有任何記帳紀錄喔！", inline=False)
-        else:
-            # 只取最後 5 筆紀錄來顯示，避免版面太長
-            recent_history = history[-5:]
-            history_text = ""
-            for rec in recent_history:
-                sign = "+" if rec['amount'] > 0 else ""
-                history_text += f"`{rec['date'][:10]}` **{sign}{rec['amount']}** ({rec['description']}) 👉 餘 `{rec['balance_after']}`\n"
-            
-            embed.add_field(name="📜 最近 5 筆收支紀錄", value=history_text, inline=False)
-
-        await ctx.send(embed=embed)
-
-    # 錯誤處理：如果不是管理員亂用語法
+    # 錯誤處理：如果輸入格式不對
     @add_record.error
     async def add_record_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ 權限不足：只有公會管理員可以使用 `!記帳` 指令喔！")
-        elif isinstance(error, commands.BadArgument) or isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("⚠️ 格式錯誤！請輸入：`!記帳 [金額] [說明]`\n例如：`!記帳 +20000 宇宙鑽石` 或 `!記帳 -10000 出席分配`")
+        if isinstance(error, commands.BadArgument) or isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send("⚠️ 格式錯誤！請輸入：`!記帳 [金額] [說明]`\n例如：`!記帳 20000 宇宙鑽石` 或 `!記帳 -10000 出席分配`")
 
 async def setup(bot):
     await bot.add_cog(GuildBank(bot))
