@@ -1,0 +1,7 @@
+.env
+compose.yaml
+guild_data.db
+__pycache__/
+
+# Google Sheets API 服務帳號金鑰
+service_account.json
