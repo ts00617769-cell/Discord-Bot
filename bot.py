@@ -24,17 +24,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 # ⚠️ 自動提醒頻道 ID
 REMINDER_CHANNEL_ID = 1477964998818140326
-# 🛡️ 允許使用打寶指令的頻道清單 (把你的正式頻道 ID 跟測試頻道 ID 都寫進去，用逗號隔開)
-# 記得把 "你的正式頻道ID" 換成真正的數字喔！
-ALLOWED_LOOT_CHANNELS = [1401827955625299998, 1477966312411107493]
-# 🗳️ 暫存盲投心理測驗的資料 (升級版：加入日期鎖定)
-active_poll = {
-    "is_active": False,
-    "date": None,      # 新增這行：記錄這是哪一天的測驗
-    "channel_id": None,
-    "data": None,
-    "votes": {}
-}
+
 # 2. 機器人初始化
 intents = discord.Intents.default()
 intents.message_content = True
@@ -61,100 +51,19 @@ async def auto_boss_reminder():
                 color=discord.Color.red()
             )
             await channel.send(content="@everyone", embed=embed)
-# --- 背景工作：晚上 6 點自動公布測驗結果 ---
-@tasks.loop(minutes=1)
-async def auto_reveal_quiz():
-    global active_poll
-    if not active_poll["is_active"]:
-        return
-        
-    tz = pytz.timezone('Asia/Taipei')
-    now = datetime.datetime.now(tz)
-    
-    # 檢查是否剛好是 18:00 (晚上 6 點)
-    if now.hour == 18 and now.minute == 0:
-        channel = bot.get_channel(active_poll["channel_id"])
-        if channel:
-            q_data = active_poll["data"]
-            votes = active_poll["votes"]
-            
-            embed = discord.Embed(
-                title="🎉 【測驗結果大公開】",
-                description=f"**回顧題目：**\n{q_data['title']}\n\n👇 **看看大家選了什麼！** 👇",
-                color=discord.Color.green()
-            )
-            
-            # 把每個選項的投票人跟解析列出來
-            for key, text in q_data["options"].items():
-                voters = votes.get(key, [])
-                voter_list = "、".join(voters) if voters else "無人選擇 👻"
-                result_text = q_data["results"][key]
-                
-                embed.add_field(
-                    name=f"🔘 選擇 {key} ({len(voters)}人): {voter_list}",
-                    value=f"👉 **解析**：{result_text}",
-                    inline=False
-                )
-            
-            await channel.send(content="🔔 **時間到！** 中午的心理測驗結果出爐啦！", embed=embed)
-        
-        # 開獎完畢，關閉這場投票
-        active_poll["is_active"] = False
-# --- 背景工作：每天中午 12 點自動發布盲投測驗 ---
-@tasks.loop(minutes=1)
-async def auto_post_quiz():
-    global active_poll
-    tz = pytz.timezone('Asia/Taipei')
-    now = datetime.datetime.now(tz)
-    today_str = now.strftime('%Y-%m-%d')
-    
-    # 檢查是否剛好是 12:00 (中午12點)
-    if now.hour == 12 and now.minute == 0:
-        # 💡 重要：替換成正式頻道 ID
-        target_channel_id = 1477966312411107493 
-        channel = bot.get_channel(target_channel_id)
-        
-        if channel:
-            try:
-                with open('quiz.json', 'r', encoding='utf-8') as f:
-                    quiz_list = json.load(f)
-                
-                # 💡 FAE 黑科技：用「今天的日期」當作隨機抽籤的種子
-                # 這樣確保只要在同一天，抽出來的題目絕對是同一題
-                local_random = random.Random(today_str)
-                question = local_random.choice(quiz_list)
-                
-                # 如果今天還沒發布過，就初始化投票箱；如果發布過了，就不會洗掉已投的票
-                if not (active_poll["is_active"] and active_poll["date"] == today_str):
-                    active_poll["is_active"] = True
-                    active_poll["date"] = today_str
-                    active_poll["channel_id"] = target_channel_id
-                    active_poll["data"] = question
-                    active_poll["votes"] = {k: [] for k in question["options"].keys()}
-                
-                embed = discord.Embed(
-                    title="🕒 【每日盲投心理測驗】",
-                    description=f"**{question['title']}**\n\n*(請點擊下方按鈕作答。你的選擇將被保密，直到今晚 18:00 自動公布解答與所有人的選擇！)*",
-                    color=discord.Color.orange()
-                )
-                
-                view = SecretQuizView(question)
-                await channel.send(content="@everyone 中午休息時間！每日測驗來囉！", embed=embed, view=view)
-            except Exception as e:
-                print(f"自動發布測驗失敗: {e}")
-
-# --- 4. 事件監聽 ---
+# -------- 請把這段加在 on_ready 上面 --------
+@bot.event
+async def setup_hook():
+    # 告訴主機板，開機時去載入 cogs/quiz.py 這張擴充卡
+    await bot.load_extension("cogs.quiz")
+    print("✅ QuizSystem 模組已成功掛載！")
+# ------------------------------------------
 @bot.event
 async def on_ready():
     print(f'{bot.user} 已成功登入 Discord！')
+    # 確保首領提醒雷達有正常啟動
     if not auto_boss_reminder.is_running():
         auto_boss_reminder.start()
-    # 👇 補上這兩行，啟動開獎雷達
-    if not auto_reveal_quiz.is_running():
-        auto_reveal_quiz.start()
-        # 👇 啟動中午 12 點自動發題雷達
-    if not auto_post_quiz.is_running():
-        auto_post_quiz.start()
 
 # --- 5. 指令：時空查詢 ---
 @bot.command(name="時空", help="顯示今天的時空縫隙召喚時間表。")
@@ -449,125 +358,5 @@ async def real_horoscope_cached(ctx, sign: str = None):
     embed.set_footer(text=footer_text)
     
     await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
-# --- 互動按鈕類別 (動態生成：公開廣播版) ---
-class QuizButton(discord.ui.Button):
-    def __init__(self, key, text, style, result_text):
-        super().__init__(label=f"{key}. {text}", style=style)
-        self.result_text = result_text
-
-    async def callback(self, interaction: discord.Interaction):
-        # 拿掉 ephemeral=True，改為公開發送並 tag 玩家
-        public_msg = f"📣 {interaction.user.mention} 選擇了 **{self.label}**！\n👉 **測驗結果**：{self.result_text}"
-        await interaction.response.send_message(public_msg)
-
-# --- 【盲投專屬按鈕與視圖 (SecretQuiz)】 ---
-class SecretQuizButton(discord.ui.Button):
-    def __init__(self, key, text, style):
-        super().__init__(label=f"{key}. {text}", style=style)
-        self.key = key
-
-    async def callback(self, interaction: discord.Interaction):
-        global active_poll
-        if not active_poll["is_active"]:
-            await interaction.response.send_message("❌ 投票已結束或尚未開始！", ephemeral=True)
-            return
-
-        user_name = interaction.user.display_name
-        # 允許玩家反悔改票，先清掉他之前的紀錄
-        for k in active_poll["votes"]:
-            if user_name in active_poll["votes"][k]:
-                active_poll["votes"][k].remove(user_name)
-        
-        # 記錄這次的投票
-        if self.key not in active_poll["votes"]:
-            active_poll["votes"][self.key] = []
-        active_poll["votes"][self.key].append(user_name)
-
-        # 偷偷告訴他投成功了 (ephemeral=True)
-        await interaction.response.send_message(f"🤫 投票成功！你選擇了 **{self.key}**。晚上 6 點將公開所有人的選擇！", ephemeral=True)
-
-class SecretQuizView(discord.ui.View):
-    def __init__(self, question_data):
-        super().__init__(timeout=None)
-        styles = [discord.ButtonStyle.primary, discord.ButtonStyle.secondary, discord.ButtonStyle.success, discord.ButtonStyle.danger]
-        for i, (key, text) in enumerate(question_data["options"].items()):
-            self.add_item(SecretQuizButton(key, text, styles[i % len(styles)]))
-
-
-# --- 【定時盲投測驗系統：手動觸發版】 ---
-@bot.command(name="定時測驗", help="手動發布今天的盲投測驗 (同一天重複呼叫會推播同一題)")
-async def scheduled_quiz(ctx):
-    global active_poll
-    tz = pytz.timezone('Asia/Taipei')
-    today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
-
-    try:
-        with open('quiz.json', 'r', encoding='utf-8') as f:
-            quiz_list = json.load(f)
-        
-        # 一樣使用日期作為種子
-        local_random = random.Random(today_str)
-        question = local_random.choice(quiz_list)
-        
-        # 檢查今天是不是已經開過這題了
-        if active_poll["is_active"] and active_poll["date"] == today_str:
-            await ctx.send("⚠️ **今天的測驗已經發布過了喔！幫大家重新置頂題目：**")
-            # 沿用之前的票箱，不重置
-        else:
-            active_poll["is_active"] = True
-            active_poll["date"] = today_str
-            active_poll["channel_id"] = ctx.channel.id
-            active_poll["data"] = question
-            active_poll["votes"] = {k: [] for k in question["options"].keys()}
-        
-        embed = discord.Embed(
-            title="🕒 【每日盲投心理測驗】",
-            description=f"**{question['title']}**\n\n*(請點擊下方按鈕作答。你的選擇將被保密，直到今晚 18:00 自動公布解答與所有人的選擇！)*",
-            color=discord.Color.orange()
-        )
-        
-        view = SecretQuizView(question)
-        # 如果是手動呼叫，就不 Tag everyone 擾民了
-        await ctx.send(content="測驗時間到！", embed=embed, view=view)
-        
-    except Exception as e:
-        await ctx.send(f"❌ 發生錯誤：{e}")
-
-# --- 【系統測試：手動強制開獎】 ---
-@bot.command(name="強制開獎", help="手動強制提早公布盲投結果！(不需等到晚上6點)")
-async def force_reveal(ctx):
-    global active_poll
-    if not active_poll["is_active"]:
-        await ctx.send("❌ 目前沒有正在進行的盲投測驗可以開獎喔！")
-        return
-
-    # 讀取當前的題目與投票資料
-    q_data = active_poll["data"]
-    votes = active_poll["votes"]
-    
-    embed = discord.Embed(
-        title="🎉 【測驗結果大公開】",
-        description=f"**回顧題目：**\n{q_data['title']}\n\n👇 **看看大家選了什麼！** 👇",
-        color=discord.Color.green()
-    )
-    
-    # 計算並印出每個選項的結果
-    for key, text in q_data["options"].items():
-        voters = votes.get(key, [])
-        voter_list = "、".join(voters) if voters else "無人選擇 👻"
-        result_text = q_data["results"][key]
-        
-        embed.add_field(
-            name=f"🔘 選擇 {key} ({len(voters)}人): {voter_list}",
-            value=f"👉 **解析**：{result_text}",
-            inline=False
-        )
-    
-    # 輸出結果到頻道
-    await ctx.send(content="🔔 **管理員強制開獎！**", embed=embed)
-    
-    # 開獎完畢，關閉這場投票
-    active_poll["is_active"] = False
-
 # ⚠️ run 永遠在最後一行
 bot.run(TOKEN)
