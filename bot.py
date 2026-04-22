@@ -54,9 +54,11 @@ async def auto_boss_reminder():
 # -------- 請把這段加在 on_ready 上面 --------
 @bot.event
 async def setup_hook():
-    # 告訴主機板，開機時去載入 cogs/quiz.py 這張擴充卡
-    await bot.load_extension("cogs.quiz")
-    print("✅ QuizSystem 模組已成功掛載！")
+    # 自動掃描 cogs 資料夾，把所有 .py 結尾的擴充卡全部插上去
+    for filename in os.listdir('./cogs'):
+        if filename.endswith('.py'):
+            await bot.load_extension(f'cogs.{filename[:-3]}')
+            print(f"✅ 模組 {filename} 已成功掛載！")
 # ------------------------------------------
 @bot.event
 async def on_ready():
