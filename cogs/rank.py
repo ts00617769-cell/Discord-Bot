@@ -12,14 +12,14 @@ class RankTracker(commands.Cog):
             "戴摩爾克": "livegm_w02",
             "亞羅格": "livegm_w03",
             "萊涅": "livegm_w04",
-            "貝爾姆特": "livegm_w05"
-            "困特": "livegm_w06"
-            "修連": "livegm_w07"
-            "伊奈司": "livegm_w08"
-            "基安": "livegm_w09"
-            "扎爾巴爾": "livegm_w10"
-            "黛庫爾": "livegm_w11"
-            "耶拉普斯": "livegm_w13"
+            "貝爾姆特": "livegm_w05",
+            "困特": "livegm_w06",
+            "修連": "livegm_w07",
+            "伊奈司": "livegm_w08",
+            "基安": "livegm_w09",
+            "扎爾巴爾": "livegm_w10",
+            "黛庫爾": "livegm_w11",
+            "耶拉普斯": "livegm_w13",
             "賽爾齊歐": "livegm_w14"
         }
 
