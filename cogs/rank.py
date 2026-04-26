@@ -6,7 +6,7 @@ import re
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # 🎯 2026 最新前線情報網 (已加入貝爾姆特)
+        # 🎯 2026 最新前線情報網
         self.server_map = {
             "克隆": "livegm_w01",
             "戴摩爾克": "livegm_w02",
@@ -25,10 +25,9 @@ class RankTracker(commands.Cog):
 
     @commands.command(name="前十名", aliases=["排行榜", "神人榜"], help="查詢指定伺服器排行。格式: !前十名 [大區] [編號] (例如: !前十名 亞羅格 05)")
     async def top_10_exp(self, ctx, group_name: str = "萊涅", realm_num: str = "01"):
-        # 防呆機制：如果成員忘記打空格，直接連著打 (例如: !前十名 亞羅格05)
-        # 我們用正規表達式把它拆開
+        # 防呆機制：自動拆解沒打空格的伺服器名稱
         match = re.match(r"([^\d]+)(\d+)", group_name)
-        if match and realm_num == "01": # 如果 group_name 夾帶數字，且 realm_num 是預設值
+        if match and realm_num == "01":
             group_name = match.group(1)
             realm_num = match.group(2)
 
@@ -39,7 +38,7 @@ class RankTracker(commands.Cog):
             await ctx.send(f"❌ 找不到大區「{group_name}」。目前支援：{valid_servers}")
             return
 
-        # 2. 格式化分流編號 (確保變成 r1, r5...)
+        # 2. 格式化分流編號
         try:
             r_num = str(int(realm_num))
             world_id = f"{group_id}_r{r_num}"
@@ -64,7 +63,6 @@ class RankTracker(commands.Cog):
                 json_data = response.json()
                 player_list = json_data.get("data", {}).get("gc", [])
                 
-                # 如果該分流不存在 (例如戴摩爾克01)，官方會回傳空陣列
                 if not player_list:
                     await processing_msg.edit(content=f"❌ 找不到【{group_name}{realm_num}】的資料！(可能該伺服器尚未開放，或代碼輸入錯誤)")
                     return
@@ -78,9 +76,13 @@ class RankTracker(commands.Cog):
                     exp = player.get("gc_exp", 0)
                     job = player.get("class_name", "未知職業")
                     
+                    # 🎯 單位換算：將原本的經驗值除以 1 億，並使用千分位與保留兩位小數
+                    exp_in_yi = exp / 100000000
+                    exp_formatted = f"{exp_in_yi:,.2f} 億"
+                    
                     embed.add_field(
                         name=f"第 {idx} 名：{name}",
-                        value=f"⚔️ {job} | 📈 Lv.{level} | 💎 經驗：**{exp:,}**",
+                        value=f"⚔️ {job} | 📈 Lv.{level} | 💎 經驗：**{exp_formatted}**",
                         inline=False
                     )
                 
