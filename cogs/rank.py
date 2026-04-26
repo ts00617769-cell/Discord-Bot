@@ -23,9 +23,9 @@ class RankTracker(commands.Cog):
             "賽爾齊歐": "livegm_w14"
         }
 
-    @commands.command(name="前十名", aliases=["排行榜", "神人榜"], help="查詢指定伺服器排行。格式: !前十名 [大區] [編號] (例如: !前十名 亞羅格 05)")
+    @commands.command(name="前十名", aliases=["排行榜", "神人榜"], help="查詢指定伺服器排行。格式: !前十名 [大區] [編號]")
     async def top_10_exp(self, ctx, group_name: str = "萊涅", realm_num: str = "01"):
-        # 防呆機制：自動拆解沒打空格的伺服器名稱
+        # 防呆機制：自動拆解沒打空格的名稱
         match = re.match(r"([^\d]+)(\d+)", group_name)
         if match and realm_num == "01":
             group_name = match.group(1)
@@ -43,10 +43,10 @@ class RankTracker(commands.Cog):
             r_num = str(int(realm_num))
             world_id = f"{group_id}_r{r_num}"
         except ValueError:
-            await ctx.send("❌ 分流編號請輸入數字 (例如: 05 或 5)")
+            await ctx.send("❌ 分流編號請輸入數字 (例如: 05)")
             return
 
-        processing_msg = await ctx.send(f"🔍 正在撈取【{group_name}{realm_num}】的數據...")
+        processing_msg = await ctx.send(f"🔍 正在撈取【{group_name}{realm_num}】的戰情數據...")
 
         try:
             api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
@@ -64,7 +64,7 @@ class RankTracker(commands.Cog):
                 player_list = json_data.get("data", {}).get("gc", [])
                 
                 if not player_list:
-                    await processing_msg.edit(content=f"❌ 找不到【{group_name}{realm_num}】的資料！(可能該伺服器尚未開放，或代碼輸入錯誤)")
+                    await processing_msg.edit(content=f"❌ 找不到【{group_name}{realm_num}】的資料！")
                     return
 
                 top_10 = player_list[:10]
@@ -76,9 +76,10 @@ class RankTracker(commands.Cog):
                     exp = player.get("gc_exp", 0)
                     job = player.get("class_name", "未知職業")
                     
-                    # 🎯 單位換算：將原本的經驗值除以 1 億，並使用千分位與保留兩位小數
-                    exp_in_yi = exp / 100000000
-                    exp_formatted = f"{exp_in_yi:,.2f} 億"
+                    # 🎯 單位換算：將原本的經驗值除以一兆 (10的12次方)
+                    # 例如 2,343,385,457,648,085 會變成 2,343.39 兆
+                    exp_in_zhao = exp / 1000000000000
+                    exp_formatted = f"{exp_in_zhao:,.2f} 兆"
                     
                     embed.add_field(
                         name=f"第 {idx} 名：{name}",
