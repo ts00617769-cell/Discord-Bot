@@ -54,7 +54,7 @@ class CastleTracker(commands.Cog):
             pass
         return []
 
-    @commands.command(name="稅收", aliases=["城堡", "據點", "城戰"], help="查詢據點鑽石稅收。例如: !稅收 全服, !稅收 20 萊涅01")
+    @commands.command(name="稅收",help="查詢據點鑽石稅收。例如: !稅收 全服, !稅收 20 萊涅01")
     async def get_castle_tax(self, ctx, *args):
         count = 15 # 預設顯示前 15 名肥羊城
         group_name = "全服"

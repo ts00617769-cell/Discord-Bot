@@ -160,27 +160,6 @@ async def draw_number(ctx, max_val: int = 100):
     embed.set_footer(text=f"由 {ctx.author.display_name} 啟動抽獎")
     await ctx.send(embed=embed)
 
-# --- 8. 指令：功能介紹 ---
-@bot.command(name="指令", help="顯示所有可用的機器人指令。")
-async def help_menu(ctx):
-    embed = discord.Embed(
-        title="🤖 波拉西亞助手 - 指令操作手冊",
-        description="歡迎使用公會專用機器人，以下是目前可用的指令：",
-        color=discord.Color.blue()
-    )
-    embed.add_field(name="🕒 !時空", value="顯示今天的「時空縫隙首領」召喚時間表。", inline=False)
-    embed.add_field(name="💎 !抽卡 [次數]", value="模擬抽卡（最高 1000 抽），僅 **傳說/英雄** 會顯示彩色框框。", inline=False)
-    embed.add_field(name="🎲 !抽 [數字]", value="隨機抽取一個數字（預設 1~100），適合分配王團獎勵。", inline=False)
-    embed.add_field(name="🧪 !鍊成 [階級]", value="模擬四合一鍊成（每柱 60% 過，連過四柱成功）。", inline=False)
-    embed.add_field(name="🔮 !塔羅", value="抽取今日專屬的塔羅牌，預測遊戲運勢（每日重置）。", inline=False)
-    embed.add_field(name="🧠 !測驗", value="每日輪替的公會專屬心理測驗！看看你的真實性格。", inline=False)
-    
-    # 👇 新增的星座指令說明 👇
-    embed.add_field(name="🌌 !星座 [星座名稱]", value="查詢今日真實的星座運勢（例如：!星座 天蠍座，超高速快取版）。", inline=False)
-    
-    embed.set_footer(text=f"由 {ctx.author.display_name} 請求查詢")
-    await ctx.send(embed=embed)
-
 # --- 9. 指令：鍊成系統 ---
 @bot.command(name="鍊成", help="模擬四合一鍊成。用法：!鍊成 英雄")
 async def alchemy(ctx, rarity: str):

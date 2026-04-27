@@ -13,7 +13,7 @@ class LeagueTracker(commands.Cog):
         current_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text_str)
         return text_str + " " * max(0, target_width - current_width)
 
-    @commands.command(name="聯賽", aliases=["宇宙聯賽", "league"], help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
+    @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
         
         # 💡 友善的提示訊息 (參數回顯機制)

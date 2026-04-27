@@ -54,7 +54,7 @@ class RankTracker(commands.Cog):
         return []
 
     # 👇 這裡才是指令的大門口！
-    @commands.command(name="排名", aliases=["排行榜", "前十名"], help="例如: !排名 全服, !排名 25 萊涅01")
+    @commands.command(name="排名", help="例如: !排名 全服, !排名 25 萊涅01")
     async def get_ranking(self, ctx, *args):
         
         # 🛡️ 【資安防護網】貼在這裡！一進門就先攔截檢查！
