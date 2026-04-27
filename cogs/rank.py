@@ -53,8 +53,15 @@ class RankTracker(commands.Cog):
             pass
         return []
 
+    # 👇 這裡才是指令的大門口！
     @commands.command(name="排名", aliases=["排行榜", "前十名"], help="例如: !排名 全服, !排名 25 萊涅01")
     async def get_ranking(self, ctx, *args):
+        
+        # 🛡️ 【資安防護網】貼在這裡！一進門就先攔截檢查！
+        allowed_channel_id = 123456789012345678 # 👉 換成你們的頻道 ID
+        
+        if ctx.channel.id != allowed_channel_id:
+            return # 如果不是指定頻道，直接退回不理他
         count = 10
         group_name = "全服"
         realm_num = "01"
