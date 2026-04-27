@@ -18,9 +18,8 @@ class LeagueTracker(commands.Cog):
         
         processing_msg = await ctx.send(f"🛰️ 正在連線至宇宙聯賽資料庫 (S0{season} - R{round_num} - 級別 {league_id})...")
 
-        # ⚠️ 注意：這裡的 API 網址是我根據命名規則推測的。
-        # 如果執行後顯示連線失敗，請你在 F12 中確認該請求的 Request URL 並替換掉這行！
-        api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiUniverseLeagueRanking"
+        # ✅ 已經替換為你剛剛抓到的真實 API 網址！
+        api_url = "https://warsofprasia.beanfun.com/api/UniverseLeague/Ranking"
         
         # 動態生成 Payload 參數
         payload = {
@@ -92,7 +91,7 @@ class LeagueTracker(commands.Cog):
                 
                 description += "```"
                 
-                # 因為每個賽區(Match)的資料量較大，我們為每個賽區建立一個獨立的 Embed 卡片
+                # 為每個賽區建立獨立的 Embed 卡片
                 embed = discord.Embed(title=f"🌌 宇宙聯賽 - {match_name}", description=description, color=0x9B59B6)
                 embeds.append(embed)
 
