@@ -58,7 +58,7 @@ class RankTracker(commands.Cog):
     async def get_ranking(self, ctx, *args):
         
         # 🛡️ 【資安防護網】貼在這裡！一進門就先攔截檢查！
-        allowed_channel_id = 123456789012345678 # 👉 換成你們的頻道 ID
+        allowed_channel_id = 1477966312411107493 # 👉 換成你們的頻道 ID
         
         if ctx.channel.id != allowed_channel_id:
             return # 如果不是指定頻道，直接退回不理他
