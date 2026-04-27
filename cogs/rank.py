@@ -1,12 +1,13 @@
 import discord
 from discord.ext import commands
-import requests
+import aiohttp
+import asyncio
 import re
 
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # 🎯 伺服器對照表 (已移除沒有資料的克隆)
+        # 🎯 大區對照表
         self.server_map = {
             "戴摩爾克": "livegm_w02",
             "亞羅格": "livegm_w03",
@@ -21,43 +22,65 @@ class RankTracker(commands.Cog):
             "耶拉普斯": "livegm_w13",
             "賽爾齊歐": "livegm_w14"
         }
+        
+        # 🎯 活躍分流名單 (優化爬蟲效率)
+        # 告訴機器人每個大區目前「確定有開放」的分流，避免盲目撈取浪費時間
+        self.realm_map = {
+            "戴摩爾克": ["3", "4"],
+            "亞羅格": ["5"],
+            "貝爾姆特": ["1", "3"],
+            "萊涅": ["1", "2", "3", "4", "5"],
+            "困特": ["3"],
+            "修連": ["5"],
+            "伊奈司": ["1", "3"],
+            "基安": ["5"],
+            "扎爾巴爾": ["2"],
+            "黛庫爾": ["1"],
+            "耶拉普斯": ["1"],
+            "賽爾齊歐": ["1", "2"]
+        }
 
-    @commands.command(name="排名", aliases=["排行榜", "前十名"], help="查詢排行。例如: !排名 全服, !排名 25 萊涅01")
+    # 封裝一個異步撈取單一伺服器資料的函數
+    async def fetch_server_data(self, session, group_id, world_id):
+        api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
+        payload = {
+            "world_group_id": group_id,
+            "world_id": world_id,
+            "class": None
+        }
+        try:
+            async with session.post(api_url, json=payload) as response:
+                if response.status == 200:
+                    json_data = await response.json()
+                    return json_data.get("data", {}).get("gc") or []
+        except Exception:
+            pass
+        return []
+
+    @commands.command(name="排名", aliases=["排行榜", "前十名"], help="例如: !排名 全服, !排名 25 萊涅01")
     async def get_ranking(self, ctx, *args):
-        # 預設值設定：預設查 10 人、全服
         count = 10
         group_name = "全服"
         realm_num = "01"
 
         args_list = list(args)
         
-        # 1. 判斷第一個參數是不是數字 (例如輸入 25)
+        # 解析數量
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
             
-        # 數量防呆限制 (最高 50 名)
-        if count > 50:
-            count = 50
-        if count < 1:
-            count = 10
+        if count > 50: count = 50
+        if count < 1: count = 10
 
-        # 2. 取得要查詢的伺服器 (大區)
-        if len(args_list) > 0:
-            group_name = args_list.pop(0)
-            
-        # 3. 取得分流編號
-        if len(args_list) > 0:
-            realm_num = args_list.pop(0)
+        # 解析伺服器名稱
+        if len(args_list) > 0: group_name = args_list.pop(0)
+        if len(args_list) > 0: realm_num = args_list.pop(0)
 
-        # 處理「全服」查詢邏輯
         is_global = False
         if group_name in ["全服", "全部"]:
             is_global = True
-            target_group_id = None
-            target_world_id = None
             display_title = f"全伺服器 TOP {count}"
         else:
-            # 防呆：自動拆解沒打空格的伺服器名稱 (例如 "萊涅01")
             match = re.match(r"([^\d]+)(\d+)", group_name)
             if match:
                 group_name = match.group(1)
@@ -76,66 +99,74 @@ class RankTracker(commands.Cog):
             
             display_title = f"【{group_name}{realm_num}】 TOP {count}"
 
-        processing_msg = await ctx.send(f"🔍 正在撈取 {display_title} 的戰情數據...")
+        processing_msg = await ctx.send(f"🔍 正在潛入橘子主機，跨伺服器彙整 {display_title} 的戰情數據...")
 
         try:
-            api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
-            payload = {
-                "world_group_id": target_group_id,
-                "world_id": target_world_id,
-                "class": None
-            }
-            
-            response = requests.post(api_url, json=payload)
-            
-            if response.status_code == 200:
-                json_data = response.json()
-                player_list = json_data.get("data", {}).get("gc", [])
-                
-                if not player_list:
-                    return await processing_msg.edit(content=f"❌ 找不到 {display_title} 的資料。")
-
-                top_list = player_list[:count]
-                
-                # 數量 <= 10 使用精美卡片欄位排版
-                if count <= 10:
-                    embed = discord.Embed(title=f"🏆 {display_title}", color=0xffd700)
-                    for idx, p in enumerate(top_list, 1):
-                        exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
-                        server_info = f"({p.get('world_name')}) " if is_global else ""
-                        embed.add_field(
-                            name=f"第 {idx} 名：{p.get('gc_name')}",
-                            value=f"{server_info}{p.get('class_name')} | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
-                            inline=False
-                        )
-                    await processing_msg.delete()
-                    await ctx.send(embed=embed)
-                
-                # 數量 > 10 使用緊湊清單排版，避免畫面洗頻
-                else:
-                    description = ""
-                    for idx, p in enumerate(top_list, 1):
-                        exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
-                        server_info = f"[{p.get('world_name')}]" if is_global else ""
-                        line = f"`{idx:02d}.` {p.get('gc_name')} (Lv.{p.get('gc_level')}) | {exp_zhao:,.2f} 兆 {server_info}\n"
-                        
-                        # 分頁防呆 (Discord 單則訊息限 2000 字)
-                        if len(description) + len(line) > 1900:
-                            embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
-                            await ctx.send(embed=embed)
-                            description = ""
-                        description += line
+            all_players = []
+            # 啟動異步連線池
+            async with aiohttp.ClientSession() as session:
+                if is_global:
+                    tasks = []
+                    # 遍歷所有已知大區
+                    for g_name, g_id in self.server_map.items():
+                        # 使用你整理好的精準分流名單
+                        realms = self.realm_map.get(g_name, ["1", "2", "3", "4", "5"])
+                        for r in realms:
+                            w_id = f"{g_id}_r{r}"
+                            # 把撈取任務塞入排程
+                            tasks.append(self.fetch_server_data(session, g_id, w_id))
                     
-                    embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-                    embed.set_footer(text="單位：兆經驗值")
-                    await processing_msg.delete()
-                    await ctx.send(embed=embed)
+                    # 🚀 同時發射所有請求！(因為分流名單精準，所以速度會爆快)
+                    results = await asyncio.gather(*tasks)
+                    
+                    # 將各伺服器回傳的玩家清單全部倒進同一個大池子
+                    for r in results:
+                        all_players.extend(r)
+                else:
+                    # 如果只是查單一伺服器，就發一次請求就好
+                    players = await self.fetch_server_data(session, target_group_id, target_world_id)
+                    all_players.extend(players)
 
+            if not all_players:
+                return await processing_msg.edit(content=f"❌ 撈取失敗，找不到任何資料。")
+
+            # 🏆 核心邏輯：在機器人內部依照「經驗值 (gc_exp)」由高到低做全服大排序
+            all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
+            top_list = all_players[:count]
+            
+            # 排版邏輯 (兆單位格式)
+            if count <= 10:
+                embed = discord.Embed(title=f"🏆 {display_title}", color=0xffd700)
+                for idx, p in enumerate(top_list, 1):
+                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                    server_info = f"({p.get('world_name', '未知')}) " if is_global else ""
+                    embed.add_field(
+                        name=f"第 {idx} 名：{p.get('gc_name', '未知')}",
+                        value=f"{server_info}{p.get('class_name')} | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
+                        inline=False
+                    )
+                await processing_msg.delete()
+                await ctx.send(embed=embed)
             else:
-                await processing_msg.edit(content=f"⚠️ API 連線失敗 (狀態碼: {response.status_code})")
+                description = ""
+                for idx, p in enumerate(top_list, 1):
+                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                    server_info = f"[{p.get('world_name', '未知')}]" if is_global else ""
+                    line = f"`{idx:02d}.` {p.get('gc_name')} (Lv.{p.get('gc_level')}) | {exp_zhao:,.2f} 兆 {server_info}\n"
+                    
+                    if len(description) + len(line) > 1900:
+                        embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
+                        await ctx.send(embed=embed)
+                        description = ""
+                    description += line
+                
+                embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
+                embed.set_footer(text="單位：兆經驗值 | 系統：全域聚合爬蟲")
+                await processing_msg.delete()
+                await ctx.send(embed=embed)
 
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 發生錯誤：{str(e)}")
+            await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
 
 async def setup(bot):
     await bot.add_cog(RankTracker(bot))
