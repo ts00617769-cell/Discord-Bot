@@ -16,9 +16,17 @@ class LeagueTracker(commands.Cog):
     @commands.command(name="聯賽", aliases=["宇宙聯賽", "league"], help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
         
-        processing_msg = await ctx.send(f"🛰️ 正在連線至宇宙聯賽資料庫 (S0{season} - R{round_num} - 級別 {league_id})...")
+        # 💡 友善的提示訊息 (參數回顯機制)
+        hint_msg = (
+            f"🛰️ **啟動宇宙聯賽觀測站**\n"
+            f"🔍 您的查詢條件為：\n"
+            f"> 🏆 **第 {season} 賽季**\n"
+            f"> ⚔️ **第 {round_num} 回合**\n"
+            f"> 🛡️ **第 {league_id} 組** (如挑戰者1)\n"
+            f"正在潛入橘子主機撈取戰況，請稍候..."
+        )
+        processing_msg = await ctx.send(hint_msg)
 
-        # ✅ 已經替換為你剛剛抓到的真實 API 網址！
         api_url = "https://warsofprasia.beanfun.com/api/UniverseLeague/Ranking"
         
         # 動態生成 Payload 參數
@@ -45,7 +53,7 @@ class LeagueTracker(commands.Cog):
                     
             league_ranking = json_data.get("data", {}).get("league_ranking", [])
             if not league_ranking:
-                return await processing_msg.edit(content="❌ 找不到該季/回合的聯賽資料，可能尚未開打或參數錯誤。")
+                return await processing_msg.edit(content="❌ 找不到該季/回合的聯賽資料，可能尚未開打或參數輸入錯誤。")
 
             match_list = league_ranking[0].get("match", [])
             if not match_list:
@@ -93,6 +101,9 @@ class LeagueTracker(commands.Cog):
                 
                 # 為每個賽區建立獨立的 Embed 卡片
                 embed = discord.Embed(title=f"🌌 宇宙聯賽 - {match_name}", description=description, color=0x9B59B6)
+                
+                # 💡 在報表底部加上查詢參數，看起來更專業
+                embed.set_footer(text=f"查詢參數：S0{season} 賽季 | 第 {round_num} 回合 | 第 {league_id} 組")
                 embeds.append(embed)
 
             await processing_msg.delete()
