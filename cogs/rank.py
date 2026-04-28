@@ -70,7 +70,7 @@ class RankTracker(commands.Cog):
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
             
-        if count > 50: count = 50
+        if count > 100: count = 100
         if count < 1: count = 10
 
         if len(args_list) > 0: group_name = args_list.pop(0)
