@@ -6,12 +6,9 @@ import random
 import datetime
 import pytz
 import json
-import datetime
-import csv
-import re
-import json
-import datetime
 import sqlite3
+import aiohttp
+from bs4 import BeautifulSoup
 
 
 

@@ -221,3 +221,14 @@ gacha_items = [
 item_names = [item['name'] for item in gacha_items]
 item_rates = [item['rate'] for item in gacha_items]
 item_map = {item['name']: item for item in gacha_items}
+# --- 4. 活躍伺服器名單 ---
+SERVER_MAP = {
+    "戴摩爾克04": ("livegm_w01", "livegm_w01_r4"),
+    "萊涅01": ("livegm_w04", "livegm_w04_r1"),
+    "萊涅03": ("livegm_w04", "livegm_w04_r3"),
+    "萊涅04": ("livegm_w04", "livegm_w04_r4"),
+    "困特03": ("livegm_w03", "livegm_w03_r3"),
+    "伊奈司01": ("livegm_w05", "livegm_w05_r1"),
+    "基安05": ("livegm_w06", "livegm_w06_r5"),
+    "黛庫爾01": ("livegm_w07", "livegm_w07_r1")
+}

@@ -3,42 +3,9 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
-
+from game_data import SERVER_MAP
 class SubjugationCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-                # 🎯 大區對照表
-        self.server_map = {
-            "戴摩爾克": "livegm_w02",
-            "亞羅格": "livegm_w03",
-            "萊涅": "livegm_w04",
-            "貝爾姆特": "livegm_w05",
-            "困特": "livegm_w06",
-            "修連": "livegm_w07",
-            "伊奈司": "livegm_w08",
-            "基安": "livegm_w09",
-            "扎爾巴爾": "livegm_w10",
-            "黛庫爾": "livegm_w11",
-            "耶拉普斯": "livegm_w13",
-            "賽爾齊歐": "livegm_w14"
-        }
-        
-        # 🎯 活躍分流名單 (優化爬蟲效率)
-        self.realm_map = {
-            "戴摩爾克": ["3", "4"],
-            "亞羅格": ["5"],
-            "貝爾姆特": ["1", "3"],
-            "萊涅": ["1", "2", "3", "4", "5"],
-            "困特": ["3"],
-            "修連": ["5"],
-            "伊奈司": ["1", "3"],
-            "基安": ["5"],
-            "扎爾巴爾": ["2"],
-            "黛庫爾": ["1"],
-            "耶拉普斯": ["1"],
-            "賽爾齊歐": ["1", "2"]
-        }
-
+    
     async def fetch_server_data(self, session, group_id, world_id):
         """向官方 API 請求資料的底層方法"""
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
