@@ -336,5 +336,7 @@ async def real_horoscope_cached(ctx, sign: str = None):
     embed.set_footer(text=footer_text)
     
     await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
+    # 👉 加上這行，掛載測速雷達！
+    await bot.load_extension("cogs.exp_tracker")
 # ⚠️ run 永遠在最後一行
 bot.run(TOKEN)
