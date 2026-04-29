@@ -15,7 +15,7 @@ class ExpTracker(commands.Cog):
         self.setup_database()
         
         # 🚨 設定警報發送的頻道 ID
-        self.ALERT_CHANNEL_ID = 1476506457032884328 # 👉 改成你接收警報的頻道
+        self.ALERT_CHANNEL_ID = 1476506457032884328 
         self.SPEED_LIMIT = 4000 # 警報門檻：4000億
         
         self.auto_fetch_exp.start()
@@ -33,6 +33,10 @@ class ExpTracker(commands.Cog):
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)')
         self.db_conn.commit()
 
+    def cog_unload(self):
+        self.auto_fetch_exp.cancel()
+        self.db_conn.close()
+
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
@@ -40,8 +44,8 @@ class ExpTracker(commands.Cog):
             async with session.post(api_url, json=payload, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    # 🎯 只抓全服前 50 名
-                    return json_data.get("data", {}).get("gc", [])[:50]
+                    # 🎯 自動警報與測速都只抓全服前 100 名，保持效能
+                    return json_data.get("data", {}).get("gc", [])[:100]
         except Exception:
             pass
         return []
@@ -74,15 +78,15 @@ class ExpTracker(commands.Cog):
 
         time_now, time_prev = times[0][0], times[1][0]
         
-        # 計算兩次記錄之間隔了幾分鐘，用來換算成「小時時速」
         fmt = '%Y-%m-%d %H:%M:%S'
         t1 = datetime.datetime.strptime(time_now, fmt)
         t2 = datetime.datetime.strptime(time_prev, fmt)
         minutes_diff = (t1 - t2).total_seconds() / 60
         if minutes_diff <= 0: return
 
+        # ✅ 已加入 DISTINCT 防分身機制
         sql = '''
-            SELECT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
+            SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
             FROM exp_history t1
             JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
             WHERE t1.record_time = ? AND t2.record_time = ?
@@ -94,7 +98,6 @@ class ExpTracker(commands.Cog):
         for name, server, level, exp_now, exp_prev in records:
             diff = exp_now - exp_prev
             if diff > 0:
-                # 換算成每小時時速
                 hourly_speed = (diff / minutes_diff) * 60
                 speed_yi = hourly_speed / 100_000_000 # 億
                 
@@ -122,11 +125,105 @@ class ExpTracker(commands.Cog):
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="測速", help="!測速 50 全服")
+    # 📊 【查詢指令】支援自訂數量與分頁
+    @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
-        # ... (此處保留上一版本 check_exp_speed 的代碼以便手動查詢) ...
-        # 記得一樣要把掃描範圍改成 [:50] 以維持一致
-        pass
+        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        if ctx.channel.id not in allowed_channel_ids: return
+
+        self.setup_database()
+
+        count = 15 
+        args_list = list(args)
+        
+        if len(args_list) > 0 and args_list[0].isdigit():
+            count = int(args_list.pop(0))
+            
+        if count > 100: count = 100
+        if count < 1: count = 10
+
+        target_server = "".join(args_list) if args_list else "全服"
+        is_global = target_server in ["全服", "全部", "global"]
+
+        if not is_global and target_server not in SERVER_MAP:
+            valid_list = "、".join(SERVER_MAP.keys())
+            return await ctx.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
+
+        processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
+
+        self.cursor.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2')
+        times = self.cursor.fetchall()
+
+        if len(times) < 2:
+            return await processing_msg.edit(content="⚠️ 樣本不足！巡邏兵才剛啟動，請等待至少 10 分鐘。")
+
+        time_now, time_prev = times[0][0], times[1][0]
+
+        # 計算間隔時間，動態換算成「時速」
+        fmt = '%Y-%m-%d %H:%M:%S'
+        t1 = datetime.datetime.strptime(time_now, fmt)
+        t2 = datetime.datetime.strptime(time_prev, fmt)
+        minutes_diff = (t1 - t2).total_seconds() / 60
+        if minutes_diff <= 0: minutes_diff = 10 # 防呆
+
+        # ✅ 已加入 DISTINCT 防分身機制
+        sql = '''
+            SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
+            FROM exp_history t1
+            JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+            WHERE t1.record_time = ? AND t2.record_time = ?
+        '''
+        params = [time_now, time_prev]
+        if not is_global:
+            sql += " AND t1.server_name = ?"
+            params.append(target_server)
+
+        self.cursor.execute(sql, tuple(params))
+        records = self.cursor.fetchall()
+        
+        speed_data = []
+        for name, server, level, exp_now, exp_prev in records:
+            diff = exp_now - exp_prev
+            if diff > 0:
+                # 這裡將 10 分鐘的差距，放大 6 倍變成「時速」
+                hourly_speed = (diff / minutes_diff) * 60
+                speed_data.append({"name": name, "server": server, "level": level, "speed": hourly_speed})
+        
+        speed_data.sort(key=lambda x: x['speed'], reverse=True)
+        top_list = speed_data[:count] 
+
+        if not top_list:
+            return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
+
+        desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]} (約 {int(minutes_diff)} 分鐘)**\n```yaml\n"
+        embeds = [] 
+        
+        for idx, p in enumerate(top_list, 1):
+            speed_yi = p['speed'] / 100_000_000 
+            name = str(p['name'])
+            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in name)
+            name_padded = name + " " * max(0, 14 - name_width)
+            
+            srv_info = f"({p['server']})" if is_global else ""
+            line = f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | 時速:{speed_yi:>6.2f}億 {srv_info}\n"
+            
+            if len(desc) + len(line) > 1900:
+                desc += "```"
+                embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 (續)", description=desc, color=0x00ff00)
+                embeds.append(embed)
+                desc = "```yaml\n" 
+                
+            desc += line
+            
+        if desc != "```yaml\n":
+            desc += "```"
+            embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP {count}", description=desc, color=0x00ff00)
+            embed.set_footer(text="系統：全自動經驗值測速雷達 | 單位：時速/億")
+            embeds.append(embed)
+
+        await processing_msg.delete()
+        for e in embeds: 
+            await ctx.send(embed=e)
 
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))
