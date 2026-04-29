@@ -2,12 +2,14 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
-import re
 import unicodedata
 from game_data import SERVER_MAP
+
 class RankTracker(commands.Cog):
-    
-    # 使用你驗證過正常運作的連線邏輯
+    # ✅ 加回引擎
+    def __init__(self, bot):
+        self.bot = bot
+
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
@@ -20,19 +22,14 @@ class RankTracker(commands.Cog):
             pass
         return []
 
-    # 👇 這裡才是指令的大門口！
     @commands.command(name="排名", help="例如: !排名 全服, !排名 25 萊涅01")
     async def get_ranking(self, ctx, *args):
-        
-        # 🛡️ 【資安防護網】貼在這裡！一進門就先攔截檢查！
-        allowed_channel_id =[1477966312411107493, 1476506457032884328] # 👉 換成你們的頻道 ID
-        
-        if ctx.channel.id != allowed_channel_id:
-            return # 如果不是指定頻道，直接退回不理他
-        count = 10
-        group_name = "全服"
-        realm_num = "01"
+        # 🛡️ 【資安防護網】修正為 not in
+        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        if ctx.channel.id not in allowed_channel_ids:
+            return 
 
+        count = 10
         args_list = list(args)
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
@@ -40,31 +37,20 @@ class RankTracker(commands.Cog):
         if count > 100: count = 100
         if count < 1: count = 10
 
-        if len(args_list) > 0: group_name = args_list.pop(0)
-        if len(args_list) > 0: realm_num = args_list.pop(0)
+        # ✅ 新版極簡字串處理 (支援「萊涅01」或「萊涅 01」)
+        target_server = "".join(args_list) if args_list else "全服"
 
         is_global = False
-        if group_name in ["全服", "全部"]:
+        if target_server in ["全服", "全部", ""]:
             is_global = True
             display_title = f"全伺服器 TOP {count}"
         else:
-            match = re.match(r"([^\d]+)(\d+)", group_name)
-            if match:
-                group_name = match.group(1)
-                realm_num = match.group(2)
-
-            target_group_id = self.server_map.get(group_name)
-            if not target_group_id:
-                valid_list = "、".join(self.server_map.keys())
-                return await ctx.send(f"❌ 找不到大區「{group_name}」。支援：{valid_list} 或 全服")
+            if target_server not in SERVER_MAP:
+                valid_list = "、".join(SERVER_MAP.keys())
+                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
             
-            try:
-                r_num = str(int(realm_num))
-                target_world_id = f"{target_group_id}_r{r_num}"
-            except ValueError:
-                return await ctx.send("❌ 分流編號請輸入數字")
-            
-            display_title = f"【{group_name}{realm_num}】 TOP {count}"
+            target_group_id, target_world_id = SERVER_MAP[target_server]
+            display_title = f"【{target_server}】 TOP {count}"
 
         processing_msg = await ctx.send(f"🔍 正在潛入橘子主機，彙整 {display_title} 戰情數據...")
 
@@ -72,13 +58,8 @@ class RankTracker(commands.Cog):
             all_players = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
-                    tasks = []
-                    for g_name, g_id in self.server_map.items():
-                        realms = self.realm_map.get(g_name, ["1", "2", "3", "4", "5"])
-                        for r in realms:
-                            w_id = f"{g_id}_r{r}"
-                            tasks.append(self.fetch_server_data(session, g_id, w_id))
-                    
+                    # ✅ 新版 O(1) 極速全服掃描
+                    tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results:
                         all_players.extend(r)
@@ -110,11 +91,9 @@ class RankTracker(commands.Cog):
                     exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
                     server_info = f"[{p.get('world_name', '未知')}]" if is_global else ""
                     
-                    # 🛡️ 關鍵防蟲：強制將 name 轉換為字串，避免 API 吐 null 導致崩潰
                     name = str(p.get('gc_name') or "未知")
                     level_str = f"Lv.{p.get('gc_level', '?')}"
                     
-                    # 計算寬度並補空白
                     name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in name)
                     name_padded = name + " " * max(0, 16 - name_width)
                     
@@ -129,7 +108,7 @@ class RankTracker(commands.Cog):
                 
                 description += "```"
                 embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-                embed.set_footer(text="單位：兆經驗值 | 系統：全域聚合爬蟲 (等寬對齊版)")
+                embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達")
                 await processing_msg.delete()
                 await ctx.send(embed=embed)
 
