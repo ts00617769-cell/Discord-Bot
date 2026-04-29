@@ -10,13 +10,17 @@ from game_data import SERVER_MAP
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db_conn = sqlite3.connect('prasia_data.db')
+        # 加上 check_same_thread=False 防止多工衝突
+        self.db_conn = sqlite3.connect('prasia_data.db', check_same_thread=False)
         self.cursor = self.db_conn.cursor()
         self.setup_database()
         
-        # 🚨 設定警報發送的頻道 ID
+        # 🚨 警報設定
         self.ALERT_CHANNEL_ID = 1476506457032884328 
         self.SPEED_LIMIT = 4000 # 警報門檻：4000億
+        
+        # 🎛️ 警報開關 (預設為 False：關閉狀態，不會吵人)
+        self.alerts_enabled = False 
         
         self.auto_fetch_exp.start()
 
@@ -44,13 +48,12 @@ class ExpTracker(commands.Cog):
             async with session.post(api_url, json=payload, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    # 🎯 自動警報與測速都只抓全服前 100 名，保持效能
-                    return json_data.get("data", {}).get("gc", [])[:100]
+                    return json_data.get("data", {}).get("gc", [])[:50]
         except Exception:
             pass
         return []
 
-    # 🤖 【自動化哨兵】每 10 分鐘掃描一次
+    # 🤖 【自動化哨兵】每 10 分鐘背景靜默抄表
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
         now_time = datetime.datetime.now().replace(second=0, microsecond=0)
@@ -67,11 +70,11 @@ class ExpTracker(commands.Cog):
                 self.db_conn.commit()
                 await asyncio.sleep(0.5)
         
-        # 執行即時比對警報
-        await self.check_for_alerts(now_time)
+        # 🛡️ 只有在指揮官「打開開關」時，才執行警報推播
+        if self.alerts_enabled:
+            await self.check_for_alerts(now_time)
 
     async def check_for_alerts(self, current_time):
-        """比對最近兩次紀錄，若換算時速 > 4000億則發報"""
         self.cursor.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2')
         times = self.cursor.fetchall()
         if len(times) < 2: return
@@ -84,7 +87,6 @@ class ExpTracker(commands.Cog):
         minutes_diff = (t1 - t2).total_seconds() / 60
         if minutes_diff <= 0: return
 
-        # ✅ 已加入 DISTINCT 防分身機制
         sql = '''
             SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
             FROM exp_history t1
@@ -99,7 +101,7 @@ class ExpTracker(commands.Cog):
             diff = exp_now - exp_prev
             if diff > 0:
                 hourly_speed = (diff / minutes_diff) * 60
-                speed_yi = hourly_speed / 100_000_000 # 億
+                speed_yi = hourly_speed / 100_000_000 
                 
                 if speed_yi >= self.SPEED_LIMIT:
                     alert_list.append({
@@ -125,14 +127,31 @@ class ExpTracker(commands.Cog):
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
 
-    # 📊 【查詢指令】支援自訂數量與分頁
+    # 🎛️ 【新增指令】雷達警報開關
+    @commands.command(name="警報", help="開啟或關閉自動超速警報 (用法: !警報 開 或 !警報 關)")
+    async def toggle_alerts(self, ctx, state: str = None):
+        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        if ctx.channel.id not in allowed_channel_ids: 
+            return await ctx.send(f"❌ 頻道未授權，此頻道 ID 為：{ctx.channel.id}")
+
+        if state == "開" or state == "on":
+            self.alerts_enabled = True
+            await ctx.send("🚨 **【自動超速警報】已開啟！** \n系統將每 10 分鐘巡邏一次，有人飆車破 4000 億就會立刻通報。")
+        elif state == "關" or state == "off":
+            self.alerts_enabled = False
+            await ctx.send("🔕 **【自動超速警報】已關閉！** \n雷達已切換為「靜默收集模式」，不會再吵你，但你隨時可輸入 `!測速` 調閱資料。")
+        else:
+            current_state = "🟢 開啟中 (會推播)" if self.alerts_enabled else "🔴 關閉中 (靜默模式)"
+            await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開` 或 `!警報 關` 來切換。")
+
+    # 📊 手動測速指令維持不變
     @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        if ctx.channel.id not in allowed_channel_ids: return
+        if ctx.channel.id not in allowed_channel_ids: 
+            return await ctx.send(f"❌ 頻道未授權，此頻道 ID 為：{ctx.channel.id}")
 
         self.setup_database()
-
         count = 15 
         args_list = list(args)
         
@@ -158,15 +177,13 @@ class ExpTracker(commands.Cog):
             return await processing_msg.edit(content="⚠️ 樣本不足！巡邏兵才剛啟動，請等待至少 10 分鐘。")
 
         time_now, time_prev = times[0][0], times[1][0]
-
-        # 計算間隔時間，動態換算成「時速」
+        
         fmt = '%Y-%m-%d %H:%M:%S'
         t1 = datetime.datetime.strptime(time_now, fmt)
         t2 = datetime.datetime.strptime(time_prev, fmt)
         minutes_diff = (t1 - t2).total_seconds() / 60
-        if minutes_diff <= 0: minutes_diff = 10 # 防呆
+        if minutes_diff <= 0: minutes_diff = 10 
 
-        # ✅ 已加入 DISTINCT 防分身機制
         sql = '''
             SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
             FROM exp_history t1
@@ -185,7 +202,6 @@ class ExpTracker(commands.Cog):
         for name, server, level, exp_now, exp_prev in records:
             diff = exp_now - exp_prev
             if diff > 0:
-                # 這裡將 10 分鐘的差距，放大 6 倍變成「時速」
                 hourly_speed = (diff / minutes_diff) * 60
                 speed_data.append({"name": name, "server": server, "level": level, "speed": hourly_speed})
         
