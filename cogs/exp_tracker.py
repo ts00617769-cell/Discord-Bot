@@ -41,7 +41,7 @@ class ExpTracker(commands.Cog):
             async with session.post(api_url, json=payload, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    return json_data.get("data", {}).get("gc", [])[:100]
+                    return json_data.get("data", {}).get("gc", [])[:200]
         except Exception:
             pass
         return []
@@ -67,21 +67,36 @@ class ExpTracker(commands.Cog):
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="測速", help="!測速 全服 或 !測速 萊涅01")
-    async def check_exp_speed(self, ctx, target_server: str = "全服"):
+    @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
+    async def check_exp_speed(self, ctx, *args):
+        # 🛡️ 【資安防護網】
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids: return
 
         self.setup_database()
+
+        # --- 📊 參數解析邏輯 (支援自訂數量) ---
+        count = 15 # 預設顯示 15 筆
+        args_list = list(args)
+        
+        # 如果第一個參數是數字，就把它拿來當作顯示數量
+        if len(args_list) > 0 and args_list[0].isdigit():
+            count = int(args_list.pop(0))
+            
+        # 安全防護：最多顯示 100 筆，最少顯示 10 筆
+        if count > 100: count = 100
+        if count < 1: count = 10
+
+        target_server = "".join(args_list) if args_list else "全服"
         is_global = target_server in ["全服", "全部", "global"]
 
         if not is_global and target_server not in SERVER_MAP:
             valid_list = "、".join(SERVER_MAP.keys())
             return await ctx.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
 
-        processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全服' if is_global else target_server} 練功時速...")
+        processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
 
-        # 找尋資料庫中最新的兩個全球記錄時間
+        # 找尋資料庫中最新的兩個記錄時間
         self.cursor.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2')
         times = self.cursor.fetchall()
 
@@ -112,13 +127,15 @@ class ExpTracker(commands.Cog):
                 speed_data.append({"name": name, "server": server, "level": level, "speed": diff})
         
         speed_data.sort(key=lambda x: x['speed'], reverse=True)
-        top_list = speed_data[:15]
+        top_list = speed_data[:count] # 👈 根據你輸入的數量來決定印出幾筆
 
         if not top_list:
             return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
 
-        # 格式化輸出
+        # --- ✂️ 分頁防護機制 (自動避開 Discord 字數限制) ---
         desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]}**\n```yaml\n"
+        embeds = [] # 用來裝多個卡片的清單
+        
         for idx, p in enumerate(top_list, 1):
             speed_yi = p['speed'] / 100_000_000 # 億
             name = str(p['name'])
@@ -126,14 +143,25 @@ class ExpTracker(commands.Cog):
             name_padded = name + " " * max(0, 14 - name_width)
             
             srv_info = f"({p['server']})" if is_global else ""
-            desc += f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | {speed_yi:>6.2f}億 {srv_info}\n"
-        desc += "```"
+            line = f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | {speed_yi:>6.2f}億 {srv_info}\n"
+            
+            # 如果加上這行字數會爆表，就先把現有的文字包成一張卡片
+            if len(desc) + len(line) > 1900:
+                desc += "```"
+                embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 (續)", description=desc, color=0x00ff00)
+                embeds.append(embed)
+                desc = "```yaml\n" # 開啟下一張卡片的文字框
+                
+            desc += line
+            
+        # 處理最後剩餘的文字
+        if desc != "```yaml\n":
+            desc += "```"
+            embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP {count}", description=desc, color=0x00ff00)
+            embed.set_footer(text="系統：全自動經驗值測速雷達 | 單位：時速/億")
+            embeds.append(embed)
 
-        embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP 15", description=desc, color=0x00ff00)
-        embed.set_footer(text="系統：全自動經驗值測速雷達 | 單位：時速/億")
-        
         await processing_msg.delete()
-        await ctx.send(embed=embed)
-
-async def setup(bot):
-    await bot.add_cog(ExpTracker(bot))
+        # 一次把所有卡片 (包含續集) 發送出去
+        for e in embeds: 
+            await ctx.send(embed=e)
