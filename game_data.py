@@ -223,22 +223,22 @@ item_rates = [item['rate'] for item in gacha_items]
 item_map = {item['name']: item for item in gacha_items}
 # 伺服器映射字典 (Server Mapping Dictionary)
 SERVER_MAP = {
-    "戴摩爾克04": ("livegm_w01", "livegm_w01_r4"),
+    "戴摩爾克04": ("livegm_w02", "livegm_w02_r4"), # 👉 把 w01 改成 w02
     "萊涅01": ("livegm_w04", "livegm_w04_r1"),
     "萊涅03": ("livegm_w04", "livegm_w04_r3"),
     "萊涅04": ("livegm_w04", "livegm_w04_r4"),
     "困特03": ("livegm_w03", "livegm_w03_r3"),
     "伊奈司01": ("livegm_w05", "livegm_w05_r1"),
     "基安05": ("livegm_w06", "livegm_w06_r5"),
-    "黛庫爾01": ("livegm_w11", "livegm_w11_r1") # 👉 修正為官方第11大區代碼
+    "黛庫爾01": ("livegm_w11", "livegm_w11_r1") 
 }
 
 # 建立大區映射，方便處理需要輸入群組 ID 的情況
 GROUP_MAP = {
-    "livegm_w01": "戴摩爾克",
+    "livegm_w02": "戴摩爾克", # 👉 這裡也把 w01 改成 w02
     "livegm_w03": "困特",
     "livegm_w04": "萊涅",
     "livegm_w05": "伊奈司",
     "livegm_w06": "基安",
-    "livegm_w11": "黛庫爾" # 👉 修正為 w11
+    "livegm_w11": "黛庫爾"
 }
