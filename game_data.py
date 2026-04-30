@@ -227,9 +227,9 @@ SERVER_MAP = {
     "萊涅01": ("livegm_w04", "livegm_w04_r1"),
     "萊涅03": ("livegm_w04", "livegm_w04_r3"),
     "萊涅04": ("livegm_w04", "livegm_w04_r4"),
-    "困特03": ("livegm_w03", "livegm_w03_r3"),
-    "伊奈司01": ("livegm_w05", "livegm_w05_r1"),
-    "基安05": ("livegm_w06", "livegm_w06_r5"),
+    "困特03": ("livegm_w06", "livegm_w06_r3"),
+    "伊奈司01": ("livegm_w08", "livegm_w08_r1"),
+    "基安05": ("livegm_w09", "livegm_w09_r5"),
     "黛庫爾01": ("livegm_w11", "livegm_w11_r1") 
 }
 
@@ -238,7 +238,7 @@ GROUP_MAP = {
     "livegm_w02": "戴摩爾克", # 👉 這裡也把 w01 改成 w02
     "livegm_w03": "困特",
     "livegm_w04": "萊涅",
-    "livegm_w05": "伊奈司",
-    "livegm_w06": "基安",
+    "livegm_w08": "伊奈司",
+    "livegm_w09": "基安",
     "livegm_w11": "黛庫爾"
 }
