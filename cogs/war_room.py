@@ -51,8 +51,8 @@ class WarRoom(commands.Cog):
             
             # ⚠️ 注意：請確認你的資料表名稱是否為 speed_records，時間欄位是否為 timestamp
             cursor.execute("""
-                DELETE FROM speed_records 
-                WHERE timestamp < datetime('now', '-30 days')
+                DELETE FROM exp_history 
+                WHERE record_time < datetime('now', '-30 days')
             """)
             
             deleted_rows = cursor.rowcount
