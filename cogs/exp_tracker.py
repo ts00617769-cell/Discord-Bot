@@ -251,13 +251,15 @@ class ExpTracker(commands.Cog):
 
         self.setup_database() # 確保連線正常
         
-        # 1. 定義時間範圍：抓取今天 22:55 到 23:35 之間的最早與最晚兩筆紀錄
+        # 1. 嚴格定義時間範圍：只抓取今天 23:00 到 23:30 「之內」的紀錄
         tz = datetime.timezone(datetime.timedelta(hours=8))
         today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
         
-        time_start_query = f"{today_str} 22:55:00"
-        time_end_query = f"{today_str} 23:35:00"
+        # ⛔ 絕對邊界設定：絕不跨越 23:00 以前，也不超過 23:30 以後
+        time_start_query = f"{today_str} 23:00:00"
+        time_end_query = f"{today_str} 23:30:00"
 
+        # 使用 MIN 和 MAX 抓取「這個合法區間內」的第一筆與最後一筆資料
         self.cursor.execute('''
             SELECT MIN(record_time), MAX(record_time) 
             FROM exp_history 
