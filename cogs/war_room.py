@@ -32,8 +32,7 @@ class WarRoom(commands.Cog):
         channel = self.bot.get_channel(self.log_channel_id)
         if channel:
             error_msg = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-            await channel.send(f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`{ctx.message.content}`\n```python\n{error_msg[:1900]}\n
-```")
+            await channel.send(f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`{ctx.message.content}`\n```python\n{error_msg[:1900]}\n```")
 
     # ==========================================
     # 2. 自動化排程任務 (Tasks)
