@@ -326,8 +326,7 @@ class ExpTracker(commands.Cog):
                 if len(full_text) > 900:
                     full_text = full_text[:900] + "\n... (名單過長已截斷)"
                     
-                value_text = "```yaml\n" + full_text + "\n
-```"
+                value_text = "```yaml\n" + full_text + "\n```"
                 
             # 判斷敵我陣營給予不同圖示
             icon = "⚔️ 敵軍" if server in ["萊涅04", "黛庫爾01"] else "🛡️ 友軍"
