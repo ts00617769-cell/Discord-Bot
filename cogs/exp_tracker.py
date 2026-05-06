@@ -240,14 +240,14 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         for e in embeds: 
             await ctx.send(embed=e)
-    @commands.command(name="星光點名", help="檢驗今日 23:00~23:30 星光解放戰出席狀況 (經驗增幅 500億~1兆)")
+    @commands.command(name="星光點名", help="檢驗今日 23:00~23:30 星光解放戰出席狀況 (時速落於 500億~1兆)")
     async def starlight_attendance(self, ctx):
         # 🛡️ 權限防護網
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids: 
             return await ctx.send(f"❌ 頻道未授權。")
 
-        processing_msg = await ctx.send("🛰️ 啟動星光解放戰點名系統，正在比對 23:00 ~ 23:30 的戰情資料...")
+        processing_msg = await ctx.send("🛰️ 啟動星光解放戰點名系統，正在換算 23:00 ~ 23:30 區間的標準時速...")
 
         self.setup_database() # 確保連線正常
         
@@ -255,11 +255,9 @@ class ExpTracker(commands.Cog):
         tz = datetime.timezone(datetime.timedelta(hours=8))
         today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
         
-        # ⛔ 絕對邊界設定：絕不跨越 23:00 以前，也不超過 23:30 以後
         time_start_query = f"{today_str} 23:00:00"
         time_end_query = f"{today_str} 23:30:00"
 
-        # 使用 MIN 和 MAX 抓取「這個合法區間內」的第一筆與最後一筆資料
         self.cursor.execute('''
             SELECT MIN(record_time), MAX(record_time) 
             FROM exp_history 
@@ -268,13 +266,19 @@ class ExpTracker(commands.Cog):
         
         times = self.cursor.fetchone()
         
-        # 確保有抓到資料，且時間點不重複
         if not times or not times[0] or not times[1] or times[0] == times[1]:
             return await processing_msg.edit(content="❌ 找不到今日 23:00 ~ 23:30 的完整區間資料。請確認目前時間是否已過 23:30，或當時雷達是否有正常運作。")
             
         start_time, end_time = times[0], times[1]
 
-        # 2. 執行核心 SQL 邏輯：篩選條件與目標伺服器
+        # ✅ 新增：精準計算雷達實際捕捉到的時間差 (分鐘)
+        fmt = '%Y-%m-%d %H:%M:%S'
+        t_start = datetime.datetime.strptime(start_time, fmt)
+        t_end = datetime.datetime.strptime(end_time, fmt)
+        minutes_diff = (t_end - t_start).total_seconds() / 60
+        if minutes_diff <= 0: minutes_diff = 30 # 防呆機制
+
+        # 2. 執行核心 SQL 邏輯 (先抽出原始差值)
         target_servers = ['萊涅01', '萊涅03', '萊涅04', '黛庫爾01']
         placeholders = ','.join('?' * len(target_servers))
         
@@ -284,51 +288,53 @@ class ExpTracker(commands.Cog):
             JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
             WHERE t1.record_time = ? AND t2.record_time = ?
             AND t1.server_name IN ({placeholders})
-            AND (t2.exp - t1.exp) >= 50000000000 
-            AND (t2.exp - t1.exp) <= 1000000000000
         '''
         
         params = [start_time, end_time] + target_servers
         self.cursor.execute(sql, params)
         records = self.cursor.fetchall()
         
-        # 3. 資料分類與統計
+        # 3. 資料分類與「標準時速」過濾
         results = {'萊涅01': [], '萊涅03': [], '萊涅04': [], '黛庫爾01': []}
         for server, player, diff in records:
-            if server in results:
-                diff_yi = diff / 100_000_000 # 換算成億
-                results[server].append((player, diff_yi))
+            if server in results and diff > 0:
+                # ✅ 將任意區間的經驗值，嚴格換算成「每小時時速」
+                hourly_speed = (diff / minutes_diff) * 60
+                
+                # 🎯 條件：標準時速介於 500億 到 1兆 之間，才算及格
+                if 50000000000 <= hourly_speed <= 1000000000000:
+                    speed_yi = hourly_speed / 100_000_000 # 轉成億
+                    results[server].append((player, speed_yi))
                 
         # 4. 產出戰情報表
         embed = discord.Embed(
             title="✨ 星光解放戰 活躍與出席檢驗", 
-            description=f"📊 **比對區間**：`{start_time[11:16]}` ~ `{end_time[11:16]}`\n🎯 **條件**：經驗值增幅落於 **500億 ~ 1兆** 之間", 
+            description=f"📊 **比對區間**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **條件**：練功時速落於 **500億 ~ 1兆** 之間", 
             color=0xf1c40f
         )
         
         for server in target_servers:
             players = results[server]
-            players.sort(key=lambda x: x[1], reverse=True) # 依經驗獲取量由高至低排序
+            players.sort(key=lambda x: x[1], reverse=True) # 依時速由高至低排序
             count = len(players)
             
             if count == 0:
                 value_text = "無人符合條件 (或全員不在榜上)"
             else:
                 lines = []
-                for p_name, p_diff in players:
+                for p_name, p_speed in players:
                     # 統一對齊排版
                     name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
                     name_padded = str(p_name) + " " * max(0, 14 - name_width)
-                    lines.append(f"• {name_padded} (+{p_diff:,.0f}億)")
+                    # 顯示改為時速
+                    lines.append(f"• {name_padded} (時速 {p_speed:,.0f}億)")
                     
-                # 限制單一欄位字數，避免 Discord 報錯
                 full_text = "\n".join(lines)
                 if len(full_text) > 900:
                     full_text = full_text[:900] + "\n... (名單過長已截斷)"
                     
                 value_text = "```yaml\n" + full_text + "\n```"
                 
-            # 判斷敵我陣營給予不同圖示
             icon = "⚔️ 敵軍" if server in ["萊涅04", "黛庫爾01"] else "🛡️ 友軍"
             embed.add_field(name=f"{icon} {server} (共 {count} 人)", value=value_text, inline=False)
             
