@@ -240,23 +240,31 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         for e in embeds: 
             await ctx.send(embed=e)
-    @commands.command(name="星光點名", help="檢驗今日 23:00~23:30 星光解放戰出席狀況 (時速落於 500億~1兆)")
-    async def starlight_attendance(self, ctx):
+    @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
+    async def starlight_attendance(self, ctx, target_date: str = None):
         # 🛡️ 權限防護網
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids: 
             return await ctx.send(f"❌ 頻道未授權。")
 
-        processing_msg = await ctx.send("🛰️ 啟動星光解放戰點名系統，正在換算 23:00 ~ 23:30 區間的標準時速...")
+        # 1. 處理時間與日期邏輯
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        if target_date:
+            # 如果有輸入日期，就採用輸入的日期 (格式如 2026-05-05)
+            query_date = target_date
+            display_date = f"歷史調閱 ({query_date})"
+        else:
+            # 沒輸入就預設為今天
+            query_date = datetime.datetime.now(tz).strftime('%Y-%m-%d')
+            display_date = "今日"
+
+        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在換算 **{display_date}** 23:00 ~ 23:30 區間的標準時速...")
 
         self.setup_database() # 確保連線正常
         
-        # 1. 嚴格定義時間範圍：只抓取今天 23:00 到 23:30 「之內」的紀錄
-        tz = datetime.timezone(datetime.timedelta(hours=8))
-        today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
-        
-        time_start_query = f"{today_str} 23:00:00"
-        time_end_query = f"{today_str} 23:30:00"
+        # 嚴格鐵閘門：只抓取該日期的 23:00 到 23:30 「之內」的紀錄
+        time_start_query = f"{query_date} 23:00:00"
+        time_end_query = f"{query_date} 23:30:00"
 
         self.cursor.execute('''
             SELECT MIN(record_time), MAX(record_time) 
@@ -267,18 +275,18 @@ class ExpTracker(commands.Cog):
         times = self.cursor.fetchone()
         
         if not times or not times[0] or not times[1] or times[0] == times[1]:
-            return await processing_msg.edit(content="❌ 找不到今日 23:00 ~ 23:30 的完整區間資料。請確認目前時間是否已過 23:30，或當時雷達是否有正常運作。")
+            return await processing_msg.edit(content=f"❌ 找不到 {query_date} 23:00 ~ 23:30 的完整區間資料。請確認當時雷達是否有正常運作。")
             
         start_time, end_time = times[0], times[1]
 
-        # ✅ 新增：精準計算雷達實際捕捉到的時間差 (分鐘)
+        # 精準計算雷達實際捕捉到的時間差 (分鐘)
         fmt = '%Y-%m-%d %H:%M:%S'
         t_start = datetime.datetime.strptime(start_time, fmt)
         t_end = datetime.datetime.strptime(end_time, fmt)
         minutes_diff = (t_end - t_start).total_seconds() / 60
-        if minutes_diff <= 0: minutes_diff = 30 # 防呆機制
+        if minutes_diff <= 0: minutes_diff = 30 
 
-        # 2. 執行核心 SQL 邏輯 (先抽出原始差值)
+        # 2. 執行核心 SQL 邏輯 
         target_servers = ['萊涅01', '萊涅03', '萊涅04', '黛庫爾01']
         placeholders = ','.join('?' * len(target_servers))
         
@@ -298,18 +306,18 @@ class ExpTracker(commands.Cog):
         results = {'萊涅01': [], '萊涅03': [], '萊涅04': [], '黛庫爾01': []}
         for server, player, diff in records:
             if server in results and diff > 0:
-                # ✅ 將任意區間的經驗值，嚴格換算成「每小時時速」
+                # 將任意區間的經驗值，嚴格換算成「每小時時速」
                 hourly_speed = (diff / minutes_diff) * 60
                 
-                # 🎯 條件：標準時速介於 500億 到 1兆 之間，才算及格
+                # 條件：標準時速介於 500億 到 1兆 之間
                 if 50000000000 <= hourly_speed <= 1000000000000:
                     speed_yi = hourly_speed / 100_000_000 # 轉成億
                     results[server].append((player, speed_yi))
                 
         # 4. 產出戰情報表
         embed = discord.Embed(
-            title="✨ 星光解放戰 活躍與出席檢驗", 
-            description=f"📊 **比對區間**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **條件**：練功時速落於 **500億 ~ 1兆** 之間", 
+            title=f"✨ 星光解放戰 出席檢驗 {display_date}", 
+            description=f"📊 **實際採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **及格門檻**：練功時速落於 **500億 ~ 1兆** 之間", 
             color=0xf1c40f
         )
         
@@ -326,7 +334,6 @@ class ExpTracker(commands.Cog):
                     # 統一對齊排版
                     name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
                     name_padded = str(p_name) + " " * max(0, 14 - name_width)
-                    # 顯示改為時速
                     lines.append(f"• {name_padded} (時速 {p_speed:,.0f}億)")
                     
                 full_text = "\n".join(lines)
