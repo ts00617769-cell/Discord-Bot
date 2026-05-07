@@ -338,11 +338,5 @@ async def horoscope(ctx, sign: str):
     embed.set_footer(text=footer_text)
     
     await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
-
-    except Exception as e:
-        print(f"爬蟲報錯: {e}")
-        await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
-        # 🔧 修正 2：移除了會報錯的 conn.close()
-        return
 # ⚠️ run 永遠在最後一行
 bot.run(TOKEN)
