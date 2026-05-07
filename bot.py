@@ -251,7 +251,7 @@ async def daily_tarot(ctx):
     
     await ctx.send(embed=embed)
 # --- 11. 指令：真實星座運勢 (SQLite 快取版 + Big5 強制破譯) ---
-@bot.command(name="運勢")
+@bot.command(name="星座")
 async def horoscope(ctx, sign: str): # 🔧 修正 1：刪除了 self
     # 1. 建立星座對照表
     zodiac_map = {
