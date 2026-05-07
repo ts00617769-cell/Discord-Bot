@@ -296,8 +296,11 @@ async def real_horoscope_cached(ctx, sign: str = None):
         }
         
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=10) as response:
+            # 1. 先建立一個不驗證 SSL 的連線器
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
+                async with session.get(url) as response:
                     response.raise_for_status() 
                     # 💡 終極正解：用 utf-8 解碼，並「強制忽略」網頁裡寫壞的字元！
                     html_bytes = await response.read()
