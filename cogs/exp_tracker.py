@@ -250,17 +250,15 @@ class ExpTracker(commands.Cog):
         # 1. 處理時間與日期邏輯
         tz = datetime.timezone(datetime.timedelta(hours=8))
         if target_date:
-            # 如果有輸入日期，就採用輸入的日期 (格式如 2026-05-05)
             query_date = target_date
             display_date = f"歷史調閱 ({query_date})"
         else:
-            # 沒輸入就預設為今天
             query_date = datetime.datetime.now(tz).strftime('%Y-%m-%d')
             display_date = "今日"
 
-        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在換算 **{display_date}** 23:00 ~ 23:30 區間的標準時速...")
+        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在進行 **全伺服器** {display_date} 23:00 ~ 23:30 區間掃描...")
 
-        self.setup_database() # 確保連線正常
+        self.setup_database() 
         
         # 嚴格鐵閘門：只抓取該日期的 23:00 到 23:30 「之內」的紀錄
         time_start_query = f"{query_date} 23:00:00"
@@ -286,49 +284,48 @@ class ExpTracker(commands.Cog):
         minutes_diff = (t_end - t_start).total_seconds() / 60
         if minutes_diff <= 0: minutes_diff = 30 
 
-        # 2. 執行核心 SQL 邏輯 
-        target_servers = ['萊涅01', '萊涅03', '萊涅04', '黛庫爾01']
-        placeholders = ','.join('?' * len(target_servers))
-        
-        sql = f'''
+        # 2. 執行核心 SQL 邏輯 (✨ 無差別全服掃描，移除指定伺服器限制)
+        sql = '''
             SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp) as exp_diff
             FROM exp_history t1
             JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
             WHERE t1.record_time = ? AND t2.record_time = ?
-            AND t1.server_name IN ({placeholders})
         '''
         
-        params = [start_time, end_time] + target_servers
-        self.cursor.execute(sql, params)
+        self.cursor.execute(sql, (start_time, end_time))
         records = self.cursor.fetchall()
         
-        # 3. 資料分類與「標準時速」過濾
-        results = {'萊涅01': [], '萊涅03': [], '萊涅04': [], '黛庫爾01': []}
+        # 3. 資料分類與「標準時速」過濾 (✨ 動態生成伺服器清單)
+        results = {}
+        
         for server, player, diff in records:
-            if server in results and diff > 0:
-                # 將任意區間的經驗值，嚴格換算成「每小時時速」
+            if diff > 0:
                 hourly_speed = (diff / minutes_diff) * 60
                 
-                # 條件：標準時速介於 500億 到 1兆 之間
-                if 50000000000 <= hourly_speed <= 1000000000000:
+                # 🎯 條件：標準時速介於 1000億 到 1.5兆 之間
+                if 100000000000 <= hourly_speed <= 1500000000000:
                     speed_yi = hourly_speed / 100_000_000 # 轉成億
+                    # 如果這個伺服器還沒有建立名單，就初始化它
+                    if server not in results:
+                        results[server] = []
                     results[server].append((player, speed_yi))
                 
         # 4. 產出戰情報表
         embed = discord.Embed(
-            title=f"✨ 星光解放戰 出席檢驗 {display_date}", 
-            description=f"📊 **實際採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **及格門檻**：練功時速落於 **500億 ~ 1兆** 之間", 
+            title=f"✨ 星光解放戰 全服出席檢驗 {display_date}", 
+            description=f"📊 **實際採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **及格門檻**：練功時速落於 **1000億 ~ 1.5兆** 之間", 
             color=0xf1c40f
         )
         
-        for server in target_servers:
-            players = results[server]
-            players.sort(key=lambda x: x[1], reverse=True) # 依時速由高至低排序
-            count = len(players)
-            
-            if count == 0:
-                value_text = "無人符合條件 (或全員不在榜上)"
-            else:
+        if not results:
+            embed.add_field(name="狀態報告", value="全服目前無任何玩家符合時速條件。", inline=False)
+        else:
+            # ✨ 將有資料的伺服器依照名稱排序印出
+            for server in sorted(results.keys()):
+                players = results[server]
+                players.sort(key=lambda x: x[1], reverse=True) # 依時速由高至低排序
+                count = len(players)
+                
                 lines = []
                 for p_name, p_speed in players:
                     # 統一對齊排版
@@ -342,8 +339,7 @@ class ExpTracker(commands.Cog):
                     
                 value_text = "```yaml\n" + full_text + "\n```"
                 
-            icon = "⚔️ 敵軍" if server in ["萊涅04", "黛庫爾01"] else "🛡️ 友軍"
-            embed.add_field(name=f"{icon} {server} (共 {count} 人)", value=value_text, inline=False)
+                embed.add_field(name=f"🌐 {server} (共 {count} 人)", value=value_text, inline=False)
             
         await processing_msg.delete()
         await ctx.send(embed=embed)
