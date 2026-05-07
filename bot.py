@@ -250,67 +250,99 @@ async def daily_tarot(ctx):
     embed.set_footer(text="※ 命運掌握在自己手中，塔羅僅指引方向。")
     
     await ctx.send(embed=embed)
-# --- 11. 指令：真實星座運勢 (SQLite 快取版 + Big5 強制破譯) ---
-@bot.command(name="星座")
-async def horoscope(ctx, sign: str): # 🔧 修正 1：刪除了 self
-    # 1. 建立星座對照表
+# --- 11. 指令：真實星座運勢 (含資料庫快取機制) ---
+@bot.command(name="星座", aliases=["運勢"])
+async def horoscope(ctx, sign: str):
     zodiac_map = {
         "牡羊座": 0, "金牛座": 1, "雙子座": 2, "巨蟹座": 3,
         "獅子座": 4, "處女座": 5, "天秤座": 6, "天蠍座": 7,
         "射手座": 8, "摩羯座": 9, "水瓶座": 10, "雙魚座": 11
     }
 
-    # 2. 將文字轉換為 ID
     sign_id = zodiac_map.get(sign)
-
     if sign_id is None:
-        return await ctx.send("❌ 請輸入正確的星座名稱（例如：!運勢 牡羊座）")
+        return await ctx.send("❌ 請輸入正確的星座名稱（例如：!星座 牡羊座）")
 
-    loading_msg = await ctx.send(f"🔮 正在觀測 {sign} 的星象...")
+    # 1. 取得台灣時間的「今天日期」
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
 
-    try:
-        # 3. 建立不驗證 SSL 的連線器
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
-            
-            async with session.get(url) as response:
-                response.raise_for_status() 
-                # 用 utf-8 解碼，並「強制忽略」網頁裡寫壞的字元
-                html_bytes = await response.read()
-                html = html_bytes.decode('utf-8', errors='ignore')
-
-        # 4. 開始解析 HTML
-        soup = BeautifulSoup(html, 'html.parser')
-        today_content = soup.find('div', class_='TODAY_CONTENT')
-        
-        if today_content:
-            raw_text = today_content.text.strip()
-            # 這裡把標題加粗
-            fortune_text = raw_text.replace("整體運勢", "**整體運勢**").replace("愛情運勢", "\n\n**愛情運勢**").replace("事業運勢", "\n\n**事業運勢**").replace("財運運勢", "\n\n**財運運勢**")
-            footer_text = "※ 資料來源：科技紫微網即時連線"
-        else:
-            fortune_text = "⚠️ 星象儀受干擾，無法解析今日運勢。"
-            footer_text = "※ 抓取失敗，請稍後重試。"
-
-        # 5. 發送最終報表 (🔧 修正 3：統整發送邏輯並修正縮排)
-        embed = discord.Embed(
-            title=f"🌌 今日真實運勢 - {sign}",
-            description=fortune_text[:4000], 
-            color=discord.Color.dark_blue()
+    # 2. 連線到本地資料庫 (會存在你的 NAS 上)
+    conn = sqlite3.connect('prasia_data.db')
+    cursor = conn.cursor()
+    
+    # 確保快取資料表存在 (如果沒有就自動建一個)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS horoscope_cache (
+            date TEXT,
+            sign TEXT,
+            content TEXT,
+            PRIMARY KEY (date, sign)
         )
-        embed.set_footer(text=footer_text)
+    ''')
+    conn.commit()
+
+    # 3. 🔍 核心邏輯：先去資料庫找今天有沒有人查過這個星座？
+    cursor.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign))
+    cached_result = cursor.fetchone()
+
+    if cached_result:
+        # 🟢 【快取命中】資料庫裡有！直接拿出來用，不爬蟲！
+        fortune_text = cached_result[0]
+        footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
+        conn.close() # 記得關閉連線
+    else:
+        # 🔴 【沒有快取】今天還沒人查過，啟動爬蟲去網路上抓
+        loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
+                
+                async with session.get(url) as response:
+                    response.raise_for_status() 
+                    html_bytes = await response.read()
+                    html = html_bytes.decode('utf-8', errors='ignore')
+
+            soup = BeautifulSoup(html, 'html.parser')
+            today_content = soup.find('div', class_='TODAY_CONTENT')
+            
+            if today_content:
+                raw_text = today_content.text.strip()
+                fortune_text = raw_text.replace("整體運勢", "**整體運勢**").replace("愛情運勢", "\n\n**愛情運勢**").replace("事業運勢", "\n\n**事業運勢**").replace("財運運勢", "\n\n**財運運勢**")
+                footer_text = "※ 資料來源：科技紫微網即時連線"
+
+                # ✨ 抓完之後，把熱騰騰的資料存進資料庫，明天之前都不用再抓了！
+                cursor.execute("INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)", (today_str, sign, fortune_text))
+                conn.commit()
+            else:
+                fortune_text = "⚠️ 星象儀受干擾，無法解析今日運勢。"
+                footer_text = "※ 抓取失敗，請稍後重試。"
+
+            await loading_msg.delete()
+
+        except Exception as e:
+            print(f"爬蟲報錯: {e}")
+            await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+            conn.close()
+            return
         
-        await loading_msg.delete()
-        await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
+        conn.close() # 爬完存完後，關閉資料庫連線
+
+    # 4. 發送最終報表
+    embed = discord.Embed(
+        title=f"🌌 今日真實運勢 - {sign}",
+        description=fortune_text[:4000], 
+        color=discord.Color.dark_blue()
+    )
+    embed.set_footer(text=footer_text)
+    
+    await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
 
     except Exception as e:
         print(f"爬蟲報錯: {e}")
         await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
         # 🔧 修正 2：移除了會報錯的 conn.close()
         return
-
-    # 🔧 修正 4：移除了 await bot.load_extension("cogs.exp_tracker")，這交給頂部的 setup_hook 處理就好
-
 # ⚠️ run 永遠在最後一行
 bot.run(TOKEN)
