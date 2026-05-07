@@ -10,8 +10,6 @@ import sqlite3
 import aiohttp
 from bs4 import BeautifulSoup
 
-
-
 # 💡 關鍵：從外部模組匯入我們分離出去的靜態資料
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES, item_names, item_rates, item_map
 
@@ -48,19 +46,18 @@ async def auto_boss_reminder():
                 color=discord.Color.red()
             )
             await channel.send(content="@everyone", embed=embed)
-# -------- 請把這段加在 on_ready 上面 --------
+
+# --- 自動掛載擴充卡 ---
 @bot.event
 async def setup_hook():
-    # 自動掃描 cogs 資料夾，把所有 .py 結尾的擴充卡全部插上去
     for filename in os.listdir('./cogs'):
         if filename.endswith('.py'):
             await bot.load_extension(f'cogs.{filename[:-3]}')
             print(f"✅ 模組 {filename} 已成功掛載！")
-# ------------------------------------------
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} 已成功登入 Discord！')
-    # 確保首領提醒雷達有正常啟動
     if not auto_boss_reminder.is_running():
         auto_boss_reminder.start()
 
@@ -212,15 +209,15 @@ async def daily_tarot(ctx):
         "🎡 10. 命運之輪 (Wheel of Fortune)": "正位：迎來轉機！適合直接挑戰 !抽卡 1000，紫光與金光即將降臨。\n逆位：運勢陷入泥沼，今天非酋體質發揮到極致，請安分守己。",
         "⚖️ 11. 正義 (Justice)": "正位：一分耕耘一分收穫，適合去解每日任務，抽卡機率完全照官方走。\n逆位：覺得系統特別坑？沒錯，今天不適合跟機率拼搏。",
         "⏳ 12. 倒吊人 (The Hanged Man)": "正位：以退為進，現在不是抽卡的好時機，把資源留給下一個卡池。\n逆位：無謂的犧牲，為了衝戰力硬點裝備只會換來一場空。",
-        "💀 13. 死神 (Death)": "正位：置之死地而後生！雖然可能先爆幾件裝備，但隨後必迎來大突破。\n逆位：泥足深陷，拒絕接受失敗只會越賠越多，該停損了。",
+        "💀 13. 死神 (Death)": "正位：置之死地而後生！雖然可能先爆幾件裝備，隨後必迎來大突破。\n逆位：泥足深陷，拒絕接受失敗只會越賠越多，該停損了。",
         "🌊 14. 節制 (Temperance)": "正位：資源管理大師！見好就收，只要抽到一張英雄就馬上停手。\n逆位：慾望失控，容易把辛苦農來的鑽石在五分鐘內花光。",
-        "😈 15. 惡魔 (The Devil)": "正位：受到致命誘惑！雖然風險極高，但如果敢賭一把大的，或許有奇效。\n逆位：被貪念反噬，小心因為貪圖一時戰力提升而賠上全部素材。",
+        "😈 15. 惡魔 (The Devil)": "正位：受到致命誘惑！風險極高，但如果敢賭一把大的，或許有奇效。\n逆位：被貪念反噬，小心因為貪圖戰力提升而賠上全部素材。",
         "⚡ 16. 高塔 (The Tower)": "正位：大凶！絕對不要點鍊成，點下去四柱必崩，傾家蕩產。\n逆位：雖然會經歷小失敗（例如單抽全綠），但能避開大災難。",
         "🌟 17. 星星 (The Star)": "正位：大吉！希望之光照耀，傳說與英雄機率大幅提升，請直接開抽。\n逆位：好運稍微延遲，建議晚上首領戰打完之後再來抽卡。",
         "🌙 18. 月亮 (The Moon)": "正位：充滿未知與不安，官方機率今天似乎特別詭異，建議觀望。\n逆位：迷霧散去，終於看清官方的套路，今天是當免費仔的好日子。",
-        "☀️ 19. 太陽 (The Sun)": "正位：極吉！陽光普照，全身上下充滿歐洲人的氣息，想抽什麼就抽什麼！\n逆位：雖然熱情減退，現在依然有小收穫，適合抽個 10 抽試試手氣。",
+        "☀️ 19. 太陽 (The Sun)": "正位：極吉！陽光普照，充滿歐洲人的氣息，想抽什麼就抽什麼！\n逆位：雖然熱情減退，依然有小收穫，適合抽個 10 抽試試手氣。",
         "🎺 20. 審判 (Judgement)": "正位：過去的累積迎來回報，之前的非氣將一次洗刷，準備迎接紫光。\n逆位：還債時刻，之前太歐的話，今天可能會遇到連續保底的懲罰。",
-        "🌍 21. 世界 (The World)": "正位：完美圓滿！心想事成，缺什麼裝備今天就能打到或抽到，大圓滿！\n逆位：距離目標只差最後一哩路，可能鍊成卡在最後一柱，請保持平常心。"
+        "🌍 21. 世界 (The World)": "正位：完美圓滿！心想事成，缺什麼裝備今天就能打到或抽到！\n逆位：距離目標只差最後一哩路，鍊成卡在最後一柱，請保持平常心。"
     }
     
     drawn_card = random.choice(list(tarot_cards.keys()))
@@ -250,6 +247,7 @@ async def daily_tarot(ctx):
     embed.set_footer(text="※ 命運掌握在自己手中，塔羅僅指引方向。")
     
     await ctx.send(embed=embed)
+
 # --- 11. 指令：真實星座運勢 (含資料庫快取機制) ---
 @bot.command(name="星座", aliases=["運勢"])
 async def horoscope(ctx, sign: str):
@@ -267,11 +265,11 @@ async def horoscope(ctx, sign: str):
     tz = datetime.timezone(datetime.timedelta(hours=8))
     today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
 
-    # 2. 連線到本地資料庫 (會存在你的 NAS 上)
+    # 2. 連線到本地資料庫
     conn = sqlite3.connect('prasia_data.db')
     cursor = conn.cursor()
     
-    # 確保快取資料表存在 (如果沒有就自動建一個)
+    # 確保快取資料表存在
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS horoscope_cache (
             date TEXT,
@@ -282,17 +280,17 @@ async def horoscope(ctx, sign: str):
     ''')
     conn.commit()
 
-    # 3. 🔍 核心邏輯：先去資料庫找今天有沒有人查過這個星座？
+    # 3. 🔍 核心邏輯：先找快取
     cursor.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign))
     cached_result = cursor.fetchone()
 
     if cached_result:
-        # 🟢 【快取命中】資料庫裡有！直接拿出來用，不爬蟲！
+        # 🟢 【快取命中】
         fortune_text = cached_result[0]
         footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
-        conn.close() # 記得關閉連線
+        conn.close()
     else:
-        # 🔴 【沒有快取】今天還沒人查過，啟動爬蟲去網路上抓
+        # 🔴 【沒有快取】啟動爬蟲
         loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
         try:
             connector = aiohttp.TCPConnector(ssl=False)
@@ -312,7 +310,7 @@ async def horoscope(ctx, sign: str):
                 fortune_text = raw_text.replace("整體運勢", "**整體運勢**").replace("愛情運勢", "\n\n**愛情運勢**").replace("事業運勢", "\n\n**事業運勢**").replace("財運運勢", "\n\n**財運運勢**")
                 footer_text = "※ 資料來源：科技紫微網即時連線"
 
-                # ✨ 抓完之後，把熱騰騰的資料存進資料庫，明天之前都不用再抓了！
+                # 寫入資料庫
                 cursor.execute("INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)", (today_str, sign, fortune_text))
                 conn.commit()
             else:
@@ -327,7 +325,7 @@ async def horoscope(ctx, sign: str):
             conn.close()
             return
         
-        conn.close() # 爬完存完後，關閉資料庫連線
+        conn.close() 
 
     # 4. 發送最終報表
     embed = discord.Embed(
@@ -338,5 +336,6 @@ async def horoscope(ctx, sign: str):
     embed.set_footer(text=footer_text)
     
     await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
+
 # ⚠️ run 永遠在最後一行
 bot.run(TOKEN)
