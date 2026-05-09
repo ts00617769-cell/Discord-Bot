@@ -241,24 +241,43 @@ class ExpTracker(commands.Cog):
         for e in embeds: 
             await ctx.send(embed=e)
 
-    # 🕵️ 【終極指令】抓改名與跳服雷達 (自帶防爆分頁系統 + 無視死亡掉趴)
+    # 🕵️ 【終極指令】抓改名與跳服雷達 (排名為主追蹤法)
     @commands.command(name="抓改名", help="比對兩個時間點的榜單，抓出改名或跳服的玩家。用法: !抓改名 2026-05-06 2026-05-07")
     async def catch_name_changers(self, ctx, date1: str, date2: str):
-        # allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        # if ctx.channel.id not in allowed_channel_ids: return 
-
-        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在交叉比對 `{date1}` 與 `{date2}` 的全服數據 (已啟用死亡掉趴容錯機制)...")
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在使用「排名比對法」交叉分析 `{date1}` 與 `{date2}` 的全服數據...")
         self.setup_database()
 
         def get_snapshot(date_str):
+            # 撈取該日期最後一筆資料
             self.cursor.execute('''
                 SELECT player_name, server_name, level, exp 
                 FROM exp_history 
                 WHERE record_time LIKE ? 
-                GROUP BY player_name
+                GROUP BY player_name, server_name
                 HAVING record_time = MAX(record_time)
             ''', (f'{date_str}%',))
-            return {row[0]: {'server': row[1], 'level': row[2], 'exp': row[3]} for row in self.cursor.fetchall()}
+            rows = self.cursor.fetchall()
+            
+            # 依伺服器分組來計算真正的「排名」
+            server_data = {}
+            for r in rows:
+                srv = r[1]
+                if srv not in server_data:
+                    server_data[srv] = []
+                server_data[srv].append({'name': r[0], 'level': r[2], 'exp': r[3]})
+                
+            snapshot = {}
+            for srv, players in server_data.items():
+                # 依經驗值排序，自動產出名次 (Rank)
+                players.sort(key=lambda x: x['exp'], reverse=True)
+                for rank, p in enumerate(players, 1):
+                    snapshot[p['name']] = {
+                        'server': srv, 
+                        'level': p['level'], 
+                        'exp': p['exp'], 
+                        'rank': rank # 記錄他的排名
+                    }
+            return snapshot
 
         try:
             old_data = get_snapshot(date1)
@@ -274,41 +293,49 @@ class ExpTracker(commands.Cog):
             appeared_players = new_names - old_names 
 
             suspects = []
-            
-            # 用來記錄已經被配對走的新名字，避免一個人被重複配對
             matched_new_names = set()
 
             for old_name in missing_players:
                 old_info = old_data[old_name]
-                
                 best_match = None
-                min_abs_diff = float('inf') # 記錄最小的絕對誤差
                 
                 for new_name in appeared_players:
                     if new_name in matched_new_names:
-                        continue # 已經被配對走的就跳過
+                        continue
                         
                     new_info = new_data[new_name]
-                    exp_diff = new_info['exp'] - old_info['exp'] # 可正可負
-                    abs_diff = abs(exp_diff) # 絕對距離
                     
-                    # ✨ 核心升級：等級相同(或剛好升一級)，且經驗值浮動在「正負 200 兆」以內 (包容死亡掉 5% 或鑽石贖回)
-                    if new_info['level'] in (old_info['level'], old_info['level'] + 1) and abs_diff <= 200000000000000:
-                        # 誰的絕對誤差最小，誰就是真兇！
-                        if abs_diff < min_abs_diff:
-                            min_abs_diff = abs_diff
-                            best_match = {
-                                'old_name': old_name,
-                                'new_name': new_name,
-                                'old_server': old_info['server'],
-                                'new_server': new_info['server'],
-                                'level': new_info['level'],
-                                'exp_diff': exp_diff # 保留正負號，才能知道他是死了還是贖回
-                            }
+                    # 💡 核心邏輯 1：同服改名 (以排名為主，不管經驗值死活！)
+                    is_same_server_rank_match = (
+                        old_info['server'] == new_info['server'] and 
+                        abs(old_info['rank'] - new_info['rank']) <= 3 and # 排名浮動在正負 3 名內
+                        old_info['level'] == new_info['level'] # 等級必須一樣
+                    )
+                    
+                    # 💡 核心邏輯 2：跳服改名 (排名無效，改用極度嚴格的經驗值比對，防禦誤判)
+                    exp_diff = new_info['exp'] - old_info['exp']
+                    is_jump_server_exp_match = (
+                        old_info['server'] != new_info['server'] and
+                        old_info['level'] == new_info['level'] and
+                        0 <= exp_diff <= 10000000000000 # 嚴格限制在 10 兆以內，不包容掉趴
+                    )
+
+                    if is_same_server_rank_match or is_jump_server_exp_match:
+                        best_match = {
+                            'old_name': old_name,
+                            'new_name': new_name,
+                            'old_server': old_info['server'],
+                            'new_server': new_info['server'],
+                            'old_rank': old_info['rank'],
+                            'new_rank': new_info['rank'],
+                            'level': new_info['level'],
+                            'exp_diff': exp_diff
+                        }
+                        break # 找到符合的就立刻鎖定兇手
                             
                 if best_match:
                     suspects.append(best_match)
-                    matched_new_names.add(best_match['new_name']) # 標記這個新名字已經死會了
+                    matched_new_names.add(best_match['new_name'])
 
             if not suspects:
                 return await processing_msg.edit(content=f"✅ 比對完畢：在 `{date1}` 與 `{date2}` 之間沒有發現明顯的改名或跳服跡象。")
@@ -320,25 +347,22 @@ class ExpTracker(commands.Cog):
             embeds = []
             for idx, chunk in enumerate(chunks):
                 embed = discord.Embed(
-                    title=f"🚨 戰情雷達：改名與跳服追蹤報告 ({idx+1}/{len(chunks)})", 
-                    description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：最小經驗值誤差配對 (支援死亡掉趴偵測)", 
+                    title=f"🚨 戰情雷達：改名與跳服追蹤 ({idx+1}/{len(chunks)})", 
+                    description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：同服排名追蹤法 (無視經驗波動)", 
                     color=0xe74c3c
                 )
                 
                 for s in chunk:
-                    action_text = "🔄 單純改名" if s['old_server'] == s['new_server'] else "✈️ 跳服＋改名"
-                    
-                    # 判斷狀態給予不同表情符號
-                    if s['exp_diff'] < 0:
-                        status_emoji = "📉 (疑似死亡掉趴)"
-                    elif s['exp_diff'] > 30000000000000: # 如果突然暴增超過 30 兆
-                        status_emoji = "📈 (疑似花鑽贖回)"
+                    if s['old_server'] == s['new_server']:
+                        action_text = "🔄 同服改名" 
+                        rank_info = f"排名變化: 第 {s['old_rank']} 名 ➡️ 第 {s['new_rank']} 名"
                     else:
-                        status_emoji = "📊"
+                        action_text = "✈️ 跳服＋改名"
+                        rank_info = f"跳服經驗增長: {s['exp_diff']/1000000000000:.2f} 兆"
                         
                     info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
                             f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
-                            f"Lv.{s['level']} | 經驗浮動: {s['exp_diff']/1000000000000:+.2f} 兆 {status_emoji}")
+                            f"Lv.{s['level']} | {rank_info}")
                     embed.add_field(name=f"{action_text}", value=info, inline=False)
                     
                 embeds.append(embed)
