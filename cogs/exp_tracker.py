@@ -331,11 +331,11 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         await ctx.send(embed=embed)
 
-    # 🕵️ 【全新指令】抓改名與跳服雷達
+    # 🕵️ 【全新指令】抓改名與跳服雷達 (自帶防爆分頁系統)
     @commands.command(name="抓改名", help="比對兩個時間點的榜單，抓出改名或跳服的玩家。用法: !抓改名 2026-05-06 2026-05-07")
     async def catch_name_changers(self, ctx, date1: str, date2: str):
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        if ctx.channel.id not in allowed_channel_ids: return 
+        # allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        # if ctx.channel.id not in allowed_channel_ids: return 
 
         processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在交叉比對 `{date1}` 與 `{date2}` 的全服數據...")
         self.setup_database()
@@ -355,7 +355,7 @@ class ExpTracker(commands.Cog):
             new_data = get_snapshot(date2)
 
             if not old_data or not new_data:
-                return await processing_msg.edit(content="❌ 找不到指定日期的完整資料，請確認日期格式 (YYYY-MM-DD) 或資料庫是否有紀錄。")
+                return await processing_msg.edit(content=f"❌ 找不到 `{date1}` 或 `{date2}` 的完整資料。")
 
             old_names = set(old_data.keys())
             new_names = set(new_data.keys())
@@ -367,42 +367,66 @@ class ExpTracker(commands.Cog):
 
             for old_name in missing_players:
                 old_info = old_data[old_name]
+                
+                best_match = None
+                min_exp_diff = float('inf')
+                
                 for new_name in appeared_players:
                     new_info = new_data[new_name]
                     exp_growth = new_info['exp'] - old_info['exp']
                     
-                    if old_info['level'] == new_info['level'] and 0 <= exp_growth <= 10000000000000: # 最大容許誤差：10兆
-                        suspects.append({
-                            'old_name': old_name,
-                            'new_name': new_name,
-                            'old_server': old_info['server'],
-                            'new_server': new_info['server'],
-                            'level': old_info['level'],
-                            'exp_growth': exp_growth
-                        })
+                    if old_info['level'] == new_info['level'] and 0 <= exp_growth <= 5000000000000:
+                        if exp_growth < min_exp_diff:
+                            min_exp_diff = exp_growth
+                            best_match = {
+                                'old_name': old_name,
+                                'new_name': new_name,
+                                'old_server': old_info['server'],
+                                'new_server': new_info['server'],
+                                'level': old_info['level'],
+                                'exp_growth': exp_growth
+                            }
+                            
+                if best_match:
+                    suspects.append(best_match)
 
             if not suspects:
-                await processing_msg.edit(content=f"✅ 比對完畢：在 `{date1}` 與 `{date2}` 之間沒有發現明顯的改名或跳服跡象。")
-                return
+                return await processing_msg.edit(content=f"✅ 比對完畢：在 `{date1}` 與 `{date2}` 之間沒有發現明顯的改名或跳服跡象。")
 
-            embed = discord.Embed(
-                title=f"🚨 戰情雷達：改名與跳服追蹤報告", 
-                description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：比對失蹤與空降名單的等級與經驗值", 
-                color=0xe74c3c
-            )
+            # 🛡️ 解決 6000 字元與 25 欄位限制：將名單分組 (每 15 人一頁)
+            CHUNK_SIZE = 15
+            chunks = [suspects[i:i + CHUNK_SIZE] for i in range(0, len(suspects), CHUNK_SIZE)]
+            
+            embeds = []
+            for idx, chunk in enumerate(chunks):
+                embed = discord.Embed(
+                    title=f"🚨 戰情雷達：改名與跳服追蹤報告 ({idx+1}/{len(chunks)})", 
+                    description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：極限 DNA (經驗值) 吻合比對", 
+                    color=0xe74c3c
+                )
+                
+                for s in chunk:
+                    action_text = "🔄 單純改名" if s['old_server'] == s['new_server'] else "✈️ 跳服＋改名"
+                    info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
+                            f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
+                            f"📊 等級: {s['level']} | 經驗增長: {s['exp_growth']/1000000000000:.2f} 兆")
+                    embed.add_field(name=f"{action_text}", value=info, inline=False)
+                    
+                embeds.append(embed)
 
-            for s in suspects:
-                action_text = "🔄 單純改名" if s['old_server'] == s['new_server'] else "✈️ 跳服＋改名"
-                info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
-                        f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
-                        f"📊 等級: {s['level']} | 期間經驗增長: {s['exp_growth']/1000000000000:.2f} 兆")
-                embed.add_field(name=f"{action_text}", value=info, inline=False)
-
-            await processing_msg.delete()
-            await ctx.send(embed=embed)
+            # 修正連帶錯誤：嘗試安全刪除提示訊息
+            try:
+                await processing_msg.delete()
+            except:
+                pass
+                
+            # 將切好的報表一頁一頁發送出來
+            for e in embeds:
+                await ctx.send(embed=e)
 
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 系統錯誤: {e}")
+            # 修正連帶錯誤：直接用 ctx.send 回報錯誤，不依賴可能已經被刪除的 processing_msg
+            await ctx.send(f"❌ 系統錯誤: {e}")
 
 # ⚠️ 這是整份檔案的最後幾行，負責掛載模組
 async def setup(bot):
