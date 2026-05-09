@@ -17,7 +17,6 @@ class CastleTracker(commands.Cog):
         current_width = self.get_display_width(text_str)
         return text_str + " " * max(0, target_width - current_width)
 
-    # ✨ 升級點：傳入我們自己知道的 server_name
     async def fetch_territory_data(self, session, server_name, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiTerritoryByWorldId"
         payload = {"world_group_id": group_id, "world_id": world_id, "territory_grade": None, "guild_id": None}
@@ -32,7 +31,6 @@ class CastleTracker(commands.Cog):
                     json_data = await response.json()
                     territories = json_data.get("data", {}).get("territory") or []
                     
-                    # 🛠️ 強制貼標籤：無視官方 API 的殘缺，強制塞入我們知道的伺服器名稱
                     for t in territories:
                         t['real_server_name'] = server_name
                         
@@ -43,9 +41,7 @@ class CastleTracker(commands.Cog):
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
     async def get_castle_tax(self, ctx, *args):
-        # 🛡️ 資安防護網
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        if ctx.channel.id not in allowed_channel_ids: return 
+        # 🛡️ 頻道限制已移除，現在全頻道可用
 
         count = 15
         args_list = list(args)
@@ -75,7 +71,6 @@ class CastleTracker(commands.Cog):
             all_territories = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
-                    # 傳入 s_name 讓它帶入函數中
                     tasks = [self.fetch_territory_data(session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results: all_territories.extend(r)
@@ -98,7 +93,6 @@ class CastleTracker(commands.Cog):
                 t_name = str(t.get("territory_name") or "未知據點")
                 t_grade = str(t.get("territory_grade_name") or "據點")
                 
-                # ✨ 改用我們強制注入的 `real_server_name`
                 server_name_display = t.get('real_server_name', '未知')
                 server_prefix = f"[{server_name_display}] " if is_global else ""
                 
