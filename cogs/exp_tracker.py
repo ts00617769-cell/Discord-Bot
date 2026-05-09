@@ -241,103 +241,13 @@ class ExpTracker(commands.Cog):
         for e in embeds: 
             await ctx.send(embed=e)
 
-    # ✨ 升級版：無差別全服掃描 星光點名 (時速 1000億 ~ 1.5兆)
-    @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
-    async def starlight_attendance(self, ctx, target_date: str = None):
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        if ctx.channel.id not in allowed_channel_ids: 
-            return await ctx.send(f"❌ 頻道未授權。")
-
-        tz = datetime.timezone(datetime.timedelta(hours=8))
-        if target_date:
-            query_date = target_date
-            display_date = f"歷史調閱 ({query_date})"
-        else:
-            query_date = datetime.datetime.now(tz).strftime('%Y-%m-%d')
-            display_date = "今日"
-
-        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在進行 **全伺服器** {display_date} 23:00 ~ 23:30 區間掃描...")
-        self.setup_database() 
-        
-        time_start_query = f"{query_date} 23:00:00"
-        time_end_query = f"{query_date} 23:30:00"
-
-        self.cursor.execute('''
-            SELECT MIN(record_time), MAX(record_time) 
-            FROM exp_history 
-            WHERE record_time >= ? AND record_time <= ?
-        ''', (time_start_query, time_end_query))
-        
-        times = self.cursor.fetchone()
-        
-        if not times or not times[0] or not times[1] or times[0] == times[1]:
-            return await processing_msg.edit(content=f"❌ 找不到 {query_date} 23:00 ~ 23:30 的完整區間資料。請確認當時雷達是否有正常運作。")
-            
-        start_time, end_time = times[0], times[1]
-
-        fmt = '%Y-%m-%d %H:%M:%S'
-        t_start = datetime.datetime.strptime(start_time, fmt)
-        t_end = datetime.datetime.strptime(end_time, fmt)
-        minutes_diff = (t_end - t_start).total_seconds() / 60
-        if minutes_diff <= 0: minutes_diff = 30 
-
-        sql = '''
-            SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp) as exp_diff
-            FROM exp_history t1
-            JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-            WHERE t1.record_time = ? AND t2.record_time = ?
-        '''
-        self.cursor.execute(sql, (start_time, end_time))
-        records = self.cursor.fetchall()
-        
-        results = {}
-        for server, player, diff in records:
-            if diff > 0:
-                hourly_speed = (diff / minutes_diff) * 60
-                # 🎯 及格門檻更新：時速 1000億 ~ 1.5兆
-                if 100000000000 <= hourly_speed <= 1500000000000:
-                    speed_yi = hourly_speed / 100_000_000 
-                    if server not in results:
-                        results[server] = []
-                    results[server].append((player, speed_yi))
-                
-        embed = discord.Embed(
-            title=f"✨ 星光解放戰 全服出席檢驗 {display_date}", 
-            description=f"📊 **實際採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **及格門檻**：練功時速落於 **1000億 ~ 1.5兆** 之間", 
-            color=0xf1c40f
-        )
-        
-        if not results:
-            embed.add_field(name="狀態報告", value="全服目前無任何玩家符合時速條件。", inline=False)
-        else:
-            for server in sorted(results.keys()):
-                players = results[server]
-                players.sort(key=lambda x: x[1], reverse=True)
-                count = len(players)
-                
-                lines = []
-                for p_name, p_speed in players:
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
-                    name_padded = str(p_name) + " " * max(0, 14 - name_width)
-                    lines.append(f"• {name_padded} (時速 {p_speed:,.0f}億)")
-                    
-                full_text = "\n".join(lines)
-                if len(full_text) > 900:
-                    full_text = full_text[:900] + "\n... (名單過長已截斷)"
-                    
-                value_text = "```yaml\n" + full_text + "\n```"
-                embed.add_field(name=f"🌐 {server} (共 {count} 人)", value=value_text, inline=False)
-            
-        await processing_msg.delete()
-        await ctx.send(embed=embed)
-
-    # 🕵️ 【全新指令】抓改名與跳服雷達 (自帶防爆分頁系統)
+    # 🕵️ 【終極指令】抓改名與跳服雷達 (自帶防爆分頁系統 + 無視死亡掉趴)
     @commands.command(name="抓改名", help="比對兩個時間點的榜單，抓出改名或跳服的玩家。用法: !抓改名 2026-05-06 2026-05-07")
     async def catch_name_changers(self, ctx, date1: str, date2: str):
         # allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         # if ctx.channel.id not in allowed_channel_ids: return 
 
-        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在交叉比對 `{date1}` 與 `{date2}` 的全服數據...")
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在交叉比對 `{date1}` 與 `{date2}` 的全服數據 (已啟用死亡掉趴容錯機制)...")
         self.setup_database()
 
         def get_snapshot(date_str):
@@ -364,31 +274,41 @@ class ExpTracker(commands.Cog):
             appeared_players = new_names - old_names 
 
             suspects = []
+            
+            # 用來記錄已經被配對走的新名字，避免一個人被重複配對
+            matched_new_names = set()
 
             for old_name in missing_players:
                 old_info = old_data[old_name]
                 
                 best_match = None
-                min_exp_diff = float('inf')
+                min_abs_diff = float('inf') # 記錄最小的絕對誤差
                 
                 for new_name in appeared_players:
+                    if new_name in matched_new_names:
+                        continue # 已經被配對走的就跳過
+                        
                     new_info = new_data[new_name]
-                    exp_growth = new_info['exp'] - old_info['exp']
+                    exp_diff = new_info['exp'] - old_info['exp'] # 可正可負
+                    abs_diff = abs(exp_diff) # 絕對距離
                     
-                    if old_info['level'] == new_info['level'] and 0 <= exp_growth <= 5000000000000:
-                        if exp_growth < min_exp_diff:
-                            min_exp_diff = exp_growth
+                    # ✨ 核心升級：等級相同(或剛好升一級)，且經驗值浮動在「正負 200 兆」以內 (包容死亡掉 5% 或鑽石贖回)
+                    if new_info['level'] in (old_info['level'], old_info['level'] + 1) and abs_diff <= 200000000000000:
+                        # 誰的絕對誤差最小，誰就是真兇！
+                        if abs_diff < min_abs_diff:
+                            min_abs_diff = abs_diff
                             best_match = {
                                 'old_name': old_name,
                                 'new_name': new_name,
                                 'old_server': old_info['server'],
                                 'new_server': new_info['server'],
-                                'level': old_info['level'],
-                                'exp_growth': exp_growth
+                                'level': new_info['level'],
+                                'exp_diff': exp_diff # 保留正負號，才能知道他是死了還是贖回
                             }
                             
                 if best_match:
                     suspects.append(best_match)
+                    matched_new_names.add(best_match['new_name']) # 標記這個新名字已經死會了
 
             if not suspects:
                 return await processing_msg.edit(content=f"✅ 比對完畢：在 `{date1}` 與 `{date2}` 之間沒有發現明顯的改名或跳服跡象。")
@@ -401,31 +321,37 @@ class ExpTracker(commands.Cog):
             for idx, chunk in enumerate(chunks):
                 embed = discord.Embed(
                     title=f"🚨 戰情雷達：改名與跳服追蹤報告 ({idx+1}/{len(chunks)})", 
-                    description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：極限 DNA (經驗值) 吻合比對", 
+                    description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：最小經驗值誤差配對 (支援死亡掉趴偵測)", 
                     color=0xe74c3c
                 )
                 
                 for s in chunk:
                     action_text = "🔄 單純改名" if s['old_server'] == s['new_server'] else "✈️ 跳服＋改名"
+                    
+                    # 判斷狀態給予不同表情符號
+                    if s['exp_diff'] < 0:
+                        status_emoji = "📉 (疑似死亡掉趴)"
+                    elif s['exp_diff'] > 30000000000000: # 如果突然暴增超過 30 兆
+                        status_emoji = "📈 (疑似花鑽贖回)"
+                    else:
+                        status_emoji = "📊"
+                        
                     info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
                             f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
-                            f"📊 等級: {s['level']} | 經驗增長: {s['exp_growth']/1000000000000:.2f} 兆")
+                            f"Lv.{s['level']} | 經驗浮動: {s['exp_diff']/1000000000000:+.2f} 兆 {status_emoji}")
                     embed.add_field(name=f"{action_text}", value=info, inline=False)
                     
                 embeds.append(embed)
 
-            # 修正連帶錯誤：嘗試安全刪除提示訊息
             try:
                 await processing_msg.delete()
             except:
                 pass
                 
-            # 將切好的報表一頁一頁發送出來
             for e in embeds:
                 await ctx.send(embed=e)
 
         except Exception as e:
-            # 修正連帶錯誤：直接用 ctx.send 回報錯誤，不依賴可能已經被刪除的 processing_msg
             await ctx.send(f"❌ 系統錯誤: {e}")
 
 # ⚠️ 這是整份檔案的最後幾行，負責掛載模組
