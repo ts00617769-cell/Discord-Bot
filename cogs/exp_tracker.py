@@ -392,6 +392,125 @@ class ExpTracker(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"❌ 系統錯誤: {e}")
+         # 🕵️ 【全新指令】單人精準狙擊雷達 (免輸入時間，自動追蹤前世今生)
+    @commands.command(name="肉搜", help="直接調查特定玩家的前世今生。用法: !肉搜 五官不正")
+    async def investigate_player(self, ctx, target_name: str):
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼專案，正在調閱 `{target_name}` 的機密檔案...")
+        self.setup_database()
+
+        # 獲取資料庫最老與最新時間
+        self.cursor.execute('SELECT MIN(record_time), MAX(record_time) FROM exp_history')
+        db_min, db_max = self.cursor.fetchone()
+        
+        if not db_min:
+            return await processing_msg.edit(content="❌ 資料庫目前是空的。")
+
+        # 獲取目標玩家的初次與最後出現時間
+        self.cursor.execute('SELECT MIN(record_time), MAX(record_time) FROM exp_history WHERE player_name = ?', (target_name,))
+        p_row = self.cursor.fetchone()
+
+        if not p_row or not p_row[0]:
+            return await processing_msg.edit(content=f"❌ 查無此人！資料庫中從未出現過 `{target_name}` (可能等級不夠沒進過前50名)。")
+            
+        p_min, p_max = p_row
+
+        embed = discord.Embed(title=f"📋 天眼機密檔案：{target_name}", color=0x3498db)
+        embed.set_footer(text="系統：單點追蹤狙擊系統 | 支援前世與今生比對")
+
+        # --- 輔助函數：取得特定時間的全服排名快照 ---
+        def get_rank_snapshot(exact_time):
+            self.cursor.execute('''
+                SELECT player_name, server_name, level, exp 
+                FROM exp_history WHERE record_time = ? ORDER BY exp DESC
+            ''', (exact_time,))
+            snapshot = {}
+            for rank, r in enumerate(self.cursor.fetchall(), 1):
+                snapshot[r[0]] = {'server': r[1], 'level': r[2], 'exp': r[3], 'rank': rank}
+            return snapshot
+
+        # ==========================================
+        # 🔍 尋找前世 (他是誰改名過來的？)
+        # ==========================================
+        if p_min > db_min:
+            self.cursor.execute('SELECT MAX(record_time) FROM exp_history WHERE record_time < ?', (p_min,))
+            t_prev = self.cursor.fetchone()[0]
+            
+            snap_prev = get_rank_snapshot(t_prev)
+            snap_curr = get_rank_snapshot(p_min)
+            
+            new_info = snap_curr.get(target_name)
+            missing_names = set(snap_prev.keys()) - set(snap_curr.keys())
+            
+            best_match = None
+            closest_exp = float('inf')
+            
+            for old_name in missing_names:
+                old_info = snap_prev[old_name]
+                if new_info['level'] not in (old_info['level'], old_info['level'] + 1): continue
+                
+                exp_diff = new_info['exp'] - old_info['exp']
+                rank_diff = abs(old_info['rank'] - new_info['rank'])
+                
+                is_match = False
+                # 遵循規則：一定要跨服才算改名
+                if old_info['server'] != new_info['server']:
+                    if -10000000000000 <= exp_diff <= 20000000000000: is_match = True
+                    elif rank_diff <= 5 and abs(exp_diff) <= 150000000000000: is_match = True
+                
+                if is_match and abs(exp_diff) < closest_exp:
+                    closest_exp = abs(exp_diff)
+                    best_match = {'name': old_name, 'server': old_info['server'], 'exp_diff': exp_diff}
+                    
+            if best_match:
+                status = "📉掉趴" if best_match['exp_diff'] < -5000000000000 else ("📈贖回" if best_match['exp_diff'] > 50000000000000 else "⚖️平穩")
+                embed.add_field(name="⬅️ 前世身分 (查獲改名前)", value=f"**{best_match['name']}** ({best_match['server']})\n誤差: {best_match['exp_diff']/1000000000000:+.2f} 兆 ({status})\n跳服時間: `{t_prev}`", inline=False)
+            else:
+                embed.add_field(name="⬅️ 前世身分", value=f"無法確認。可能是從未進過榜的帳號突然衝上榜。\n初次建檔: `{p_min}`", inline=False)
+        else:
+            embed.add_field(name="⬅️ 前世身分", value=f"📜 建檔元老。自雷達啟用 (`{db_min}`) 起即存在此 ID，無改名紀錄。", inline=False)
+
+        # ==========================================
+        # 🔍 尋找下落 (他後來改名叫什麼了？)
+        # ==========================================
+        if p_max < db_max:
+            self.cursor.execute('SELECT MIN(record_time) FROM exp_history WHERE record_time > ?', (p_max,))
+            t_next = self.cursor.fetchone()[0]
+            
+            snap_curr = get_rank_snapshot(p_max)
+            snap_next = get_rank_snapshot(t_next)
+            
+            old_info = snap_curr.get(target_name)
+            appeared_names = set(snap_next.keys()) - set(snap_curr.keys())
+            
+            best_match = None
+            closest_exp = float('inf')
+            
+            for new_name in appeared_names:
+                new_info = snap_next[new_name]
+                if new_info['level'] not in (old_info['level'], old_info['level'] + 1): continue
+                
+                exp_diff = new_info['exp'] - old_info['exp']
+                rank_diff = abs(old_info['rank'] - new_info['rank'])
+                
+                is_match = False
+                if old_info['server'] != new_info['server']:
+                    if -10000000000000 <= exp_diff <= 20000000000000: is_match = True
+                    elif rank_diff <= 5 and abs(exp_diff) <= 150000000000000: is_match = True
+                    
+                if is_match and abs(exp_diff) < closest_exp:
+                    closest_exp = abs(exp_diff)
+                    best_match = {'name': new_name, 'server': new_info['server'], 'exp_diff': exp_diff}
+                    
+            if best_match:
+                status = "📉掉趴" if best_match['exp_diff'] < -5000000000000 else ("📈贖回" if best_match['exp_diff'] > 50000000000000 else "⚖️平穩")
+                embed.add_field(name="➡️ 今生下落 (查獲改名後)", value=f"**{best_match['name']}** ({best_match['server']})\n誤差: {best_match['exp_diff']/1000000000000:+.2f} 兆 ({status})\n跳服時間: `{t_next}`", inline=False)
+            else:
+                embed.add_field(name="➡️ 今生下落", value=f"去向不明。可能掉出前 50 名，或退坑賣帳號。\n最後上線: `{p_max}`", inline=False)
+        else:
+            embed.add_field(name="➡️ 今生下落", value=f"🟢 目前仍在榜上活躍中！\n最新紀錄: `{db_max}`", inline=False)
+
+        await processing_msg.delete()
+        await ctx.send(embed=embed)   
 
 # ⚠️ 這是整份檔案的最後幾行，負責掛載模組
 async def setup(bot):
