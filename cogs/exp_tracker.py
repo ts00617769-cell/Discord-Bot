@@ -241,20 +241,38 @@ class ExpTracker(commands.Cog):
         for e in embeds: 
             await ctx.send(embed=e)
 
-    # 🕵️ 【終極指令】抓改名與跳服雷達 (三維度交叉分析法)
+    # 🕵️ 【終極指令】抓改名與跳服雷達 (自帶時間自動導航 + 三維度交叉分析)
     @commands.command(name="抓改名", help="比對兩時間點。用法: !抓改名 2026-05-08 2026-05-09 或 !抓改名 \"2026-05-08 14:00\" \"2026-05-08 14:30\"")
     async def catch_name_changers(self, ctx, date1: str, date2: str):
-        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在進行三維度交叉分析 `{date1}` 與 `{date2}`...")
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在智慧搜尋最接近 `{date1}` 與 `{date2}` 的全服數據...")
         self.setup_database()
 
         def get_snapshot(date_str):
+            # 自動補齊時間格式，以利轉換為秒數
+            if len(date_str) <= 10: target_time = f"{date_str} 23:59:59"
+            elif len(date_str) == 13: target_time = f"{date_str}:59:59"
+            elif len(date_str) == 16: target_time = f"{date_str}:00"
+            else: target_time = date_str
+
+            # ✨ 核心升級：利用資料庫底層直接計算秒數差，找出「絕對時間最接近」的一筆紀錄！
+            self.cursor.execute('''
+                SELECT DISTINCT record_time 
+                FROM exp_history 
+                ORDER BY ABS(CAST(strftime('%s', record_time) AS INTEGER) - CAST(strftime('%s', ?) AS INTEGER)) ASC 
+                LIMIT 1
+            ''', (target_time,))
+            
+            time_row = self.cursor.fetchone()
+            if not time_row: return None, None
+            
+            exact_time = time_row[0]
+            
+            # 使用校正後的「精確時間」去把資料撈出來
             self.cursor.execute('''
                 SELECT player_name, server_name, level, exp 
                 FROM exp_history 
-                WHERE record_time LIKE ? 
-                GROUP BY player_name, server_name
-                HAVING record_time = MAX(record_time)
-            ''', (f'{date_str}%',))
+                WHERE record_time = ?
+            ''', (exact_time,))
             rows = self.cursor.fetchall()
             
             server_data = {}
@@ -268,14 +286,14 @@ class ExpTracker(commands.Cog):
                 players.sort(key=lambda x: x['exp'], reverse=True)
                 for rank, p in enumerate(players, 1):
                     snapshot[p['name']] = {'server': srv, 'level': p['level'], 'exp': p['exp'], 'rank': rank}
-            return snapshot
+            return snapshot, exact_time
 
         try:
-            old_data = get_snapshot(date1)
-            new_data = get_snapshot(date2)
+            old_data, exact_time1 = get_snapshot(date1)
+            new_data, exact_time2 = get_snapshot(date2)
 
             if not old_data or not new_data:
-                return await processing_msg.edit(content=f"❌ 找不到 `{date1}` 或 `{date2}` 的完整資料。")
+                return await processing_msg.edit(content=f"❌ 找不到資料。資料庫目前可能為空，或日期格式錯誤。")
 
             missing_players = set(old_data.keys()) - set(new_data.keys())
             appeared_players = set(new_data.keys()) - set(old_data.keys())
@@ -293,26 +311,21 @@ class ExpTracker(commands.Cog):
                     if new_name in matched_new_names: continue
                     new_info = new_data[new_name]
                     
-                    # 基本門檻：等級必須一樣，或剛好在這期間升了一級
                     if new_info['level'] not in (old_info['level'], old_info['level'] + 1):
                         continue
 
                     exp_diff = new_info['exp'] - old_info['exp']
                     
-                    # 判斷 1：同服 + 排名浮動小 (看排名，無視經驗)
                     if old_info['server'] == new_info['server'] and abs(old_info['rank'] - new_info['rank']) <= 3:
                         confidence = 3
                         match_type = "🟢 同服改名"
-                    # 判斷 2：跳服 + 經驗值合理成長或微幅掉落 (看經驗，無視排名)
-                    elif old_info['server'] != new_info['server'] and abs(exp_diff) <= 20000000000000: # 正負20兆以內
+                    elif old_info['server'] != new_info['server'] and abs(exp_diff) <= 20000000000000:
                         confidence = 2
                         match_type = "🟡 跳服改名"
-                    # 判斷 3：極端狀態，跳服且經驗值暴跌/暴增 (死掉或贖回)，只靠等級強制配對！
                     else:
                         confidence = 1
                         match_type = "🔴 幽靈跳服 (疑似掉趴/贖回)"
 
-                    # 篩選最有可能的犯人
                     if confidence > highest_confidence or (confidence == highest_confidence and abs(exp_diff) < abs(closest_exp_diff)):
                         highest_confidence = confidence
                         closest_exp_diff = exp_diff
@@ -330,7 +343,7 @@ class ExpTracker(commands.Cog):
                     matched_new_names.add(best_match['new_name'])
 
             if not suspects:
-                return await processing_msg.edit(content=f"✅ 比對完畢：沒有發現明顯的改名或跳服跡象。")
+                return await processing_msg.edit(content=f"✅ 比對完畢：在 `{exact_time1}` 與 `{exact_time2}` 之間沒有發現改名跡象。")
 
             CHUNK_SIZE = 15
             chunks = [suspects[i:i + CHUNK_SIZE] for i in range(0, len(suspects), CHUNK_SIZE)]
@@ -339,7 +352,7 @@ class ExpTracker(commands.Cog):
             for idx, chunk in enumerate(chunks):
                 embed = discord.Embed(
                     title=f"🚨 戰情雷達：天眼三維追蹤報告 ({idx+1}/{len(chunks)})", 
-                    description=f"區間：`{date1}` ➡️ `{date2}`\n支援：同服排名、跳服經驗、極端掉趴強制配對", 
+                    description=f"✅ **實際配對快照時間：**\n**[舊]** `{exact_time1}`\n**[新]** `{exact_time2}`\n\n*(支援：同服排名、跳服經驗、掉趴強制配對)*", 
                     color=0xe74c3c
                 )
                 
@@ -348,7 +361,6 @@ class ExpTracker(commands.Cog):
                         detail = f"排名: 第 {s['old_rank']} 名 ➡️ 第 {s['new_rank']} 名"
                     else:
                         detail = f"經驗波動: {s['exp_diff']/1000000000000:+.2f} 兆"
-                        # 標註出是否死亡或花鑽石
                         if s['exp_diff'] < -5000000000000: detail += " 📉(疑似死亡)"
                         elif s['exp_diff'] > 50000000000000: detail += " 📈(疑似贖回)"
                         
