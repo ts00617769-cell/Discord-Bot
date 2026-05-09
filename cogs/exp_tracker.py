@@ -144,7 +144,7 @@ class ExpTracker(commands.Cog):
             current_state = "🟢 開啟中 (會推播)" if self.alerts_enabled else "🔴 關閉中 (靜默模式)"
             await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開` 或 `!警報 關` 來切換。")
 
-    # 📊 手動測速指令維持不變
+    # 📊 手動測速指令
     @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
@@ -240,14 +240,14 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         for e in embeds: 
             await ctx.send(embed=e)
+
+    # ✨ 升級版：無差別全服掃描 星光點名 (時速 1000億 ~ 1.5兆)
     @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
     async def starlight_attendance(self, ctx, target_date: str = None):
-        # 🛡️ 權限防護網
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids: 
             return await ctx.send(f"❌ 頻道未授權。")
 
-        # 1. 處理時間與日期邏輯
         tz = datetime.timezone(datetime.timedelta(hours=8))
         if target_date:
             query_date = target_date
@@ -257,10 +257,8 @@ class ExpTracker(commands.Cog):
             display_date = "今日"
 
         processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在進行 **全伺服器** {display_date} 23:00 ~ 23:30 區間掃描...")
-
         self.setup_database() 
         
-        # 嚴格鐵閘門：只抓取該日期的 23:00 到 23:30 「之內」的紀錄
         time_start_query = f"{query_date} 23:00:00"
         time_end_query = f"{query_date} 23:30:00"
 
@@ -277,40 +275,32 @@ class ExpTracker(commands.Cog):
             
         start_time, end_time = times[0], times[1]
 
-        # 精準計算雷達實際捕捉到的時間差 (分鐘)
         fmt = '%Y-%m-%d %H:%M:%S'
         t_start = datetime.datetime.strptime(start_time, fmt)
         t_end = datetime.datetime.strptime(end_time, fmt)
         minutes_diff = (t_end - t_start).total_seconds() / 60
         if minutes_diff <= 0: minutes_diff = 30 
 
-        # 2. 執行核心 SQL 邏輯 (✨ 無差別全服掃描，移除指定伺服器限制)
         sql = '''
             SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp) as exp_diff
             FROM exp_history t1
             JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
             WHERE t1.record_time = ? AND t2.record_time = ?
         '''
-        
         self.cursor.execute(sql, (start_time, end_time))
         records = self.cursor.fetchall()
         
-        # 3. 資料分類與「標準時速」過濾 (✨ 動態生成伺服器清單)
         results = {}
-        
         for server, player, diff in records:
             if diff > 0:
                 hourly_speed = (diff / minutes_diff) * 60
-                
-                # 🎯 條件：標準時速介於 1000億 到 1.5兆 之間
+                # 🎯 及格門檻更新：時速 1000億 ~ 1.5兆
                 if 100000000000 <= hourly_speed <= 1500000000000:
-                    speed_yi = hourly_speed / 100_000_000 # 轉成億
-                    # 如果這個伺服器還沒有建立名單，就初始化它
+                    speed_yi = hourly_speed / 100_000_000 
                     if server not in results:
                         results[server] = []
                     results[server].append((player, speed_yi))
                 
-        # 4. 產出戰情報表
         embed = discord.Embed(
             title=f"✨ 星光解放戰 全服出席檢驗 {display_date}", 
             description=f"📊 **實際採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}` (共 {int(minutes_diff)} 分鐘)\n🎯 **及格門檻**：練功時速落於 **1000億 ~ 1.5兆** 之間", 
@@ -320,15 +310,13 @@ class ExpTracker(commands.Cog):
         if not results:
             embed.add_field(name="狀態報告", value="全服目前無任何玩家符合時速條件。", inline=False)
         else:
-            # ✨ 將有資料的伺服器依照名稱排序印出
             for server in sorted(results.keys()):
                 players = results[server]
-                players.sort(key=lambda x: x[1], reverse=True) # 依時速由高至低排序
+                players.sort(key=lambda x: x[1], reverse=True)
                 count = len(players)
                 
                 lines = []
                 for p_name, p_speed in players:
-                    # 統一對齊排版
                     name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
                     name_padded = str(p_name) + " " * max(0, 14 - name_width)
                     lines.append(f"• {name_padded} (時速 {p_speed:,.0f}億)")
@@ -338,10 +326,84 @@ class ExpTracker(commands.Cog):
                     full_text = full_text[:900] + "\n... (名單過長已截斷)"
                     
                 value_text = "```yaml\n" + full_text + "\n```"
-                
                 embed.add_field(name=f"🌐 {server} (共 {count} 人)", value=value_text, inline=False)
             
         await processing_msg.delete()
         await ctx.send(embed=embed)
+
+    # 🕵️ 【全新指令】抓改名與跳服雷達
+    @commands.command(name="抓改名", help="比對兩個時間點的榜單，抓出改名或跳服的玩家。用法: !抓改名 2026-05-06 2026-05-07")
+    async def catch_name_changers(self, ctx, date1: str, date2: str):
+        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        if ctx.channel.id not in allowed_channel_ids: return 
+
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在交叉比對 `{date1}` 與 `{date2}` 的全服數據...")
+        self.setup_database()
+
+        def get_snapshot(date_str):
+            self.cursor.execute('''
+                SELECT player_name, server_name, level, exp 
+                FROM exp_history 
+                WHERE record_time LIKE ? 
+                GROUP BY player_name
+                HAVING record_time = MAX(record_time)
+            ''', (f'{date_str}%',))
+            return {row[0]: {'server': row[1], 'level': row[2], 'exp': row[3]} for row in self.cursor.fetchall()}
+
+        try:
+            old_data = get_snapshot(date1)
+            new_data = get_snapshot(date2)
+
+            if not old_data or not new_data:
+                return await processing_msg.edit(content="❌ 找不到指定日期的完整資料，請確認日期格式 (YYYY-MM-DD) 或資料庫是否有紀錄。")
+
+            old_names = set(old_data.keys())
+            new_names = set(new_data.keys())
+
+            missing_players = old_names - new_names 
+            appeared_players = new_names - old_names 
+
+            suspects = []
+
+            for old_name in missing_players:
+                old_info = old_data[old_name]
+                for new_name in appeared_players:
+                    new_info = new_data[new_name]
+                    exp_growth = new_info['exp'] - old_info['exp']
+                    
+                    if old_info['level'] == new_info['level'] and 0 <= exp_growth <= 10000000000000: # 最大容許誤差：10兆
+                        suspects.append({
+                            'old_name': old_name,
+                            'new_name': new_name,
+                            'old_server': old_info['server'],
+                            'new_server': new_info['server'],
+                            'level': old_info['level'],
+                            'exp_growth': exp_growth
+                        })
+
+            if not suspects:
+                await processing_msg.edit(content=f"✅ 比對完畢：在 `{date1}` 與 `{date2}` 之間沒有發現明顯的改名或跳服跡象。")
+                return
+
+            embed = discord.Embed(
+                title=f"🚨 戰情雷達：改名與跳服追蹤報告", 
+                description=f"比對區間：`{date1}` ➡️ `{date2}`\n追蹤原理：比對失蹤與空降名單的等級與經驗值", 
+                color=0xe74c3c
+            )
+
+            for s in suspects:
+                action_text = "🔄 單純改名" if s['old_server'] == s['new_server'] else "✈️ 跳服＋改名"
+                info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
+                        f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
+                        f"📊 等級: {s['level']} | 期間經驗增長: {s['exp_growth']/1000000000000:.2f} 兆")
+                embed.add_field(name=f"{action_text}", value=info, inline=False)
+
+            await processing_msg.delete()
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await processing_msg.edit(content=f"❌ 系統錯誤: {e}")
+
+# ⚠️ 這是整份檔案的最後幾行，負責掛載模組
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))
