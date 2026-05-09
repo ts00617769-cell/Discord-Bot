@@ -241,20 +241,24 @@ class ExpTracker(commands.Cog):
         for e in embeds: 
             await ctx.send(embed=e)
 
-    # 🕵️ 【終極指令】抓改名與跳服雷達 (自帶時間自動導航 + 三維度交叉分析)
-    @commands.command(name="抓改名", help="比對兩時間點。用法: !抓改名 2026-05-08 2026-05-09 或 !抓改名 \"2026-05-08 14:00\" \"2026-05-08 14:30\"")
-    async def catch_name_changers(self, ctx, date1: str, date2: str):
-        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在智慧搜尋最接近 `{date1}` 與 `{date2}` 的全服數據...")
+    # 🕵️ 【終極指令】跨服改名專用雷達 (支援指定伺服器 + 全服排名鎖定)
+    @commands.command(name="抓改名", help="用法: !抓改名 \"2026-05-10 00:30\" \"2026-05-10 01:50\" [舊伺服器] [新伺服器]")
+    async def catch_name_changers(self, ctx, date1: str, date2: str, srv1: str = None, srv2: str = None):
+        target_msg = "全伺服器"
+        if srv1 and srv2:
+            target_msg = f"「{srv1}」與「{srv2}」之間"
+        elif srv1:
+            target_msg = f"包含「{srv1}」"
+            
+        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，正在鎖定分析 {target_msg} 的跨服跳槽數據...")
         self.setup_database()
 
         def get_snapshot(date_str):
-            # 自動補齊時間格式，以利轉換為秒數
             if len(date_str) <= 10: target_time = f"{date_str} 23:59:59"
             elif len(date_str) == 13: target_time = f"{date_str}:59:59"
             elif len(date_str) == 16: target_time = f"{date_str}:00"
             else: target_time = date_str
 
-            # ✨ 核心升級：利用資料庫底層直接計算秒數差，找出「絕對時間最接近」的一筆紀錄！
             self.cursor.execute('''
                 SELECT DISTINCT record_time 
                 FROM exp_history 
@@ -264,28 +268,20 @@ class ExpTracker(commands.Cog):
             
             time_row = self.cursor.fetchone()
             if not time_row: return None, None
-            
             exact_time = time_row[0]
             
-            # 使用校正後的「精確時間」去把資料撈出來
+            # ✨ 關鍵修復：依據經驗值進行「全服大排名」，全服排名是跳服時最穩定的錨點！
             self.cursor.execute('''
                 SELECT player_name, server_name, level, exp 
                 FROM exp_history 
                 WHERE record_time = ?
+                ORDER BY exp DESC
             ''', (exact_time,))
             rows = self.cursor.fetchall()
             
-            server_data = {}
-            for r in rows:
-                srv = r[1]
-                if srv not in server_data: server_data[srv] = []
-                server_data[srv].append({'name': r[0], 'level': r[2], 'exp': r[3]})
-                
             snapshot = {}
-            for srv, players in server_data.items():
-                players.sort(key=lambda x: x['exp'], reverse=True)
-                for rank, p in enumerate(players, 1):
-                    snapshot[p['name']] = {'server': srv, 'level': p['level'], 'exp': p['exp'], 'rank': rank}
+            for global_rank, r in enumerate(rows, 1):
+                snapshot[r[0]] = {'server': r[1], 'level': r[2], 'exp': r[3], 'rank': global_rank}
             return snapshot, exact_time
 
         try:
@@ -311,20 +307,40 @@ class ExpTracker(commands.Cog):
                     if new_name in matched_new_names: continue
                     new_info = new_data[new_name]
                     
+                    # 🚫 規則 1：遊戲機制不存在同服改名，如果伺服器一樣直接跳過
+                    if old_info['server'] == new_info['server']:
+                        continue
+                        
+                    # 🎯 規則 2：如果有輸入指定伺服器，只抓這兩個伺服器之間的流動
+                    if srv1 and srv2:
+                        valid_jumps = [(srv1, srv2), (srv2, srv1)]
+                        if (old_info['server'], new_info['server']) not in valid_jumps:
+                            continue
+                    elif srv1:
+                        if old_info['server'] != srv1 and new_info['server'] != srv1:
+                            continue
+
                     if new_info['level'] not in (old_info['level'], old_info['level'] + 1):
                         continue
 
                     exp_diff = new_info['exp'] - old_info['exp']
+                    rank_diff = abs(old_info['rank'] - new_info['rank'])
                     
-                    if old_info['server'] == new_info['server'] and abs(old_info['rank'] - new_info['rank']) <= 3:
+                    confidence = 0
+                    match_type = ""
+
+                    # 判斷 A：精準跳服 (經驗合理微增 0~10兆)
+                    if 0 <= exp_diff <= 10000000000000:
                         confidence = 3
-                        match_type = "🟢 同服改名"
-                    elif old_info['server'] != new_info['server'] and abs(exp_diff) <= 20000000000000:
+                        match_type = "🟡 精準跳服 (經驗微增)"
+                    # 判斷 B：死亡掉趴或贖回，但「全服總排名」死死咬住 (正負 5 名內)
+                    elif rank_diff <= 5 and abs(exp_diff) <= 150000000000000:
                         confidence = 2
-                        match_type = "🟡 跳服改名"
-                    else:
+                        match_type = "🔴 幽靈跳服 (全服排名鎖定)"
+                    # 判斷 C：排名稍微被擠走，但經驗還是相近 (-10兆 ~ +20兆)
+                    elif -10000000000000 <= exp_diff <= 20000000000000:
                         confidence = 1
-                        match_type = "🔴 幽靈跳服 (疑似掉趴/贖回)"
+                        match_type = "🟠 疑似跳服 (經驗相近)"
 
                     if confidence > highest_confidence or (confidence == highest_confidence and abs(exp_diff) < abs(closest_exp_diff)):
                         highest_confidence = confidence
@@ -343,7 +359,7 @@ class ExpTracker(commands.Cog):
                     matched_new_names.add(best_match['new_name'])
 
             if not suspects:
-                return await processing_msg.edit(content=f"✅ 比對完畢：在 `{exact_time1}` 與 `{exact_time2}` 之間沒有發現改名跡象。")
+                return await processing_msg.edit(content=f"✅ 比對完畢：在 {target_msg} 中沒有發現跨服改名跡象。")
 
             CHUNK_SIZE = 15
             chunks = [suspects[i:i + CHUNK_SIZE] for i in range(0, len(suspects), CHUNK_SIZE)]
@@ -351,18 +367,15 @@ class ExpTracker(commands.Cog):
             embeds = []
             for idx, chunk in enumerate(chunks):
                 embed = discord.Embed(
-                    title=f"🚨 戰情雷達：天眼三維追蹤報告 ({idx+1}/{len(chunks)})", 
-                    description=f"✅ **實際配對快照時間：**\n**[舊]** `{exact_time1}`\n**[新]** `{exact_time2}`\n\n*(支援：同服排名、跳服經驗、掉趴強制配對)*", 
+                    title=f"🚨 跨服改名雷達追蹤報告 ({idx+1}/{len(chunks)})", 
+                    description=f"✅ **快照時間：**\n`{exact_time1}` ➡️ `{exact_time2}`\n🎯 **追蹤範圍：**{target_msg}", 
                     color=0xe74c3c
                 )
                 
                 for s in chunk:
-                    if s['type'].startswith("🟢"):
-                        detail = f"排名: 第 {s['old_rank']} 名 ➡️ 第 {s['new_rank']} 名"
-                    else:
-                        detail = f"經驗波動: {s['exp_diff']/1000000000000:+.2f} 兆"
-                        if s['exp_diff'] < -5000000000000: detail += " 📉(疑似死亡)"
-                        elif s['exp_diff'] > 50000000000000: detail += " 📈(疑似贖回)"
+                    detail = f"全服排名: {s['old_rank']} ➡️ {s['new_rank']} | 波動: {s['exp_diff']/1000000000000:+.2f} 兆"
+                    if s['exp_diff'] < -5000000000000: detail += " 📉(疑似掉趴)"
+                    elif s['exp_diff'] > 50000000000000: detail += " 📈(疑似贖回)"
                         
                     lv_text = f"Lv.{s['old_level']}" if s['old_level'] == s['new_level'] else f"Lv.{s['old_level']} ➡️ {s['new_level']}"
                         
