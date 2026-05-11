@@ -30,8 +30,8 @@ class SubjugationCog(commands.Cog):
     @commands.command(name="討伐排名", aliases=["討伐"], help="查詢全服前 100 名討伐等級排行")
     async def get_subjugation_ranking(self, ctx):
         # 🛡️ 【資安防護網】(順便幫你加上來了)
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        if ctx.channel.id not in allowed_channel_ids: return 
+        # allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        # if ctx.channel.id not in allowed_channel_ids: return 
 
         processing_msg = await ctx.send("📡 啟動全服討伐雷達掃描中，請稍候...")
 
