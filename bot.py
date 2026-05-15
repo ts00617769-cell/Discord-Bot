@@ -261,6 +261,7 @@ async def horoscope(ctx, sign: str):
     if sign_id is None:
         return await ctx.send("❌ 請輸入正確的星座名稱（例如：!星座 牡羊座）")
 
+
     # 1. 取得台灣時間的「今天日期」
     tz = datetime.timezone(datetime.timedelta(hours=8))
     today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')

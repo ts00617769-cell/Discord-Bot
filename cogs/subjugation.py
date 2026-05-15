@@ -26,6 +26,7 @@ class SubjugationCog(commands.Cog):
         except Exception:
             pass
         return []
+    
 
     @commands.command(name="討伐排名", aliases=["討伐"], help="查詢全服前 100 名討伐等級排行")
     async def get_subjugation_ranking(self, ctx):
