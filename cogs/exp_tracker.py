@@ -20,6 +20,25 @@ class ExpTracker(commands.Cog):
         
         self.auto_fetch_exp.start()
 
+    # ✨ 【終極解法】把這個函式移到最上面，保證絕對不會再排版錯位！
+    def get_member_info(self, name):
+        """抓取團內成員備註的自動防呆版輔助函數"""
+        try:
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS member_registry (
+                    player_name TEXT PRIMARY KEY,
+                    original_identity TEXT
+                )
+            ''')
+            self.db_conn.commit()
+            
+            self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
+            result = self.cursor.fetchone()
+            return f"({result[0]})" if result else ""
+        except Exception as e:
+            print(f"讀取標記失敗: {e}")
+            return ""
+
     def setup_database(self):
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS exp_history (
@@ -30,7 +49,6 @@ class ExpTracker(commands.Cog):
                 exp REAL
             )
         ''')
-        # ✨ 無痛資料庫升級：自動檢查並加入「職業」欄位，舊資料預設為「未知」
         try:
             self.cursor.execute("SELECT class_name FROM exp_history LIMIT 1")
         except sqlite3.OperationalError:
@@ -64,7 +82,6 @@ class ExpTracker(commands.Cog):
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 players = await self.fetch_server_data(session, g_id, w_id)
                 for p in players:
-                    # ✨ 寫入時，將 API 拿到的 class_name (職業) 一併存入資料庫
                     self.cursor.execute('''
                         INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
                         VALUES (?, ?, ?, ?, ?, ?)
@@ -272,22 +289,17 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         await ctx.send(embed=embed)
 
-    # ==========================================
-    # 📜 【全新指令】歷史資料庫排名查詢 (支援職業篩選)
-    # ==========================================
     @commands.command(name="歷史排名", aliases=["查歷史", "歷史"], help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者")
     async def historical_ranking(self, ctx, *args):
-        # 預設值設定
         count = 100
         tz = datetime.timezone(datetime.timedelta(hours=8))
         date_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
         target_server = "全服"
-        target_class = None # ✨ 新增：目標職業變數
+        target_class = None
         
         args_list = list(args)
         class_parts = []
         
-        # ✨ 升級版智慧解析引擎：自動分類你輸入的所有條件
         for arg in args_list:
             if arg.isdigit():
                 count = int(arg)
@@ -296,7 +308,6 @@ class ExpTracker(commands.Cog):
             elif arg in SERVER_MAP.keys() or arg in ["全服", "全部", "global"]:
                 target_server = arg
             else:
-                # 如果不是數字、不是日期、也不是伺服器，那就一定是你指定的職業！
                 class_parts.append(arg)
                 
         if class_parts:
@@ -313,7 +324,6 @@ class ExpTracker(commands.Cog):
         processing_msg = await ctx.send(f"📊 正在潛入資料庫，調閱 `{date_str}` 的 {target_server}{filter_msg}歷史排行榜...")
         self.setup_database()
 
-        # 組裝 SQL 語法
         sql = '''
             SELECT player_name, server_name, level, exp, class_name 
             FROM exp_history 
@@ -325,10 +335,9 @@ class ExpTracker(commands.Cog):
             sql += " AND server_name = ?"
             params.append(target_server)
             
-        # ✨ 如果有指定職業，就加入 SQL 過濾條件
         if target_class:
             sql += " AND class_name LIKE ?"
-            params.append(f"%{target_class}%") # 用 LIKE 容錯，打「監視者」也能搜到「太陽監視者」
+            params.append(f"%{target_class}%")
             
         sql += '''
             GROUP BY player_name, server_name
@@ -352,11 +361,7 @@ class ExpTracker(commands.Cog):
             
             for idx, r in enumerate(rows, 1):
                 name, server, level, exp, class_name = r
-                
-                # 自動套用團內成員標記
                 tag = self.get_member_info(name)
-                
-                # 組合顯示名稱與職業
                 display_name = f"{name}{tag}"
                 
                 name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
@@ -364,8 +369,6 @@ class ExpTracker(commands.Cog):
                 
                 srv_info = f"({server})" if is_global else ""
                 exp_zhao = exp / 1000000000000
-                
-                # ✨ 報表上自動顯示該玩家的職業
                 class_info = f"[{class_name}]"
                 
                 line = f"{idx:02d}. {name_padded} {class_info:<7} | Lv.{level:<2} | {exp_zhao:>7.2f} 兆 {srv_info}\n"
@@ -389,26 +392,6 @@ class ExpTracker(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ 系統錯誤: {e}")
 
-            # 👇 修正重點 1：將 get_member_info 往右推（讓它屬於 ExpTracker 類別的一部份）
-            def get_member_info(self, name):
-                """抓取團內成員備註的自動防呆版輔助函數"""
-            try:
-                # 防呆機制：確保資料庫裡有名冊這張表，沒有的話就立刻建一張
-                self.cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS member_registry (
-                        player_name TEXT PRIMARY KEY,
-                        original_identity TEXT
-                    )
-                ''')
-                self.db_conn.commit()
-                
-                self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
-                result = self.cursor.fetchone()
-                return f"({result[0]})" if result else ""
-            except Exception as e:
-                print(f"讀取標記失敗: {e}")
-                return ""
-
-# 👇 修正重點 2：setup 必須獨立在最外層（完全靠左），不能包住其他東西
+# setup 獨立在最外層，不會再有問題了
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))
