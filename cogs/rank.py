@@ -3,18 +3,15 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
-import sqlite3  # ✅ 引入資料庫模組來讀取成員標記
+import sqlite3
 from game_data import SERVER_MAP
 
 class RankTracker(commands.Cog):
-    # ✅ 加回引擎
     def __init__(self, bot):
         self.bot = bot
-        # ✅ 連線到 exp_tracker 使用的資料庫
         self.db_conn = sqlite3.connect('prasia_data.db', check_same_thread=False)
         self.cursor = self.db_conn.cursor()
 
-    # ✅ 新增：抓取團內成員備註的輔助函數
     def get_member_info(self, name):
         try:
             self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
@@ -37,7 +34,7 @@ class RankTracker(commands.Cog):
 
     @commands.command(name="排名", help="例如: !排名 全服, !排名 25 萊涅01")
     async def get_ranking(self, ctx, *args):
-        # 🛡️ 【資安防護網】修正為 not in
+        # 🛡️ 【資安防護網】
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids:
             return 
@@ -50,7 +47,6 @@ class RankTracker(commands.Cog):
         if count > 100: count = 100
         if count < 1: count = 10
 
-        # ✅ 新版極簡字串處理 (支援「萊涅01」或「萊涅 01」)
         target_server = "".join(args_list) if args_list else "全服"
 
         is_global = False
@@ -71,7 +67,6 @@ class RankTracker(commands.Cog):
             all_players = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
-                    # ✅ 新版 O(1) 極速全服掃描
                     tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results:
@@ -87,62 +82,39 @@ class RankTracker(commands.Cog):
             top_list = all_players[:count]
             
             # ==========================================
-            # 排版模式 A：少於等於 10 名 (精緻區塊顯示)
+            # ✨ 全新統一排版：廢除 Field，改用極簡對齊列表
             # ==========================================
-            if count <= 10:
-                embed = discord.Embed(title=f"🏆 {display_title}", color=0xffd700)
-                for idx, p in enumerate(top_list, 1):
-                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
-                    server_info = f"({p.get('world_name', '未知')}) " if is_global else ""
-                    
-                    name = str(p.get('gc_name', '未知'))
-                    class_name = str(p.get('class_name', '未知')) # 抓取職業
-                    tag = self.get_member_info(name) # 抓取標記
-                    display_name = f"{name}{tag}"
-                    
-                    embed.add_field(
-                        name=f"第 {idx} 名：{display_name}",
-                        value=f"{server_info}[{class_name}] | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
-                        inline=False
-                    )
-                await processing_msg.delete()
-                await ctx.send(embed=embed)
+            description = "```yaml\n" 
+            for idx, p in enumerate(top_list, 1):
+                exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                server_info = f"({p.get('world_name', '未知')})" if is_global else ""
                 
-            # ==========================================
-            # 排版模式 B：大於 10 名 (縮排列表顯示)
-            # ==========================================
-            else:
-                description = "```yaml\n" 
-                for idx, p in enumerate(top_list, 1):
-                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
-                    server_info = f"[{p.get('world_name', '未知')}]" if is_global else ""
-                    
-                    name = str(p.get('gc_name') or "未知")
-                    class_name = str(p.get('class_name', '未知')) # 抓取職業
-                    tag = self.get_member_info(name) # 抓取標記
-                    display_name = f"{name}{tag}"
-                    
-                    level_str = f"Lv.{p.get('gc_level', '?')}"
-                    
-                    # 計算對齊寬度 (中文字元佔2，英數佔1)
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
-                    name_padded = display_name + " " * max(0, 16 - name_width)
-                    
-                    # 組合顯示行 (加入職業)
-                    line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>8,.2f} 兆 {server_info}\n"
-                    
-                    if len(description) + len(line) > 1900:
-                        description += "```"
-                        embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
-                        await ctx.send(embed=embed)
-                        description = "```yaml\n"
-                    description += line
+                name = str(p.get('gc_name') or "未知")
+                class_name = str(p.get('class_name', '未知')) 
+                tag = self.get_member_info(name) 
+                display_name = f"{name}{tag}"
                 
-                description += "```"
-                embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-                embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (已整合標記與職業)")
-                await processing_msg.delete()
-                await ctx.send(embed=embed)
+                level_str = f"Lv.{p.get('gc_level', '?')}"
+                
+                # 計算對齊寬度 (中文字元佔2，英數佔1)
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                name_padded = display_name + " " * max(0, 16 - name_width)
+                
+                # 組合顯示行 (統一格式，拿掉多餘的文字)
+                line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>7,.2f}兆 {server_info}\n"
+                
+                if len(description) + len(line) > 1900:
+                    description += "```"
+                    embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
+                    await ctx.send(embed=embed)
+                    description = "```yaml\n"
+                description += line
+            
+            description += "```"
+            embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
+            embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (已整合標記與職業)")
+            await processing_msg.delete()
+            await ctx.send(embed=embed)
 
         except Exception as e:
             await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
