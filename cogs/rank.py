@@ -3,12 +3,25 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
+import sqlite3  # ✅ 引入資料庫模組來讀取成員標記
 from game_data import SERVER_MAP
 
 class RankTracker(commands.Cog):
     # ✅ 加回引擎
     def __init__(self, bot):
         self.bot = bot
+        # ✅ 連線到 exp_tracker 使用的資料庫
+        self.db_conn = sqlite3.connect('prasia_data.db', check_same_thread=False)
+        self.cursor = self.db_conn.cursor()
+
+    # ✅ 新增：抓取團內成員備註的輔助函數
+    def get_member_info(self, name):
+        try:
+            self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
+            result = self.cursor.fetchone()
+            return f"({result[0]})" if result else ""
+        except:
+            return ""
 
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
@@ -73,18 +86,31 @@ class RankTracker(commands.Cog):
             all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
             top_list = all_players[:count]
             
+            # ==========================================
+            # 排版模式 A：少於等於 10 名 (精緻區塊顯示)
+            # ==========================================
             if count <= 10:
                 embed = discord.Embed(title=f"🏆 {display_title}", color=0xffd700)
                 for idx, p in enumerate(top_list, 1):
                     exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
                     server_info = f"({p.get('world_name', '未知')}) " if is_global else ""
+                    
+                    name = str(p.get('gc_name', '未知'))
+                    class_name = str(p.get('class_name', '未知')) # 抓取職業
+                    tag = self.get_member_info(name) # 抓取標記
+                    display_name = f"{name}{tag}"
+                    
                     embed.add_field(
-                        name=f"第 {idx} 名：{p.get('gc_name', '未知')}",
-                        value=f"{server_info}{p.get('class_name')} | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
+                        name=f"第 {idx} 名：{display_name}",
+                        value=f"{server_info}[{class_name}] | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
                         inline=False
                     )
                 await processing_msg.delete()
                 await ctx.send(embed=embed)
+                
+            # ==========================================
+            # 排版模式 B：大於 10 名 (縮排列表顯示)
+            # ==========================================
             else:
                 description = "```yaml\n" 
                 for idx, p in enumerate(top_list, 1):
@@ -92,12 +118,18 @@ class RankTracker(commands.Cog):
                     server_info = f"[{p.get('world_name', '未知')}]" if is_global else ""
                     
                     name = str(p.get('gc_name') or "未知")
+                    class_name = str(p.get('class_name', '未知')) # 抓取職業
+                    tag = self.get_member_info(name) # 抓取標記
+                    display_name = f"{name}{tag}"
+                    
                     level_str = f"Lv.{p.get('gc_level', '?')}"
                     
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in name)
-                    name_padded = name + " " * max(0, 16 - name_width)
+                    # 計算對齊寬度 (中文字元佔2，英數佔1)
+                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                    name_padded = display_name + " " * max(0, 16 - name_width)
                     
-                    line = f"{idx:02d}. {name_padded} | {level_str:<5} | {exp_zhao:>8,.2f} 兆 {server_info}\n"
+                    # 組合顯示行 (加入職業)
+                    line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>8,.2f} 兆 {server_info}\n"
                     
                     if len(description) + len(line) > 1900:
                         description += "```"
@@ -108,7 +140,7 @@ class RankTracker(commands.Cog):
                 
                 description += "```"
                 embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-                embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達")
+                embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (已整合標記與職業)")
                 await processing_msg.delete()
                 await ctx.send(embed=embed)
 
