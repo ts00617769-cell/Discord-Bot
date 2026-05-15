@@ -272,146 +272,119 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         await ctx.send(embed=embed)
 
-    # 🕵️ 【職業鐵壁升級版】跨服改名雷達
-    @commands.command(name="抓改名", help="用法: !抓改名 \"2026-05-10 00:30\" \"2026-05-10 01:50\" [舊伺服器] [新伺服器]")
-    async def catch_name_changers(self, ctx, date1: str, date2: str, srv1: str = None, srv2: str = None):
-        target_msg = "全伺服器"
-        if srv1 and srv2: target_msg = f"「{srv1}」與「{srv2}」之間"
-        elif srv1: target_msg = f"包含「{srv1}」"
-            
-        processing_msg = await ctx.send(f"🕵️ 啟動天眼系統，導入「職業特徵碼」分析 {target_msg} 的數據...")
+    # ==========================================
+    # 📜 【全新指令】歷史資料庫排名查詢 (支援職業篩選)
+    # ==========================================
+    @commands.command(name="歷史排名", aliases=["查歷史", "歷史"], help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者")
+    async def historical_ranking(self, ctx, *args):
+        # 預設值設定
+        count = 100
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        date_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
+        target_server = "全服"
+        target_class = None # ✨ 新增：目標職業變數
+        
+        args_list = list(args)
+        class_parts = []
+        
+        # ✨ 升級版智慧解析引擎：自動分類你輸入的所有條件
+        for arg in args_list:
+            if arg.isdigit():
+                count = int(arg)
+            elif "-" in arg and len(arg) >= 8:
+                date_str = arg
+            elif arg in SERVER_MAP.keys() or arg in ["全服", "全部", "global"]:
+                target_server = arg
+            else:
+                # 如果不是數字、不是日期、也不是伺服器，那就一定是你指定的職業！
+                class_parts.append(arg)
+                
+        if class_parts:
+            target_class = "".join(class_parts)
+
+        is_global = target_server in ["全服", "全部", "global"]
+        if not is_global and target_server not in SERVER_MAP:
+            return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
+
+        if count > 100: count = 100
+        if count < 1: count = 10
+
+        filter_msg = f" 【{target_class}】的" if target_class else " "
+        processing_msg = await ctx.send(f"📊 正在潛入資料庫，調閱 `{date_str}` 的 {target_server}{filter_msg}歷史排行榜...")
         self.setup_database()
 
-        def get_snapshot(date_str):
-            if len(date_str) <= 10: target_time = f"{date_str} 23:59:59"
-            elif len(date_str) == 13: target_time = f"{date_str}:59:59"
-            elif len(date_str) == 16: target_time = f"{date_str}:00"
-            else: target_time = date_str
-
-            self.cursor.execute('''
-                SELECT DISTINCT record_time FROM exp_history 
-                ORDER BY ABS(CAST(strftime('%s', record_time) AS INTEGER) - CAST(strftime('%s', ?) AS INTEGER)) ASC LIMIT 1
-            ''', (target_time,))
+        # 組裝 SQL 語法
+        sql = '''
+            SELECT player_name, server_name, level, exp, class_name 
+            FROM exp_history 
+            WHERE record_time LIKE ? 
+        '''
+        params = [f"{date_str}%"]
+        
+        if not is_global:
+            sql += " AND server_name = ?"
+            params.append(target_server)
             
-            time_row = self.cursor.fetchone()
-            if not time_row: return None, None
-            exact_time = time_row[0]
+        # ✨ 如果有指定職業，就加入 SQL 過濾條件
+        if target_class:
+            sql += " AND class_name LIKE ?"
+            params.append(f"%{target_class}%") # 用 LIKE 容錯，打「監視者」也能搜到「太陽監視者」
             
-            # ✨ 抓取資料時，連同新加的 class_name (職業) 一起撈出來
-            self.cursor.execute('''
-                SELECT player_name, server_name, level, exp, class_name 
-                FROM exp_history WHERE record_time = ? ORDER BY exp DESC
-            ''', (exact_time,))
-            
-            snapshot = {}
-            for global_rank, r in enumerate(self.cursor.fetchall(), 1):
-                snapshot[r[0]] = {'server': r[1], 'level': r[2], 'exp': r[3], 'class_name': r[4], 'rank': global_rank}
-            return snapshot, exact_time
+        sql += '''
+            GROUP BY player_name, server_name
+            HAVING record_time = MAX(record_time)
+            ORDER BY exp DESC
+            LIMIT ?
+        '''
+        params.append(count)
 
         try:
-            old_data, exact_time1 = get_snapshot(date1)
-            new_data, exact_time2 = get_snapshot(date2)
-
-            if not old_data or not new_data:
-                return await processing_msg.edit(content=f"❌ 找不到資料或日期格式錯誤。")
-
-            missing_players = set(old_data.keys()) - set(new_data.keys())
-            appeared_players = set(new_data.keys()) - set(old_data.keys())
-
-            suspects = []
-            matched_new_names = set()
-
-            for old_name in missing_players:
-                old_info = old_data[old_name]
-                best_match = None
-                highest_confidence = 0
-                closest_exp_diff = float('inf')
-                
-                for new_name in appeared_players:
-                    if new_name in matched_new_names: continue
-                    new_info = new_data[new_name]
-                    
-                    if old_info['server'] == new_info['server']: continue
-                        
-                    if srv1 and srv2:
-                        if (old_info['server'], new_info['server']) not in [(srv1, srv2), (srv2, srv1)]: continue
-                    elif srv1:
-                        if old_info['server'] != srv1 and new_info['server'] != srv1: continue
-
-                    if new_info['level'] not in (old_info['level'], old_info['level'] + 1): continue
-
-                    # 🛡️ 職業鐵壁防禦：只要雙方都有職業資料，且職業不同，絕對不是同一人！
-                    if old_info['class_name'] != '未知' and new_info['class_name'] != '未知':
-                        if old_info['class_name'] != new_info['class_name']:
-                            continue
-
-                    exp_diff = new_info['exp'] - old_info['exp']
-                    rank_diff = abs(old_info['rank'] - new_info['rank'])
-                    
-                    confidence = 0
-                    match_type = ""
-
-                    if 0 <= exp_diff <= 10000000000000:
-                        confidence = 3
-                        match_type = "🟡 精準跳服 (經驗微增)"
-                    elif rank_diff <= 5 and abs(exp_diff) <= 150000000000000:
-                        confidence = 2
-                        match_type = "🔴 幽靈跳服 (全服排名鎖定)"
-                    elif -10000000000000 <= exp_diff <= 20000000000000:
-                        confidence = 1
-                        match_type = "🟠 疑似跳服 (經驗相近)"
-
-                    if confidence > highest_confidence or (confidence == highest_confidence and abs(exp_diff) < abs(closest_exp_diff)):
-                        highest_confidence = confidence
-                        closest_exp_diff = exp_diff
-                        best_match = {
-                            'type': match_type,
-                            'old_name': old_name, 'new_name': new_name,
-                            'old_server': old_info['server'], 'new_server': new_info['server'],
-                            'old_class': old_info['class_name'], 'new_class': new_info['class_name'],
-                            'old_rank': old_info['rank'], 'new_rank': new_info['rank'],
-                            'old_level': old_info['level'], 'new_level': new_info['level'],
-                            'exp_diff': exp_diff
-                        }
-                            
-                if best_match:
-                    suspects.append(best_match)
-                    matched_new_names.add(best_match['new_name'])
-
-            if not suspects:
-                return await processing_msg.edit(content=f"✅ 比對完畢：在 {target_msg} 中沒有發現跨服改名跡象。")
-
-            CHUNK_SIZE = 15
-            chunks = [suspects[i:i + CHUNK_SIZE] for i in range(0, len(suspects), CHUNK_SIZE)]
+            self.cursor.execute(sql, tuple(params))
+            rows = self.cursor.fetchall()
             
+            if not rows:
+                err_msg = f"❌ 資料庫中找不到 `{date_str}` 的排名資料。"
+                if target_class: err_msg = f"❌ 找不到符合條件的【{target_class}】玩家資料。"
+                return await processing_msg.edit(content=err_msg)
+
+            desc = f"**歷史快照日期：{date_str}**\n```yaml\n"
             embeds = []
-            for idx, chunk in enumerate(chunks):
-                embed = discord.Embed(
-                    title=f"🚨 跨服改名雷達追蹤報告 ({idx+1}/{len(chunks)})", 
-                    description=f"✅ **快照時間：**\n`{exact_time1}` ➡️ `{exact_time2}`\n🎯 **防護機制：**職業特徵碼鎖定", 
-                    color=0xe74c3c
-                )
+            
+            for idx, r in enumerate(rows, 1):
+                name, server, level, exp, class_name = r
                 
-                for s in chunk:
-                    detail = f"全服排名: {s['old_rank']} ➡️ {s['new_rank']} | 波動: {s['exp_diff']/1000000000000:+.2f} 兆"
-                    if s['exp_diff'] < -5000000000000: detail += " 📉(疑似掉趴)"
-                    elif s['exp_diff'] > 50000000000000: detail += " 📈(疑似贖回)"
-                        
-                    lv_text = f"Lv.{s['old_level']}" if s['old_level'] == s['new_level'] else f"Lv.{s['old_level']} ➡️ {s['new_level']}"
-                    
-                    # 顯示職業資訊
-                    class_display = f"[{s['new_class']}]" if s['old_class'] == s['new_class'] and s['new_class'] != '未知' else f"[{s['old_class']} ➡️ {s['new_class']}]"
-                        
-                    info = (f"**[舊]** `{s['old_name']}` ({s['old_server']})\n"
-                            f"**[新]** `{s['new_name']}` ({s['new_server']})\n"
-                            f"{lv_text} {class_display} | {detail}")
-                    embed.add_field(name=f"{s['type']}", value=info, inline=False)
-                    
+                # 自動套用團內成員標記
+                tag = self.get_member_info(name)
+                
+                # 組合顯示名稱與職業
+                display_name = f"{name}{tag}"
+                
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                name_padded = display_name + " " * max(0, 16 - name_width)
+                
+                srv_info = f"({server})" if is_global else ""
+                exp_zhao = exp / 1000000000000
+                
+                # ✨ 報表上自動顯示該玩家的職業
+                class_info = f"[{class_name}]"
+                
+                line = f"{idx:02d}. {name_padded} {class_info:<7} | Lv.{level:<2} | {exp_zhao:>7.2f} 兆 {srv_info}\n"
+                
+                if len(desc) + len(line) > 1900:
+                    desc += "```"
+                    embeds.append(discord.Embed(title=f"📜 {target_server}{filter_msg}歷史排名 (續)", description=desc, color=0x3498db))
+                    desc = "```yaml\n"
+                desc += line
+                
+            if desc != "```yaml\n":
+                desc += "```"
+                embed = discord.Embed(title=f"📜 {target_server}{filter_msg}歷史排名 TOP {len(rows)}", description=desc, color=0x3498db)
+                embed.set_footer(text="系統：天眼資料庫歷史快照 (支援職業篩選)")
                 embeds.append(embed)
 
-            try: await processing_msg.delete()
-            except: pass
-            for e in embeds: await ctx.send(embed=e)
+            await processing_msg.delete()
+            for e in embeds:
+                await ctx.send(embed=e)
 
         except Exception as e:
             await ctx.send(f"❌ 系統錯誤: {e}")
