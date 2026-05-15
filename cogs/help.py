@@ -4,6 +4,30 @@ from discord.ext import commands
 class HelpCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        
+    @commands.command(name="機密指令", help="戰情室專屬的進階指令手冊")
+    async def secret_help(self, ctx):
+        # 🛡️ 【資安防護網】把這裡的 ID 換成你的戰情頻道 ID
+        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        
+        # 如果不是在指定的頻道輸入，機器人就裝死（完全不回應）
+        if ctx.channel.id not in allowed_channel_ids:
+            return 
+
+        # 只有在指定頻道才會發送這張機密卡片
+        embed = discord.Embed(
+            title="🚨 戰情室專屬：進階雷達操作手冊", 
+            description="以下指令會調用系統深層資料庫，請小心使用。", 
+            color=0xE74C3C # 警戒的紅色
+        )
+
+        embed.add_field(name="🏆 即時排名", value="`!排名 [數量] [伺服器]`\n例：`!排名 50 萊涅01`", inline=False)
+        embed.add_field(name="📜 歷史排名 (支援職業與日期篩選)", value="`!歷史排名 [數量] [日期] [伺服器] [職業]`\n條件順序可隨意打亂。\n例：`!歷史 2026-05-08 萊涅04 太陽監視者`", inline=False)
+        embed.add_field(name="🏎️ 練功測速", value="`!測速 [數量] [伺服器]`\n例：`!測速 30 全服`", inline=False)
+        embed.add_field(name="✨ 星光出席點名", value="`!星光點名 [日期]`\n例：`!星光點名 2026-05-05`", inline=False)
+        
+        embed.set_footer(text="機密層級：最高 | 系統：O(1) 戰情終端機")
+        await ctx.send(embed=embed)
 
     @commands.command(name="指令", help="顯示所有可用的機器人指令操作手冊")
     async def show_help(self, ctx):
