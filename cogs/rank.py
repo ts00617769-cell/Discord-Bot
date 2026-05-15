@@ -68,4 +68,65 @@ class RankTracker(commands.Cog):
             async with aiohttp.ClientSession() as session:
                 if is_global:
                     tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
-                    results = await asyncio
+                    results = await asyncio.gather(*tasks)
+                    for r in results:
+                        all_players.extend(r)
+                else:
+                    players = await self.fetch_server_data(session, target_group_id, target_world_id)
+                    all_players.extend(players)
+
+            if not all_players:
+                return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
+
+            all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
+            top_list = all_players[:count]
+            
+            # ==========================================
+            # ✨ 雙行排版：徹底解決手機與小視窗跑版問題
+            # ==========================================
+            description = "```yaml\n" 
+            for idx, p in enumerate(top_list, 1):
+                exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                server_info = f"({p.get('world_name', '未知')})" if is_global else ""
+                
+                name = str(p.get('gc_name') or "未知")
+                class_name = str(p.get('class_name', '未知'))
+                tag = self.get_member_info(name) 
+                display_name = f"{name}{tag}"
+                
+                level_str = f"Lv.{p.get('gc_level', '?')}"
+                
+                # 計算名稱對齊寬度 (中文字元佔2，英數佔1)
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                name_padded = display_name + " " * max(0, 16 - name_width)
+                
+                # 第一行：名次. 名字 [職業] 等級 (伺服器)
+                line1 = f"{idx:02d}. {name_padded} [{class_name}] {level_str} {server_info}\n"
+                # 第二行：縮排顯示經驗值
+                line2 = f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"
+                
+                # 組合兩行
+                full_line = line1 + line2
+                
+                # 🛡️ 檢查字數，若超過 Discord 單條 Embed 限制 (約 2000 字) 則先發送
+                if len(description) + len(full_line) > 1900:
+                    description += "```"
+                    embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
+                    await ctx.send(embed=embed)
+                    description = "```yaml\n"
+                    
+                description += full_line
+            
+            # 迴圈結束後，發送最後的 Embed
+            description += "```"
+            embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
+            embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (雙行防跑版)")
+            
+            await processing_msg.delete()
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
+
+async def setup(bot):
+    await bot.add_cog(RankTracker(bot))
