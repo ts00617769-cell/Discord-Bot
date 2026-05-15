@@ -82,7 +82,7 @@ class RankTracker(commands.Cog):
             top_list = all_players[:count]
             
             # ==========================================
-            # ✨ 雙行排版：徹底解決手機與小視窗跑版問題
+            # ✨ 緊湊雙行排版：拿掉所有強迫對齊的多餘空格
             # ==========================================
             description = "```yaml\n" 
             for idx, p in enumerate(top_list, 1):
@@ -96,12 +96,9 @@ class RankTracker(commands.Cog):
                 
                 level_str = f"Lv.{p.get('gc_level', '?')}"
                 
-                # 計算名稱對齊寬度 (中文字元佔2，英數佔1)
-                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
-                name_padded = display_name + " " * max(0, 16 - name_width)
-                
-                # 第一行：名次. 名字 [職業] 等級 (伺服器)
-                line1 = f"{idx:02d}. {name_padded} [{class_name}] {level_str} {server_info}\n"
+                # 第一行：名次. [名字] [職業] 等級 (伺服器)
+                # 直接以單一空格隔開，自然緊湊
+                line1 = f"{idx:02d}. [{display_name}] [{class_name}] {level_str} {server_info}\n"
                 # 第二行：縮排顯示經驗值
                 line2 = f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"
                 
@@ -113,6 +110,7 @@ class RankTracker(commands.Cog):
                     description += "```"
                     embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
                     await ctx.send(embed=embed)
+                    # 重置 description，準備裝剩下的資料
                     description = "```yaml\n"
                     
                 description += full_line
@@ -120,7 +118,7 @@ class RankTracker(commands.Cog):
             # 迴圈結束後，發送最後的 Embed
             description += "```"
             embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-            embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (雙行防跑版)")
+            embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (緊湊雙行版)")
             
             await processing_msg.delete()
             await ctx.send(embed=embed)
