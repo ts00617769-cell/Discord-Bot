@@ -391,3 +391,22 @@ class ExpTracker(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))
+
+    def get_member_info(self, name):
+        """抓取團內成員備註的自動防呆版輔助函數"""
+        try:
+            # 防呆機制：確保資料庫裡有名冊這張表，沒有的話就立刻建一張
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS member_registry (
+                    player_name TEXT PRIMARY KEY,
+                    original_identity TEXT
+                )
+            ''')
+            self.db_conn.commit()
+            
+            self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
+            result = self.cursor.fetchone()
+            return f"({result[0]})" if result else ""
+        except Exception as e:
+            print(f"讀取標記失敗: {e}")
+            return ""
