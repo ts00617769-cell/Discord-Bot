@@ -10,6 +10,7 @@ import sqlite3
 import aiohttp
 from bs4 import BeautifulSoup
 
+
 # 💡 關鍵：從外部模組匯入我們分離出去的靜態資料
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES, item_names, item_rates, item_map
 
