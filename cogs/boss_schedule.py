@@ -24,7 +24,7 @@ class BossSchedule(commands.Cog):
         weekday = ten_mins_later.weekday()
 
         if target_minute == 0 and target_hour in GAP_BOSS_SCHEDULE.get(weekday, []):
-            channel = bot.get_channel(REMINDER_CHANNEL_ID)
+            channel = self.bot.get_channel(self.REMINDER_CHANNEL_ID)
             if channel:
                 time_str = "點、".join(map(str, GAP_BOSS_SCHEDULE[weekday])) + "點"
                 embed = discord.Embed(
