@@ -108,38 +108,64 @@ class RankTracker(commands.Cog):
             all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
             top_list = all_players[:count]
             
-            # 6. 渲染極簡對齊的 yaml 報表
-            description = "```yaml\n" 
-            for idx, p in enumerate(top_list, 1):
-                exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
-                server_info = f"({p.get('world_name', '未知')})" if is_global else ""
+            # ==========================================
+            # 💖 恢復原狀：少於等於 10 名 (精緻區塊顯示)
+            # ==========================================
+            if count <= 10:
+                embed = discord.Embed(title=f"🏆 {display_title}", color=0xffd700)
+                for idx, p in enumerate(top_list, 1):
+                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                    server_info = f"({p.get('world_name', '未知')}) " if is_global else ""
+                    
+                    name = str(p.get('gc_name', '未知'))
+                    class_name = str(p.get('class_name', '未知')) 
+                    tag = self.get_member_info(name) 
+                    display_name = f"{name}{tag}"
+                    
+                    embed.add_field(
+                        name=f"第 {idx} 名：{display_name}",
+                        value=f"{server_info}[{class_name}] | Lv.{p.get('gc_level')} | **{exp_zhao:,.2f} 兆**",
+                        inline=False
+                    )
+                embed.set_footer(text="系統：即時雷達過濾引擎")
+                await processing_msg.delete()
+                await ctx.send(embed=embed)
                 
-                name = str(p.get('gc_name') or "未知")
-                class_name = str(p.get('class_name', '未知')) 
-                tag = self.get_member_info(name) 
-                display_name = f"{name}{tag}"
+            # ==========================================
+            # 排版模式 B：大於 10 名 (縮排列表顯示)
+            # ==========================================
+            else:
+                description = "```yaml\n" 
+                for idx, p in enumerate(top_list, 1):
+                    exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
+                    server_info = f"({p.get('world_name', '未知')})" if is_global else ""
+                    
+                    name = str(p.get('gc_name') or "未知")
+                    class_name = str(p.get('class_name', '未知')) 
+                    tag = self.get_member_info(name) 
+                    display_name = f"{name}{tag}"
+                    
+                    level_str = f"Lv.{p.get('gc_level', '?')}"
+                    
+                    # 計算對齊寬度
+                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                    name_padded = display_name + " " * max(0, 16 - name_width)
+                    
+                    # 組合顯示行
+                    line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>7,.2f}兆 {server_info}\n"
+                    
+                    if len(description) + len(line) > 1900:
+                        description += "```"
+                        embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
+                        await ctx.send(embed=embed)
+                        description = "```yaml\n"
+                    description += line
                 
-                level_str = f"Lv.{p.get('gc_level', '?')}"
-                
-                # 計算對齊寬度 (中文字元佔2，英數佔1)
-                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
-                name_padded = display_name + " " * max(0, 16 - name_width)
-                
-                # 完美格式化輸出行
-                line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>7,.2f}兆 {server_info}\n"
-                
-                if len(description) + len(line) > 1900:
-                    description += "```"
-                    embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
-                    await ctx.send(embed=embed)
-                    description = "```yaml\n"
-                description += line
-            
-            description += "```"
-            embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-            embed.set_footer(text="單位：兆經驗值 | 系統：即時雷達過濾引擎 (已整合標記與職業過濾)")
-            await processing_msg.delete()
-            await ctx.send(embed=embed)
+                description += "```"
+                embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
+                embed.set_footer(text="單位：兆經驗值 | 系統：即時雷達過濾引擎")
+                await processing_msg.delete()
+                await ctx.send(embed=embed)
 
         except Exception as e:
             await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
