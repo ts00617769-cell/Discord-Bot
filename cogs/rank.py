@@ -6,53 +6,15 @@ import unicodedata
 import sqlite3
 from game_data import SERVER_MAP
 
-# ==========================================
-# 🎨 現代化 UI 組件：伺服器下拉式選單
-# ==========================================
-class RankUI(discord.ui.View):
-    def __init__(self, cog, count):
-        super().__init__(timeout=120) # 兩分鐘後選單自動失效
-        self.cog = cog
-        self.count = count
-
-        # 建立選單選項 (結合 game_data 的伺服器清單)
-        options = [discord.SelectOption(label="全服", description="掃描全伺服器綜合排名", emoji="🌐")]
-        for srv in SERVER_MAP.keys():
-            options.append(discord.SelectOption(label=srv, emoji="🖥️"))
-        
-        # 實例化下拉式選單
-        self.select = discord.ui.Select(
-            placeholder="👇 請點擊此處選擇目標伺服器...", 
-            min_values=1, 
-            max_values=1, 
-            options=options
-        )
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        selected_server = self.select.values[0]
-        
-        # 1. 立即回覆互動 (使用 ephemeral=True 讓訊息只有點擊的人看得到)
-        await interaction.response.send_message(
-            f"✅ 收到指示！正在為您生成 **{selected_server}** (TOP {self.count}) 的戰情報表...", 
-            ephemeral=True
-        )
-        
-        # 2. 將報表發送到原本的頻道中
-        await self.cog.generate_ranking(interaction.channel, self.count, selected_server)
-
-
-# ==========================================
-# ⚙️ 排名追蹤核心模組
-# ==========================================
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # 連線到資料庫以抓取成員名牌備註
         self.db_conn = sqlite3.connect('prasia_data.db', check_same_thread=False)
         self.cursor = self.db_conn.cursor()
 
     def get_member_info(self, name):
+        """抓取團內成員備註的輔助函數"""
         try:
             self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
             result = self.cursor.fetchone()
@@ -72,10 +34,9 @@ class RankTracker(commands.Cog):
             pass
         return []
 
-    # 📡 指令入口
-    @commands.command(name="排名", help="傳統用法: !排名 25 萊涅01 | 現代用法: !排名 25 (跳出選單)")
+    @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
-        # 🛡️ 【資安防護網】
+        # 🛡️ 【資安防護網】限制查詢頻道
         allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
         if ctx.channel.id not in allowed_channel_ids:
             return 
@@ -83,52 +44,48 @@ class RankTracker(commands.Cog):
         count = 10
         args_list = list(args)
         
-        # 判斷第一個參數是否為數字 (數量)
+        # 1. 解析數量 (如果第一個參數是數字)
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
             
         if count > 100: count = 100
         if count < 1: count = 10
 
-        # 剩下的參數當作伺服器名稱
-        target_server = "".join(args_list) if args_list else ""
+        target_server = "全服"
+        target_class = None
+        class_parts = []
 
-        # 💡 【核心邏輯分流】
-        # 如果使用者有直接打伺服器名字，就走傳統直接生成的路線
-        if target_server:
-            await self.generate_ranking(ctx.channel, count, target_server)
-            
-        # 如果沒打伺服器名字，就彈出精美的下拉式選單 UI
-        else:
-            view = RankUI(self, count)
-            embed = discord.Embed(
-                title="📊 伺服器戰力觀測站", 
-                description=f"請從下方選單選擇您要掃描的伺服器。\n*(目前設定抓取前 **{count}** 名，若要更改請輸入如 `!排名 50`)*", 
-                color=0x2ECC71
-            )
-            await ctx.send(embed=embed, view=view)
+        # 2. 聰明拆分「伺服器」與「職業」
+        for arg in args_list:
+            if arg in SERVER_MAP or arg in ["全服", "全部", "global"]:
+                target_server = arg
+            else:
+                class_parts.append(arg)
 
+        if class_parts:
+            target_class = "".join(class_parts)
 
-    # 🧠 實際處理排名的後台引擎 (獨立出來給指令與 UI 共同使用)
-    async def generate_ranking(self, channel, count, target_server):
-        is_global = False
-        if target_server in ["全服", "全部", ""]:
-            is_global = True
-            display_title = f"全伺服器 TOP {count}"
+        is_global = target_server in ["全服", "全部", "global"]
+        
+        # 3. 建立精美的標題文字
+        filter_msg = f"【{target_class}】" if target_class else " "
+        if is_global:
+            display_title = f"全伺服器{filter_msg}TOP {count}"
         else:
             if target_server not in SERVER_MAP:
                 valid_list = "、".join(SERVER_MAP.keys())
-                return await channel.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
+                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
             
             target_group_id, target_world_id = SERVER_MAP[target_server]
-            display_title = f"【{target_server}】 TOP {count}"
+            display_title = f"【{target_server}】{filter_msg}TOP {count}"
 
-        processing_msg = await channel.send(f"🔍 正在潛入橘子主機，彙整 {display_title} 戰情數據...")
+        processing_msg = await ctx.send(f"🔍 正在潛入橘子主機，彙整 {display_title} 即時戰情...")
 
         try:
             all_players = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
+                    # O(1) 極速全服並行掃描
                     tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results:
@@ -140,41 +97,49 @@ class RankTracker(commands.Cog):
             if not all_players:
                 return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
 
+            # 4. ✨ 核心功能：如果在參數中有輸入職業，就在這邊過濾
+            if target_class:
+                all_players = [p for p in all_players if target_class in str(p.get("class_name", ""))]
+
+            if not all_players:
+                return await processing_msg.edit(content=f"❌ 找不到符合【{target_class}】職業條件的即時排名資料。")
+
+            # 5. 排序並截取前 N 名
             all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
             top_list = all_players[:count]
             
-            # ✨ 緊湊雙行排版
+            # 6. 渲染極簡對齊的 yaml 報表
             description = "```yaml\n" 
             for idx, p in enumerate(top_list, 1):
                 exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
                 server_info = f"({p.get('world_name', '未知')})" if is_global else ""
                 
                 name = str(p.get('gc_name') or "未知")
-                class_name = str(p.get('class_name', '未知'))
+                class_name = str(p.get('class_name', '未知')) 
                 tag = self.get_member_info(name) 
                 display_name = f"{name}{tag}"
                 
                 level_str = f"Lv.{p.get('gc_level', '?')}"
                 
-                line1 = f"{idx:02d}. [{display_name}] [{class_name}] {level_str} {server_info}\n"
-                line2 = f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"
+                # 計算對齊寬度 (中文字元佔2，英數佔1)
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                name_padded = display_name + " " * max(0, 16 - name_width)
                 
-                full_line = line1 + line2
+                # 完美格式化輸出行
+                line = f"{idx:02d}. {name_padded} [{class_name:<6}] | {level_str:<5} | {exp_zhao:>7,.2f}兆 {server_info}\n"
                 
-                if len(description) + len(full_line) > 1900:
+                if len(description) + len(line) > 1900:
                     description += "```"
                     embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
-                    await channel.send(embed=embed)
+                    await ctx.send(embed=embed)
                     description = "```yaml\n"
-                    
-                description += full_line
+                description += line
             
             description += "```"
             embed = discord.Embed(title=f"🏆 {display_title}", description=description, color=0xffd700)
-            embed.set_footer(text="單位：兆經驗值 | 系統：O(1) 極速伺服器雷達 (支援現代化 UI)")
-            
+            embed.set_footer(text="單位：兆經驗值 | 系統：即時雷達過濾引擎 (已整合標記與職業過濾)")
             await processing_msg.delete()
-            await channel.send(embed=embed)
+            await ctx.send(embed=embed)
 
         except Exception as e:
             await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
