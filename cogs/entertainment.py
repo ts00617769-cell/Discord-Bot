@@ -6,83 +6,12 @@ import pytz
 import sqlite3
 import aiohttp
 from bs4 import BeautifulSoup
-from game_data import item_names, item_rates, item_map
+
 class Entertainment(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-
-# --- 6. 指令：抽卡 ---
-    @commands.command(name='抽卡', help='結果透過私訊傳送，最高 1000 抽。')
-    async def gacha(self, ctx, num_pulls: int = 10):
-        if not 0 < num_pulls <= 1000:
-            await ctx.send(f"{ctx.author.mention} 抽卡次數須在 1-1000 之間！", delete_after=5)
-            return
-
-        rarity_colors = {
-            "傳說": 0xa335ee, "英雄": 0xff0000, "稀有": 0x0070dd, "高級": 0x1eff00, "一般": 0x9d9d9d
-        }
-
-        results = [item_map[random.choices(item_names, weights=item_rates, k=1)[0]] for _ in range(num_pulls)]
-
-        summary = {}
-        for res in results:
-            rarity = res["rarity"]
-            if rarity not in summary: summary[rarity] = []
-            summary[rarity].append(res["name"])
-
-        response_lines = [f"**--- 您的 {num_pulls} 抽結果 ---**"]
-        high_rarity_embeds = []
-
-        for r in ["傳說", "英雄", "稀有", "高級", "一般"]:
-            if r in summary:
-                response_lines.append(f"**{r}** ({len(summary[r])} 張):")
-                if r in ["傳說", "英雄"]:
-                    for item_name in summary[r]:
-                        response_lines.append(f"- {item_name}")
-                        e = discord.Embed(
-                            title="✨ 恭喜抽到頂級物品！",
-                            description=f"**{item_name}** ({r})",
-                            color=rarity_colors.get(r, 0xffffff)
-                        )
-                        high_rarity_embeds.append(e)
-                else:
-                    for item_name in summary[r]:
-                        response_lines.append(f"- {item_name}")
-
-        full_response = "\n".join(response_lines)
-
-        try:
-            if len(full_response) > 2000:
-                chunks = [full_response[i:i+1900] for i in range(0, len(full_response), 1900)]
-                for chunk in chunks: await ctx.author.send(chunk)
-            else:
-                await ctx.author.send(full_response)
-
-            for embed in high_rarity_embeds: await ctx.author.send(embed=embed)
-            await ctx.send(f"✅ {ctx.author.mention} {num_pulls} 抽結果已送達私訊！", delete_after=5)
-        except discord.Forbidden:
-            await ctx.send(f"❌ {ctx.author.mention} 我無法傳私訊給你，請開啟隱私設定。")
-
-# --- 7. 指令：純數字抽獎 ---
-    @commands.command(name="抽", help="隨機抽取一個數字。")
-    async def draw_number(self, ctx, max_val: int = 100):
-        if max_val <= 1:
-            await ctx.send(f"{ctx.author.mention} 抽獎範圍至少要大於 1 喔！")
-            return
-        
-        lucky_number = random.randint(1, max_val)
-        
-        embed = discord.Embed(
-            title="🎲 隨機抽號碼",
-            description=f"從 **1 ~ {max_val}** 之中...",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="抽出的幸運號碼是：", value=f"✨ **{lucky_number}**", inline=False)
-        embed.set_footer(text=f"由 {ctx.author.display_name} 啟動抽獎")
-        await ctx.send(embed=embed)
-
-# --- 9. 指令：鍊成系統 ---
+    # --- 9. 指令：鍊成系統 ---
     @commands.command(name="鍊成", help="模擬四合一鍊成。")
     async def alchemy(self, ctx, rarity: str):
         tiers = {"一般": "高級", "高級": "稀有", "稀有": "英雄", "英雄": "傳說", "傳說": "神話"}
@@ -209,7 +138,7 @@ class Entertainment(commands.Cog):
         ''')
         conn.commit()
 
-    # 3. 🔍 核心邏輯：先找快取
+        # 3. 🔍 核心邏輯：先找快取
         cursor.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign))
         cached_result = cursor.fetchone()
 
