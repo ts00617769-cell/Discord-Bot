@@ -82,9 +82,10 @@ class ExpTracker(commands.Cog):
         now_time = datetime.datetime.now().replace(second=0, microsecond=0)
         print(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
         
-        
-        for server_name, (g_id, w_id) in SERVER_MAP.items():
-            players = await self.fetch_server_data(self.bot.session, g_id, w_id)
+        async with aiohttp.ClientSession() as session:
+            for server_name, (g_id, w_id) in SERVER_MAP.items():
+                players = await self.fetch_server_data(session, g_id, w_id) # 改用區域的 session
+
             for p in players:
                 # ✨ 改用 await self.bot.db.execute
                 await self.bot.db.execute('''
