@@ -238,3 +238,176 @@ class ExpTracker(commands.Cog):
 
         await processing_msg.delete()
         for e in embeds: await ctx.send(embed=e)
+    @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
+    async def starlight_attendance(self, ctx, target_date: str = None):
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        if target_date:
+            query_date, display_date = target_date, f"歷史調閱 ({target_date})"
+        else:
+            query_date, display_date = datetime.datetime.now(tz).strftime('%Y-%m-%d'), "今日"
+
+        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在掃描 **全伺服器** {display_date} 23:00 ~ 23:30...")
+        
+        # ✨ 改用非同步資料庫查詢
+        async with self.bot.db.execute('''
+            SELECT MIN(record_time), MAX(record_time) FROM exp_history 
+            WHERE record_time >= ? AND record_time <= ?
+        ''', (f"{query_date} 23:00:00", f"{query_date} 23:30:00")) as cursor:
+            times = await cursor.fetchone()
+        
+        if not times or not times[0] or not times[1] or times[0] == times[1]:
+            return await processing_msg.edit(content=f"❌ 找不到 {query_date} 23:00 ~ 23:30 的資料。")
+            
+        start_time, end_time = times[0], times[1]
+        fmt = '%Y-%m-%d %H:%M:%S'
+        minutes_diff = (datetime.datetime.strptime(end_time, fmt) - datetime.datetime.strptime(start_time, fmt)).total_seconds() / 60
+        if minutes_diff <= 0: minutes_diff = 30 
+
+        # ✨ 改用非同步資料庫查詢
+        async with self.bot.db.execute('''
+            SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp)
+            FROM exp_history t1 JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+            WHERE t1.record_time = ? AND t2.record_time = ?
+        ''', (start_time, end_time)) as cursor:
+            records = await cursor.fetchall()
+        
+        results = {}
+        for server, player, diff in records:
+            if diff > 0:
+                hourly_speed = (diff / minutes_diff) * 60
+                if 100000000000 <= hourly_speed <= 1500000000000:
+                    if server not in results: results[server] = []
+                    results[server].append((player, hourly_speed / 100000000))
+                
+        embed = discord.Embed(
+            title=f"✨ 星光解放戰 全服出席 {display_date}", 
+            description=f"📊 **採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}`\n🎯 **門檻**：時速 1000億 ~ 1.5兆", 
+            color=0xf1c40f
+        )
+        
+        if not results:
+            embed.add_field(name="狀態報告", value="全服無人符合時速條件。", inline=False)
+        else:
+            for server in sorted(results.keys()):
+                players = sorted(results[server], key=lambda x: x[1], reverse=True)
+                lines = []
+                for p_name, p_speed in players:
+                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
+                    lines.append(f"• {str(p_name) + ' ' * max(0, 14 - name_width)} (時速 {p_speed:,.0f}億)")
+                    
+                full_text = "\n".join(lines)
+                if len(full_text) > 900: full_text = full_text[:900] + "\n... (截斷)"
+                embed.add_field(name=f"🌐 {server} (共 {len(players)} 人)", value=f"```yaml\n{full_text}\n```", inline=False)
+            
+        await processing_msg.delete()
+        await ctx.send(embed=embed)
+
+    @commands.command(name="歷史排名", aliases=["查歷史", "歷史"], help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者")
+    async def historical_ranking(self, ctx, *args):
+        count = 100
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        date_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
+        target_server = "全服"
+        target_class = None
+        
+        args_list = list(args)
+        class_parts = []
+        
+        for arg in args_list:
+            if arg.isdigit():
+                count = int(arg)
+            elif "-" in arg and len(arg) >= 8:
+                date_str = arg
+            elif arg in SERVER_MAP.keys() or arg in ["全服", "全部", "global"]:
+                target_server = arg
+            else:
+                class_parts.append(arg)
+                
+        if class_parts:
+            target_class = "".join(class_parts)
+
+        is_global = target_server in ["全服", "全部", "global"]
+        if not is_global and target_server not in SERVER_MAP:
+            return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
+
+        if count > 100: count = 100
+        if count < 1: count = 10
+
+        filter_msg = f" 【{target_class}】的" if target_class else " "
+        processing_msg = await ctx.send(f"📊 正在潛入資料庫，調閱 `{date_str}` 的 {target_server}{filter_msg}歷史排行榜...")
+
+        sql = '''
+            SELECT player_name, server_name, level, exp, class_name 
+            FROM exp_history 
+            WHERE record_time LIKE ? 
+        '''
+        params = [f"{date_str}%"]
+        
+        if not is_global:
+            sql += " AND server_name = ?"
+            params.append(target_server)
+            
+        if target_class:
+            sql += " AND class_name LIKE ?"
+            params.append(f"%{target_class}%")
+            
+        sql += '''
+            GROUP BY player_name, server_name
+            HAVING record_time = MAX(record_time)
+            ORDER BY exp DESC
+            LIMIT ?
+        '''
+        params.append(count)
+
+        try:
+            # ✨ 改用非同步資料庫查詢
+            async with self.bot.db.execute(sql, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+            
+            if not rows:
+                err_msg = f"❌ 資料庫中找不到 `{date_str}` 的排名資料。"
+                if target_class: err_msg = f"❌ 找不到符合條件的【{target_class}】玩家資料。"
+                return await processing_msg.edit(content=err_msg)
+
+            desc = f"**歷史快照日期：{date_str}**\n```yaml\n"
+            embeds = []
+            
+            for idx, r in enumerate(rows, 1):
+                name, server, level, exp, class_name = r
+                
+                # ✨ 這裡是最重要的 await！
+                tag = await self.get_member_info(name)
+                
+                display_name = f"{name}{tag}"
+                
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
+                name_padded = display_name + " " * max(0, 16 - name_width)
+                
+                srv_info = f"({server})" if is_global else ""
+                exp_zhao = exp / 1000000000000
+                class_info = f"[{class_name}]"
+                
+                line = f"{idx:02d}. {name_padded} {class_info:<7} | Lv.{level:<2} | {exp_zhao:>7.2f} 兆 {srv_info}\n"
+                
+                if len(desc) + len(line) > 1900:
+                    desc += "```"
+                    embeds.append(discord.Embed(title=f"📜 {target_server}{filter_msg}歷史排名 (續)", description=desc, color=0x3498db))
+                    desc = "```yaml\n"
+                desc += line
+                
+            if desc != "```yaml\n":
+                desc += "```"
+                embed = discord.Embed(title=f"📜 {target_server}{filter_msg}歷史排名 TOP {len(rows)}", description=desc, color=0x3498db)
+                embed.set_footer(text="系統：天眼資料庫歷史快照 (支援職業篩選)")
+                embeds.append(embed)
+
+            await processing_msg.delete()
+            for e in embeds:
+                await ctx.send(embed=e)
+
+        except Exception as e:
+            await ctx.send(f"❌ 系統錯誤: {e}")
+
+# setup 獨立在最外層
+async def setup(bot):
+    await bot.add_cog(ExpTracker(bot))
