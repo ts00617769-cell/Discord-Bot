@@ -1,14 +1,13 @@
 import discord
 from discord.ext import commands, tasks
 import traceback
-import sqlite3
 import datetime
 import os
 
 class WarRoom(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # 🎯 定義你的戰情室頻道 ID (請換成你專屬的隱藏頻道 ID)
+        # 🎯 定義你的戰情室頻道 ID (從 .env 讀取)
         self.log_channel_id = int(os.getenv("WAR_ROOM_CHANNEL_ID", 0)) 
         
         # 啟動資料庫清理排程
