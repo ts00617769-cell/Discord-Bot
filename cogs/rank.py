@@ -3,7 +3,6 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
-import sqlite3
 from game_data import SERVER_MAP
 import os
 
@@ -11,15 +10,12 @@ class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # 連線到資料庫以抓取成員名牌備註
-        self.db_conn = sqlite3.connect('prasia_data.db', check_same_thread=False)
-        self.cursor = self.db_conn.cursor()
-
-    def get_member_info(self, name):
+    async def get_member_info(self, name):
         """抓取團內成員備註的輔助函數"""
         try:
-            self.cursor.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,))
-            result = self.cursor.fetchone()
-            return f"({result[0]})" if result else ""
+            async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,)) as cursor:
+                result = await cursor.fetchone()
+                return f"({result[0]})" if result else ""
         except:
             return ""
 
@@ -46,7 +42,6 @@ class RankTracker(commands.Cog):
         count = 10
         args_list = list(args)
         
-        # 1. 解析數量 (如果第一個參數是數字)
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
             
@@ -57,7 +52,6 @@ class RankTracker(commands.Cog):
         target_class = None
         class_parts = []
 
-        # 2. 聰明拆分「伺服器」與「職業」
         for arg in args_list:
             if arg in SERVER_MAP or arg in ["全服", "全部", "global"]:
                 target_server = arg
@@ -69,7 +63,6 @@ class RankTracker(commands.Cog):
 
         is_global = target_server in ["全服", "全部", "global"]
         
-        # 3. 建立精美的標題文字
         filter_msg = f"【{target_class}】" if target_class else " "
         if is_global:
             display_title = f"全伺服器{filter_msg}TOP {count}"
@@ -98,20 +91,15 @@ class RankTracker(commands.Cog):
             if not all_players:
                 return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
 
-            # 4. ✨ 核心功能：如果在參數中有輸入職業，就在這邊過濾
             if target_class:
                 all_players = [p for p in all_players if target_class in str(p.get("class_name", ""))]
 
             if not all_players:
                 return await processing_msg.edit(content=f"❌ 找不到符合【{target_class}】職業條件的即時排名資料。")
 
-            ## 5. 排序並截取前 N 名
             all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
             top_list = all_players[:count]
             
-            # ==========================================
-            # ✨ 採用全新雙行排版 (統一格式，不再區分數量)
-            # ==========================================
             description = "```yaml\n" 
             for idx, p in enumerate(top_list, 1):
                 exp_zhao = p.get("gc_exp", 0) / 1_000_000_000_000
@@ -119,16 +107,16 @@ class RankTracker(commands.Cog):
                 
                 name = str(p.get('gc_name') or "未知")
                 class_name = str(p.get('class_name', '未知')) 
-                tag = self.get_member_info(name) 
-                display_name = f"{name}{tag}"
                 
+                # ✨ 這裡要補上 await 來呼叫非同步的函式
+                tag = await self.get_member_info(name) 
+                
+                display_name = f"{name}{tag}"
                 level_str = p.get('gc_level', '?')
                 
-                # 組合雙行顯示格式
                 line = f"{idx:02d}. [{display_name}] [{class_name}] Lv.{level_str} {server_info}\n"
                 line += f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"
                 
-                # 若字數超過 Discord 限制則先發送卡片並開啟新區塊
                 if len(description) + len(line) > 1900:
                     description += "```"
                     embed = discord.Embed(title=f"🏆 {display_title} (續)", description=description, color=0xffd700)
