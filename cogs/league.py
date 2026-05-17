@@ -45,7 +45,7 @@ class LeagueTracker(commands.Cog):
 
         try:
             # 直接使用全域 session
-            async with self.bot.session.post(api_url, json=payload, headers=headers, ssl=False) as response:
+            async with self.bot.session.post(api_url, json=payload, headers=headers, ssl=False, timeout=10) as response:
                 if response.status != 200:
                     return await processing_msg.edit(content=f"❌ API 連線失敗 (狀態碼: {response.status})。請確認 API 網址是否正確。")
                 

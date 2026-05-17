@@ -23,10 +23,10 @@ class RankTracker(commands.Cog):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
         try:
-            async with session.post(api_url, json=payload, timeout=10) as response:
-                if response.status == 200:
-                    json_data = await response.json()
-                    return json_data.get("data", {}).get("gc") or []
+            
+            if response.status == 200:
+                json_data = await response.json()
+                return json_data.get("data", {}).get("gc") or []
         except Exception:
             pass
         return []
