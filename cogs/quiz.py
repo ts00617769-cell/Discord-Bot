@@ -4,6 +4,7 @@ import json
 import random
 import datetime
 import pytz
+import os
 
 # --- 讀取題庫 ---
 with open('quiz.json', 'r', encoding='utf-8') as f:
@@ -94,7 +95,8 @@ class QuizSystem(commands.Cog):
 
             try:
                 # 替換成你的發題頻道 ID
-                channel = self.bot.get_channel(1480493340456783922) 
+                channel_id = int(os.getenv("QUIZ_CHANNEL_ID", 0))
+                channel = self.bot.get_channel(channel_id) 
                 if channel:
                     seed = int(now.strftime("%Y%m%d"))
                     random.seed(seed)

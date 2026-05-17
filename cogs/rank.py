@@ -5,6 +5,7 @@ import asyncio
 import unicodedata
 import sqlite3
 from game_data import SERVER_MAP
+import os
 
 class RankTracker(commands.Cog):
     def __init__(self, bot):
@@ -37,7 +38,8 @@ class RankTracker(commands.Cog):
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
         # 🛡️ 【資安防護網】限制查詢頻道
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
         if ctx.channel.id not in allowed_channel_ids:
             return 
 

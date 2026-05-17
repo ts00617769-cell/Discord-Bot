@@ -6,6 +6,7 @@ import sqlite3
 import datetime
 import unicodedata
 from game_data import SERVER_MAP
+import os
 
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
@@ -14,7 +15,7 @@ class ExpTracker(commands.Cog):
         self.cursor = self.db_conn.cursor()
         self.setup_database()
         
-        self.ALERT_CHANNEL_ID = 1476506457032884328 
+        self.ALERT_CHANNEL_ID = int(os.getenv("EXP_ALERT_CHANNEL_ID", 0))
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
         

@@ -1,5 +1,7 @@
 import discord
 from discord.ext import commands
+import os
+
 
 class HelpCog(commands.Cog):
     def __init__(self, bot):
@@ -8,7 +10,8 @@ class HelpCog(commands.Cog):
     @commands.command(name="機密指令", help="戰情室專屬的進階指令手冊")
     async def secret_help(self, ctx):
         # 🛡️ 【資安防護網】把這裡的 ID 換成你的戰情頻道 ID
-        allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
         
         # 如果不是在指定的頻道輸入，機器人就裝死（完全不回應）
         if ctx.channel.id not in allowed_channel_ids:
@@ -47,20 +50,10 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(name="⚔️ 戰情與數據掃描", value=intel_desc, inline=False)
 
-        # 🏦 2. 旅團金庫管理系統
-        bank_desc = (
-            "**`!記帳 [金額] [說明]`**\n"
-            "記錄旅團收入或支出。例：`!記帳 20000 宇宙鑽石` 或 `!記帳 -10000 出席分配`\n\n"
-            "**`!金庫`**\n"
-            "查看旅團目前總結餘與最近 5 筆收支明細。"
-        )
-        embed.add_field(name="🏦 旅團金庫管理", value=bank_desc, inline=False)
 
         # 🔮 3. 遊戲輔助與工具
         tools_desc = (
             "**`!時空`**\n查詢當日「時空縫隙首領」召喚時間表。\n\n"
-            "**`!抽卡 [次數]`**\n模擬遊戲抽卡(1~1000抽)，結果將私訊傳送。例：`!抽卡 11`\n\n"
-            "**`!抽 [最大數字]`**\n隨機抽取 1~N 的數字，適合分配戰利品。例：`!抽 100`\n\n"
             "**`!鍊成 [階級]`**\n模擬裝備四合一鍊成(需連過四柱)。例：`!鍊成 英雄`\n\n"
             "**`!塔羅`**\n抽取當日專屬大阿爾克那塔羅牌，預測遊戲運勢。\n\n"
             "**`!星座 [星座名稱]`**\n查詢真實每日星座運勢。例：`!星座 天蠍座`"

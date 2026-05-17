@@ -3,11 +3,12 @@ from discord.ext import commands, tasks
 import datetime
 import pytz
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
+import os
 
 class BossSchedule(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.REMINDER_CHANNEL_ID = 1477964998818140326
+        self.REMINDER_CHANNEL_ID = int(os.getenv("BOSS_REMINDER_CHANNEL_ID", 0))
         self.auto_boss_reminder.start()
 
     def cog_unload(self):
