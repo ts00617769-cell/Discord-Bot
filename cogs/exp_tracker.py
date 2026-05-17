@@ -238,7 +238,3 @@ class ExpTracker(commands.Cog):
 
         await processing_msg.delete()
         for e in embeds: await ctx.send(embed=e)
-
-    # ⚠️ `starlight_attendance` 與 `historical_ranking` 同理，將 self.cursor.execute 改為 async with self.bot.db.execute(...)
-    # 並注意在呼叫 get_member_info(name) 時加上 await
-    # 例如：tag = await self.get_member_info(name)

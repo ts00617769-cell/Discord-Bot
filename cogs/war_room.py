@@ -45,18 +45,13 @@ class WarRoom(commands.Cog):
     async def db_cleanup_task(self):
         """每天凌晨 4 點自動刪除 30 天前的過期資料"""
         try:
-            conn = sqlite3.connect('prasia_data.db')
-            cursor = conn.cursor()
-            
-            # ⚠️ 注意：請確認你的資料表名稱是否為 speed_records，時間欄位是否為 timestamp
-            cursor.execute("""
+            async with self.bot.db.execute("""
                 DELETE FROM exp_history 
                 WHERE record_time < datetime('now', '-30 days')
-            """)
+            """) as cursor:
+                deleted_rows = cursor.rowcount
             
-            deleted_rows = cursor.rowcount
-            conn.commit()
-            conn.close()
+            await self.bot.db.commit()
 
             # 將清理結果回報給戰情室
             log_channel = self.bot.get_channel(self.log_channel_id) 

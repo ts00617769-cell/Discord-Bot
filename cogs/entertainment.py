@@ -3,9 +3,9 @@ from discord.ext import commands
 import random
 import datetime
 import pytz
-import sqlite3
 import aiohttp
 from bs4 import BeautifulSoup
+# ✨ 移除了 import sqlite3，全面改用 bot.db
 
 class Entertainment(commands.Cog):
     def __init__(self, bot):
@@ -118,17 +118,11 @@ class Entertainment(commands.Cog):
         if sign_id is None:
             return await ctx.send("❌ 請輸入正確的星座名稱（例如：!星座 牡羊座）")
 
-
-        # 1. 取得台灣時間的「今天日期」
         tz = datetime.timezone(datetime.timedelta(hours=8))
         today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
 
-        # 2. 連線到本地資料庫
-        conn = sqlite3.connect('prasia_data.db')
-        cursor = conn.cursor()
-        
-        # 確保快取資料表存在
-        cursor.execute('''
+        # ✨ 改用非同步資料庫操作
+        await self.bot.db.execute('''
             CREATE TABLE IF NOT EXISTS horoscope_cache (
                 date TEXT,
                 sign TEXT,
@@ -136,23 +130,21 @@ class Entertainment(commands.Cog):
                 PRIMARY KEY (date, sign)
             )
         ''')
-        conn.commit()
+        await self.bot.db.commit()
 
-        # 3. 🔍 核心邏輯：先找快取
-        cursor.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign))
-        cached_result = cursor.fetchone()
+        # 🔍 核心邏輯：先找快取
+        async with self.bot.db.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign)) as cursor:
+            cached_result = await cursor.fetchone()
 
         if cached_result:
             # 🟢 【快取命中】
             fortune_text = cached_result[0]
             footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
-            conn.close()
         else:
             # 🔴 【沒有快取】啟動爬蟲
             loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
             try:
                 url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
-                # 直接使用全域 session 並關閉 SSL 驗證
                 async with self.bot.session.get(url, ssl=False) as response:
                     response.raise_for_status() 
                     html_bytes = await response.read()
@@ -166,9 +158,9 @@ class Entertainment(commands.Cog):
                     fortune_text = raw_text.replace("整體運勢", "**整體運勢**").replace("愛情運勢", "\n\n**愛情運勢**").replace("事業運勢", "\n\n**事業運勢**").replace("財運運勢", "\n\n**財運運勢**")
                     footer_text = "※ 資料來源：科技紫微網即時連線"
 
-                    # 寫入資料庫
-                    cursor.execute("INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)", (today_str, sign, fortune_text))
-                    conn.commit()
+                    # 寫入資料庫快取
+                    await self.bot.db.execute("INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)", (today_str, sign, fortune_text))
+                    await self.bot.db.commit()
                 else:
                     fortune_text = "⚠️ 星象儀受干擾，無法解析今日運勢。"
                     footer_text = "※ 抓取失敗，請稍後重試。"
@@ -178,10 +170,7 @@ class Entertainment(commands.Cog):
             except Exception as e:
                 print(f"爬蟲報錯: {e}")
                 await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
-                conn.close()
                 return
-            
-            conn.close() 
 
         # 4. 發送最終報表
         embed = discord.Embed(
