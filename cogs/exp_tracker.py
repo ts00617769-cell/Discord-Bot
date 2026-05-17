@@ -240,7 +240,7 @@ class ExpTracker(commands.Cog):
         await processing_msg.delete()
         for e in embeds: await ctx.send(embed=e)
     @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
-    async def starlight_attendance(self, ctx, target_date: str = None):
+    async def {starlight_attendance}(self, ctx, target_date: str = None):
         tz = datetime.timezone(datetime.timedelta(hours=8))
         if target_date:
             query_date, display_date = target_date, f"歷史調閱 ({target_date})"
@@ -249,7 +249,6 @@ class ExpTracker(commands.Cog):
 
         processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在掃描 **全伺服器** {display_date} 23:00 ~ 23:30...")
         
-        # ✨ 改用非同步資料庫查詢
         async with self.bot.db.execute('''
             SELECT MIN(record_time), MAX(record_time) FROM exp_history 
             WHERE record_time >= ? AND record_time <= ?
@@ -264,7 +263,6 @@ class ExpTracker(commands.Cog):
         minutes_diff = (datetime.datetime.strptime(end_time, fmt) - datetime.datetime.strptime(start_time, fmt)).total_seconds() / 60
         if minutes_diff <= 0: minutes_diff = 30 
 
-        # ✨ 改用非同步資料庫查詢
         async with self.bot.db.execute('''
             SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp)
             FROM exp_history t1 JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
@@ -361,7 +359,6 @@ class ExpTracker(commands.Cog):
         params.append(count)
 
         try:
-            # ✨ 改用非同步資料庫查詢
             async with self.bot.db.execute(sql, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
             
@@ -376,11 +373,10 @@ class ExpTracker(commands.Cog):
             for idx, r in enumerate(rows, 1):
                 name, server, level, exp, class_name = r
                 
-                # ✨ 這裡是最重要的 await！
+                # ✨ 這裡加上了重要的 await，防止備註顯示成亂碼物件
                 tag = await self.get_member_info(name)
                 
                 display_name = f"{name}{tag}"
-                
                 name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in display_name)
                 name_padded = display_name + " " * max(0, 16 - name_width)
                 
