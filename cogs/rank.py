@@ -85,13 +85,12 @@ class RankTracker(commands.Cog):
             all_players = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
-                    # O(1) 極速全服並行掃描
-                    tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+                    tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results:
                         all_players.extend(r)
                 else:
-                    players = await self.fetch_server_data(session, target_group_id, target_world_id)
+                    players = await self.fetch_server_data(self.bot.session, target_group_id, target_world_id)
                     all_players.extend(players)
 
             if not all_players:

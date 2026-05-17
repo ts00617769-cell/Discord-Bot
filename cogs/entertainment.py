@@ -151,14 +151,12 @@ class Entertainment(commands.Cog):
             # 🔴 【沒有快取】啟動爬蟲
             loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
             try:
-                connector = aiohttp.TCPConnector(ssl=False)
-                async with aiohttp.ClientSession(connector=connector) as session:
-                    url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
-                    
-                    async with session.get(url) as response:
-                        response.raise_for_status() 
-                        html_bytes = await response.read()
-                        html = html_bytes.decode('utf-8', errors='ignore')
+                url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
+                # 直接使用全域 session 並關閉 SSL 驗證
+                async with self.bot.session.get(url, ssl=False) as response:
+                    response.raise_for_status() 
+                    html_bytes = await response.read()
+                    html = html_bytes.decode('utf-8', errors='ignore')
 
                 soup = BeautifulSoup(html, 'html.parser')
                 today_content = soup.find('div', class_='TODAY_CONTENT')

@@ -80,7 +80,7 @@ class ExpTracker(commands.Cog):
         
         async with aiohttp.ClientSession() as session:
             for server_name, (g_id, w_id) in SERVER_MAP.items():
-                players = await self.fetch_server_data(session, g_id, w_id)
+                players = await self.fetch_server_data(self.bot.session, g_id, w_id)
                 for p in players:
                     self.cursor.execute('''
                         INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)

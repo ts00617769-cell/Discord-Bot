@@ -39,7 +39,7 @@ class SubjugationCog(commands.Cog):
         all_players = []
         async with aiohttp.ClientSession() as session:
             # ✅ 新版極速掃描
-            tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+            tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
             results = await asyncio.gather(*tasks)
             for res in results: all_players.extend(res)
 

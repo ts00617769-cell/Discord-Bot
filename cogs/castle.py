@@ -71,11 +71,11 @@ class CastleTracker(commands.Cog):
             all_territories = []
             async with aiohttp.ClientSession() as session:
                 if is_global:
-                    tasks = [self.fetch_territory_data(session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
+                    tasks = [self.fetch_territory_data(self.bot.session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
                     results = await asyncio.gather(*tasks)
                     for r in results: all_territories.extend(r)
                 else:
-                    territories = await self.fetch_territory_data(session, target_server, target_group_id, target_world_id)
+                    territories = await self.fetch_territory_data(self.bot.session, target_server, target_group_id, target_world_id)
                     all_territories.extend(territories)
 
             if not all_territories:
