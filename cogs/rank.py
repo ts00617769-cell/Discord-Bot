@@ -35,8 +35,48 @@ class RankTracker(commands.Cog):
 
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
-        # ... (前面的解析邏輯都不變，保留你原本的寫法) ...
+        # 🛡️ 【資安防護網】限制查詢頻道
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
+        if ctx.channel.id not in allowed_channel_ids:
+            return 
+
+        count = 10
+        args_list = list(args)
         
+        if len(args_list) > 0 and args_list[0].isdigit():
+            count = int(args_list.pop(0))
+            
+        if count > 100: count = 100
+        if count < 1: count = 10
+
+        target_server = "全服"
+        target_class = None
+        class_parts = []
+
+        for arg in args_list:
+            if arg in SERVER_MAP or arg in ["全服", "全部", "global"]:
+                target_server = arg
+            else:
+                class_parts.append(arg)
+
+        if class_parts:
+            target_class = "".join(class_parts)
+
+        is_global = target_server in ["全服", "全部", "global"]
+        
+        filter_msg = f"【{target_class}】" if target_class else " "
+        if is_global:
+            display_title = f"全伺服器{filter_msg}TOP {count}"
+        else:
+            if target_server not in SERVER_MAP:
+                valid_list = "、".join(SERVER_MAP.keys())
+                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服")
+            
+            target_group_id, target_world_id = SERVER_MAP[target_server]
+            display_title = f"【{target_server}】{filter_msg}TOP {count}"
+        
+        # 這裡以下就接上你原本寫好的 try 區塊了
         processing_msg = await ctx.send(f"🔍 正在潛入橘子主機，彙整 {display_title} 即時戰情...")
 
         try:
