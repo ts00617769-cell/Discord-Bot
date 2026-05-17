@@ -23,7 +23,7 @@ class RankTracker(commands.Cog):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
         try:
-            async with session.post(api_url, json=payload) as response:
+            async with session.post(api_url, json=payload, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     return json_data.get("data", {}).get("gc") or []
@@ -78,15 +78,15 @@ class RankTracker(commands.Cog):
 
         try:
             all_players = []
-            async with aiohttp.ClientSession() as session:
-                if is_global:
-                    tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
-                    results = await asyncio.gather(*tasks)
-                    for r in results:
+            
+            if is_global:
+                tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+                results = await asyncio.gather(*tasks)
+                for r in results:
                         all_players.extend(r)
-                else:
-                    players = await self.fetch_server_data(self.bot.session, target_group_id, target_world_id)
-                    all_players.extend(players)
+            else:
+                players = await self.fetch_server_data(self.bot.session, target_group_id, target_world_id)
+                all_players.extend(players)
 
             if not all_players:
                 return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
