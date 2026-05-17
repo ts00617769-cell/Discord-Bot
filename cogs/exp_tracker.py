@@ -86,14 +86,14 @@ class ExpTracker(commands.Cog):
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 players = await self.fetch_server_data(session, g_id, w_id) # 改用區域的 session
 
-            for p in players:
-                # ✨ 改用 await self.bot.db.execute
-                await self.bot.db.execute('''
-                    INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                 ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
-            await self.bot.db.commit()
-            await asyncio.sleep(0.5)
+                for p in players:
+                 # ✨ 改用 await self.bot.db.execute
+                    await self.bot.db.execute('''
+                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                await self.bot.db.commit()
+                await asyncio.sleep(0.5)
         
         if self.alerts_enabled:
             await self.check_for_alerts(now_time)
@@ -239,8 +239,9 @@ class ExpTracker(commands.Cog):
 
         await processing_msg.delete()
         for e in embeds: await ctx.send(embed=e)
+
     @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
-    async def {starlight_attendance}(self, ctx, target_date: str = None):
+    async def starlight_attendance(self, ctx, target_date: str = None):
         tz = datetime.timezone(datetime.timedelta(hours=8))
         if target_date:
             query_date, display_date = target_date, f"歷史調閱 ({target_date})"
