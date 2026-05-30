@@ -14,13 +14,16 @@ class Temple(commands.Cog):
     def load_fortunes(self):
         """讀取籤詩 JSON 檔案"""
         try:
-            # 確保檔案存在，否則給予提示
-            if os.path.exists('omikuji.json'):
-                with open('omikuji.json', 'r', encoding='utf-8') as f:
+            # 自動抓取目前執行檔的絕對路徑，確保不管在哪執行都找得到
+            current_dir = os.getcwd()
+            file_path = os.path.join(current_dir, 'omikuji.json')
+            
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
                     self.fortunes = json.load(f)
                 print(f"[線上廟宇] 成功載入 {len(self.fortunes)} 首籤詩！")
             else:
-                print("[線上廟宇] 找不到 omikuji.json 檔案！")
+                print(f"[線上廟宇] 找不到檔案！預期路徑為：{file_path}")
         except Exception as e:
             print(f"[線上廟宇] 讀取籤詩失敗: {e}")
 
@@ -69,7 +72,8 @@ class Temple(commands.Cog):
             color=embed_color
         )
         
-        embed.add_field(name="📜 【籤詩】", value=f"```\n{drawn['poem']}\n```", inline=False)
+        embed.add_field(name="📜 【籤詩】", value=f"```\n{drawn['poem']}\n
+```", inline=False)
         embed.add_field(name="💡 【白話解析】", value=drawn['explain'], inline=False)
         
         embed.set_footer(text="✨ 神明指示僅供參考，命運依然掌握在自己手中。")
