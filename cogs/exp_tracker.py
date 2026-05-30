@@ -79,38 +79,27 @@ class ExpTracker(commands.Cog):
 
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
-        now_time = datetime.datetime.now().replace(second=0, microsecond=0)
-        print(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
-        
-        # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
-        for server_name, (g_id, w_id) in SERVER_MAP.items():
-            # 這裡傳入 self.bot.session
-            players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
+        try:
+            now_time = datetime.datetime.now().replace(second=0, microsecond=0)
+            print(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
+            
+            # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
+            for server_name, (g_id, w_id) in SERVER_MAP.items():
+                # 這裡傳入 self.bot.session
+                players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
-            # ==========================================
-            # 👇 把原本的 for p in players 換成這段 👇
-            # ==========================================
+                for p in players:
+                    await self.bot.db.execute('''
+                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                await self.bot.db.commit()
+                await asyncio.sleep(0.5)
             
-            # 1. 快速把 50 個人的資料打包成一個 List
-            data_to_insert = [
-                (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知'))
-                for p in players
-            ]
-            
-            # 2. 呼叫 executemany 把整包資料一次送進資料庫
-            await self.bot.db.executemany('''
-                INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', data_to_insert)
-            
-            # ==========================================
-            # 👆 替換到這裡結束 👆
-            # ==========================================
-            await self.bot.db.commit()
-            await asyncio.sleep(0.5)
-        
-        if self.alerts_enabled:
-            await self.check_for_alerts(now_time)
+            if self.alerts_enabled:
+                await self.check_for_alerts(now_time)
+        except Exception as e:
+            print(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
     async def check_for_alerts(self, current_time):
         async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:

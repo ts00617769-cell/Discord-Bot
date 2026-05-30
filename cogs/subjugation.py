@@ -37,11 +37,11 @@ class SubjugationCog(commands.Cog):
         processing_msg = await ctx.send("📡 啟動全服討伐雷達掃描中，請稍候...")
 
         all_players = []
-        async with aiohttp.ClientSession() as session:
-            # ✅ 新版極速掃描
-            tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
-            results = await asyncio.gather(*tasks)
-            for res in results: all_players.extend(res)
+        
+        # ✅ 新版極速掃描
+        tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+        results = await asyncio.gather(*tasks)
+        for res in results: all_players.extend(res)
 
         if not all_players:
             return await processing_msg.edit(content="❌ 資料抓取異常，請確認官方 API 狀態。")
