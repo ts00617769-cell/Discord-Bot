@@ -72,8 +72,7 @@ class Temple(commands.Cog):
             color=embed_color
         )
         
-        embed.add_field(name="📜 【籤詩】", value=f"```\n{drawn['poem']}\n
-```", inline=False)
+        embed.add_field(name="📜 【籤詩】", value=f"```\n{drawn['poem']}\n", inline=False)
         embed.add_field(name="💡 【白話解析】", value=drawn['explain'], inline=False)
         
         embed.set_footer(text="✨ 神明指示僅供參考，命運依然掌握在自己手中。")
