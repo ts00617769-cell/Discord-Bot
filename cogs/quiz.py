@@ -90,6 +90,13 @@ class QuizSystem(commands.Cog):
         self.bot = bot
         # ⚠️ 不要在這裡啟動排程，移到 cog_load 等資料庫準備好再啟動
 
+    # =======================================================
+    # 1. ✨ 新增這段：定義台北時間的中午 12 點與晚上 18 點 (縮排 4 個空格)
+    # =======================================================
+    tz_taipei = pytz.timezone('Asia/Taipei')
+    post_time = datetime.time(hour=12, minute=0, tzinfo=tz_taipei)
+    reveal_time = datetime.time(hour=18, minute=0, tzinfo=tz_taipei)
+
     async def cog_load(self):
         """模組載入時，初始化資料庫與接關機制"""
         await self.setup_database()
@@ -196,75 +203,78 @@ class QuizSystem(commands.Cog):
         await self.bot.db.execute("DELETE FROM quiz_votes")
         await self.bot.db.commit()
 
-    # --- 排程：每天中午 12 點自動發布 ---
-    @tasks.loop(minutes=1)
+    # =======================================================
+    # 2. ✨ 修改排程：中午 12 點自動發布
+    # =======================================================
+    @tasks.loop(time=post_time) # 👈 這裡原本是 (minutes=1)，改成指定我們設定好的 post_time
     async def auto_post_quiz(self):
         tz = pytz.timezone('Asia/Taipei')
         now = datetime.datetime.now(tz)
         current_date = now.strftime("%Y-%m-%d")
 
-        if now.hour == 12 and now.minute == 0:
-            if active_poll["is_active"] and active_poll["date"] == current_date:
-                return
+        # ✂️ 刪除了原本的 [if now.hour == 12 and now.minute == 0:] 這一行！
+        # 👇 下方的程式碼因為少了一層 if 包裹，全部都要「往左推 4 個空格」對齊喔！
+        if active_poll["is_active"] and active_poll["date"] == current_date:
+            return
 
-            try:
-                channel_id = int(os.getenv("QUIZ_CHANNEL_ID", 0))
-                channel = self.bot.get_channel(channel_id) 
-                if channel:
-                    # ✨ 使用新的不重複抽題功能
-                    question = await self.get_unrepeated_quiz()
+        try:
+            channel_id = int(os.getenv("QUIZ_CHANNEL_ID", 0))
+            channel = self.bot.get_channel(channel_id) 
+            if channel:
+                # ✨ 使用新的不重複抽題功能
+                question = await self.get_unrepeated_quiz()
 
-                    active_poll["is_active"] = True
-                    active_poll["date"] = current_date
-                    active_poll["channel_id"] = channel.id
-                    active_poll["data"] = question
-                    active_poll["votes"].clear()
+                active_poll["is_active"] = True
+                active_poll["date"] = current_date
+                active_poll["channel_id"] = channel.id
+                active_poll["data"] = question
+                active_poll["votes"].clear()
 
-                    # 保存狀態至資料庫
-                    await self.save_active_status(channel.id, current_date, question)
+                # 保存狀態至資料庫
+                await self.save_active_status(channel.id, current_date, question)
 
-                    embed = discord.Embed(title="🕛 中午 12 點了！每日深層心理測驗來囉", description=question['title'], color=0x3498db)
-                    embed.set_footer(text="請點擊下方按鈕進行盲投，結果將於晚上 18:00 準時公開！")
+                embed = discord.Embed(title="🕛 中午 12 點了！每日深層心理測驗來囉", description=question['title'], color=0x3498db)
+                embed.set_footer(text="請點擊下方按鈕進行盲投，結果將於晚上 18:00 準時公開！")
 
-                    view = SecretQuizView(question)
-                    await channel.send(embed=embed, view=view)
-            except Exception as e:
-                print(f"自動發布測驗失敗: {e}")
+                view = SecretQuizView(question)
+                await channel.send(embed=embed, view=view)
+        except Exception as e:
+            print(f"自動發布測驗失敗: {e}")
 
-    # --- 排程：每天晚上 18 點自動開獎 ---
-    @tasks.loop(minutes=1)
+    # =======================================================
+    # 3. ✨ 修改排程：晚上 18 點自動開獎
+    # =======================================================
+    @tasks.loop(time=reveal_time) # 👈 這裡也改成指定 reveal_time
     async def auto_reveal_quiz(self):
-        tz = pytz.timezone('Asia/Taipei')
-        now = datetime.datetime.now(tz)
+        # ✂️ 刪除了原本的 [if now.hour == 18 and now.minute == 0:] 這一行！
+        # 👇 下方的程式碼同樣全部「往左推 4 個空格」對齊！
+        if not active_poll["is_active"] or not active_poll["data"]:
+            return
 
-        if now.hour == 18 and now.minute == 0:
-            if not active_poll["is_active"] or not active_poll["data"]:
-                return
+        try:
+            channel = self.bot.get_channel(active_poll["channel_id"])
+            if channel:
+                question = active_poll["data"]
+                embed = discord.Embed(title="🕕 每日測驗開獎時間！", description=f"回顧今日題目：\n{question['title']}", color=0xe74c3c)
 
-            try:
-                channel = self.bot.get_channel(active_poll["channel_id"])
-                if channel:
-                    question = active_poll["data"]
-                    embed = discord.Embed(title="🕕 每日測驗開獎時間！", description=f"回顧今日題目：\n{question['title']}", color=0xe74c3c)
+                results = {key: [] for key in question["options"].keys()}
+                for user_info in active_poll["votes"].values():
+                    results[user_info["choice"]].append(user_info["name"])
 
-                    results = {key: [] for key in question["options"].keys()}
-                    for user_info in active_poll["votes"].values():
-                        results[user_info["choice"]].append(user_info["name"])
+                for key, option_text in question["options"].items():
+                    voters = ", ".join(results[key]) if results[key] else "無人選擇"
+                    embed.add_field(
+                        name=f"👉 選擇【{option_text}】的玩家：",
+                        value=f"👥 名單：{voters}\n📝 解析：\n{question['results'][key]}",
+                        inline=False
+                    )
 
-                    for key, option_text in question["options"].items():
-                        voters = ", ".join(results[key]) if results[key] else "無人選擇"
-                        embed.add_field(
-                            name=f"👉 選擇【{option_text}】的玩家：",
-                            value=f"👥 名單：{voters}\n📝 解析：\n{question['results'][key]}",
-                            inline=False
-                        )
-
-                    await channel.send(embed=embed)
-                    
-                    active_poll["is_active"] = False
-                    await self.clear_active_status() # 清空資料庫狀態
-            except Exception as e:
-                print(f"自動開獎失敗: {e}")
+                await channel.send(embed=embed)
+                
+                active_poll["is_active"] = False
+                await self.clear_active_status() # 清空資料庫狀態
+        except Exception as e:
+            print(f"自動開獎失敗: {e}")
 
     # --- 一般指令 ---
     @commands.command(name="測驗")
