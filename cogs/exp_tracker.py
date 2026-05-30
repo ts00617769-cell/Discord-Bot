@@ -87,11 +87,25 @@ class ExpTracker(commands.Cog):
             # 這裡傳入 self.bot.session
             players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
-            for p in players:
-                await self.bot.db.execute('''
-                    INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+            # ==========================================
+            # 👇 把原本的 for p in players 換成這段 👇
+            # ==========================================
+            
+            # 1. 快速把 50 個人的資料打包成一個 List
+            data_to_insert = [
+                (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知'))
+                for p in players
+            ]
+            
+            # 2. 呼叫 executemany 把整包資料一次送進資料庫
+            await self.bot.db.executemany('''
+                INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', data_to_insert)
+            
+            # ==========================================
+            # 👆 替換到這裡結束 👆
+            # ==========================================
             await self.bot.db.commit()
             await asyncio.sleep(0.5)
         
