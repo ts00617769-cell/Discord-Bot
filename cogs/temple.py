@@ -14,9 +14,9 @@ class Temple(commands.Cog):
     def load_fortunes(self):
         """讀取籤詩 JSON 檔案"""
         try:
-            # 自動抓取目前執行檔的絕對路徑，確保不管在哪執行都找得到
-            current_dir = os.getcwd()
-            file_path = os.path.join(current_dir, 'omikuji.json')
+            # 👇 改用絕對路徑定位：抓取這支腳本的上一層 (專案根目錄)
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            file_path = os.path.join(base_dir, 'omikuji.json')
             
             if os.path.exists(file_path):
                 with open(file_path, 'r', encoding='utf-8') as f:

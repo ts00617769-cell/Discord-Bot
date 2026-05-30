@@ -47,7 +47,7 @@ class WarRoom(commands.Cog):
         try:
             async with self.bot.db.execute("""
                 DELETE FROM exp_history 
-                WHERE record_time < datetime('now', '-30 days')
+                WHERE record_time < datetime('now', 'localtime', '-30 days')
             """) as cursor:
                 deleted_rows = cursor.rowcount
             

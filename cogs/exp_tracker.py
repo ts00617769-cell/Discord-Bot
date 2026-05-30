@@ -82,18 +82,18 @@ class ExpTracker(commands.Cog):
         now_time = datetime.datetime.now().replace(second=0, microsecond=0)
         print(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
         
-        async with aiohttp.ClientSession() as session:
-            for server_name, (g_id, w_id) in SERVER_MAP.items():
-                players = await self.fetch_server_data(session, g_id, w_id) # 改用區域的 session
+        # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
+        for server_name, (g_id, w_id) in SERVER_MAP.items():
+            # 這裡傳入 self.bot.session
+            players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
-                for p in players:
-                 # ✨ 改用 await self.bot.db.execute
-                    await self.bot.db.execute('''
-                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
-                await self.bot.db.commit()
-                await asyncio.sleep(0.5)
+            for p in players:
+                await self.bot.db.execute('''
+                    INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+            await self.bot.db.commit()
+            await asyncio.sleep(0.5)
         
         if self.alerts_enabled:
             await self.check_for_alerts(now_time)

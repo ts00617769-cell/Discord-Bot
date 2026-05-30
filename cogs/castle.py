@@ -26,10 +26,10 @@ class CastleTracker(commands.Cog):
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         try:
-            
-            if response.status == 200:
-                json_data = await response.json()
-                territories = json_data.get("data", {}).get("territory") or []
+            async with session.post(api_url, json=payload, headers=headers, ssl=False) as response:
+                if response.status == 200:
+                    json_data = await response.json()
+                    territories = json_data.get("data", {}).get("territory") or []
                     
                 for t in territories:
                     t['real_server_name'] = server_name
