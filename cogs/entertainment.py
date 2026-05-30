@@ -136,10 +136,10 @@ class Entertainment(commands.Cog):
         async with self.bot.db.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign)) as cursor:
             cached_result = await cursor.fetchone()
 
-        # ✨ 新增這行：順手清理昨天的過期垃圾，保持資料庫輕量！
+        # ✨ 補上這一行：順手清理不是今天的過期垃圾！
         await self.bot.db.execute("DELETE FROM horoscope_cache WHERE date != ?", (today_str,))
         await self.bot.db.commit()
-        
+
         if cached_result:
             # 🟢 【快取命中】
             fortune_text = cached_result[0]
