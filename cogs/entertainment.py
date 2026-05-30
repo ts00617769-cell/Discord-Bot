@@ -10,6 +10,23 @@ from bs4 import BeautifulSoup
 class Entertainment(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+    # ==========================================
+    # 👇 新增這段 cog_load，讓機器人開機時就蓋好地基 👇
+    # ==========================================
+    async def cog_load(self):
+        await self.bot.db.execute('''
+            CREATE TABLE IF NOT EXISTS horoscope_cache (
+                date TEXT,
+                sign TEXT,
+                content TEXT,
+                PRIMARY KEY (date, sign)
+            )
+        ''')
+        await self.bot.db.commit()
+    # ==========================================
+    # 👆 新增到這裡結束 👆
+    # ==========================================
+
 
     # --- 9. 指令：鍊成系統 ---
     @commands.command(name="鍊成", help="模擬四合一鍊成。")
@@ -120,17 +137,6 @@ class Entertainment(commands.Cog):
 
         tz = datetime.timezone(datetime.timedelta(hours=8))
         today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
-
-        # ✨ 改用非同步資料庫操作
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS horoscope_cache (
-                date TEXT,
-                sign TEXT,
-                content TEXT,
-                PRIMARY KEY (date, sign)
-            )
-        ''')
-        await self.bot.db.commit()
 
         # 🔍 核心邏輯：先找快取
         async with self.bot.db.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign)) as cursor:

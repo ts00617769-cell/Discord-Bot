@@ -9,7 +9,8 @@ class BossSchedule(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.REMINDER_CHANNEL_ID = int(os.getenv("BOSS_REMINDER_CHANNEL_ID", 0))
-        self.auto_boss_reminder.start()
+    async def cog_load(self):
+        self.auto_boss_reminder.start()    
 
     def cog_unload(self):
         self.auto_boss_reminder.cancel()

@@ -9,6 +9,14 @@ import os
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+        # ==========================================
+        # 👇 新增這段：開機時就把頻道清單讀好，存進 self 裡面
+        # ==========================================
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
+        # ==========================================
+
         # 連線到資料庫以抓取成員名牌備註
     async def get_member_info(self, name):
         """抓取團內成員備註的輔助函數"""
@@ -35,11 +43,9 @@ class RankTracker(commands.Cog):
 
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
-        # 🛡️ 【資安防護網】限制查詢頻道
-        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
-        allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
-        if ctx.channel.id not in allowed_channel_ids:
-            return 
+  
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
 
         count = 10
         args_list = list(args)
@@ -82,18 +88,16 @@ class RankTracker(commands.Cog):
         try:
             all_players = []
             
-            # ✨ 乖乖把這個 ClientSession 加回來！這是最穩定的寫法
-            async with aiohttp.ClientSession() as session:
-                if is_global:
-                    # ✨ 注意：這裡傳入的是 session，不是 self.bot.session
-                    tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
-                    results = await asyncio.gather(*tasks)
-                    for r in results:
-                        all_players.extend(r)
-                else:
-                    # ✨ 這裡也是傳入 session
-                    players = await self.fetch_server_data(session, target_group_id, target_world_id)
-                    all_players.extend(players)
+            if is_global:
+                # ✨ 注意：這裡傳入的是 session，不是 self.bot.session
+                tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+                results = await asyncio.gather(*tasks)
+                for r in results:
+                    all_players.extend(r)
+            else:
+                # ✨ 這裡也改用 self.bot.session
+                players = await self.fetch_server_data(self.bot.session, target_group_id, target_world_id)
+                all_players.extend(players)
 
             if not all_players:
                 return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
