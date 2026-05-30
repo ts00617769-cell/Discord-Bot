@@ -6,10 +6,6 @@ import datetime
 import pytz
 import os
 
-# --- 讀取題庫 ---
-with open('quiz.json', 'r', encoding='utf-8') as f:
-    quiz_data = json.load(f)
-
 # --- 暫存盲投測驗的資料 (記憶體) ---
 active_poll = {
     "is_active": False,
@@ -88,7 +84,19 @@ class SecretQuizView(discord.ui.View):
 class QuizSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.quiz_data = [] # 👈 1. 建立一個屬性來存題庫
+        self.load_quiz_data() # 👈 2. 啟動時呼叫下方的讀取函數
         # ⚠️ 不要在這裡啟動排程，移到 cog_load 等資料庫準備好再啟動
+
+    # 👇 3. 新增這個讀取函數（使用絕對路徑，保證不會找不到檔案）
+    def load_quiz_data(self):
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            file_path = os.path.join(base_dir, 'quiz.json')
+            with open(file_path, 'r', encoding='utf-8') as f:
+                self.quiz_data = json.load(f)
+        except Exception as e:
+            print(f"[心理測驗] 讀取題庫失敗: {e}")
 
     # =======================================================
     # 1. ✨ 新增這段：定義台北時間的中午 12 點與晚上 18 點 (縮排 4 個空格)
@@ -144,8 +152,8 @@ class QuizSystem(commands.Cog):
         if row and row[0] == 1:
             quiz_title, channel_id, date_str = row[1], int(row[2]), row[3]
             
-            # 從題庫找出當前題目
-            q_data = next((q for q in quiz_data if q['title'] == quiz_title), None)
+            # 👇 這裡加上 self.
+            q_data = next((q for q in self.quiz_data if q['title'] == quiz_title), None)
             
             if q_data:
                 # 撈出所有已投票的紀錄
@@ -169,14 +177,14 @@ class QuizSystem(commands.Cog):
         async with self.bot.db.execute("SELECT quiz_id FROM quiz_history") as cursor:
             used_ids = [row[0] for row in await cursor.fetchall()]
 
-        # 過濾掉出過的題目 (以 title 作為唯一識別碼)
-        available = [q for q in quiz_data if q['title'] not in used_ids]
+        # 👇 這裡加上 self.
+        available = [q for q in self.quiz_data if q['title'] not in used_ids]
 
         # 如果全出過了，清空歷史紀錄重來一輪
         if not available:
             await self.bot.db.execute("DELETE FROM quiz_history")
             await self.bot.db.commit()
-            available = quiz_data
+            available = self.quiz_data # 👇 這裡加上 self.
 
         question = random.choice(available)
         
@@ -279,7 +287,7 @@ class QuizSystem(commands.Cog):
     # --- 一般指令 ---
     @commands.command(name="測驗")
     async def normal_quiz(self, ctx):
-        question = random.choice(quiz_data) # 單次娛樂不受重複限制
+        question = random.choice(self.quiz_data) # 👇 這裡加上 self. (單次娛樂不受重複限制)
         embed = discord.Embed(title="✨ 隨機深層心理測驗", description=question['title'], color=0x9b59b6)
         view = QuizView(question)
         await ctx.send(embed=embed, view=view)
