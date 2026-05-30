@@ -29,12 +29,18 @@ class Temple(commands.Cog):
 
     @commands.command(name="求籤", help="向菩薩請示。用法: !求籤 [你的問題]")
     async def draw_fortune(self, ctx, *, question: str = None):
+        # --- 強制容錯：如果籤筒是空的，立刻執行一次載入 ---
+        if not self.fortunes:
+            print("[線上廟宇] 偵測到籤筒為空，嘗試強制重新載入...")
+            self.load_fortunes()
+            
         if not question:
             await ctx.send(f"❌ {ctx.author.mention} 求籤必須心誠，請把問題說清楚！\n👉 **正確用法**：`!求籤 晚上該不該抽卡？`")
             return
 
+        # 再次檢查是否載入成功
         if not self.fortunes:
-            await ctx.send("⚠️ 廟公今天不在，籤筒裡沒有籤詩 (找不到 omikuji.json)。")
+            await ctx.send("⚠️ 廟公今天還是不在，籤筒讀取失敗。請通知主人檢查 `omikuji.json` 格式是否正確。")
             return
 
         # 1. 營造儀式感：發送擲筊中的訊息
@@ -72,6 +78,7 @@ class Temple(commands.Cog):
             color=embed_color
         )
         
+        # ✅ 這裡已經修復了 f-string 的閉合問題
         embed.add_field(name="📜 【籤詩】", value=f"```\n{drawn['poem']}\n```", inline=False)
         embed.add_field(name="💡 【白話解析】", value=drawn['explain'], inline=False)
         
@@ -79,6 +86,7 @@ class Temple(commands.Cog):
 
         # 編輯原本的訊息，秀出聖筊與籤詩
         await processing_msg.edit(content=f"🎉 **【聖筊】！** 菩薩同意賜籤：", embed=embed)
+
     @commands.command(name="檢查廟宇")
     async def check_temple_path(self, ctx):
         """專門用來除錯路徑的指令"""
@@ -88,7 +96,7 @@ class Temple(commands.Cog):
         if os.path.exists(file_path):
             await ctx.send(f"✅ 報告！檔案找到了，位置在：\n`{file_path}`")
         else:
-            await ctx.send(f"❌ 找不到檔案！機器人目前預設的搜尋路徑是：\n`{file_path}`\n\n👉 請檢查檔案有沒有確實上傳到這個路徑。")    
+            await ctx.send(f"❌ 找不到檔案！機器人目前預設的搜尋路徑是：\n`{file_path}`\n\n👉 請檢查檔案有沒有確實上傳到這個路徑。")
 
 async def setup(bot):
     await bot.add_cog(Temple(bot))
