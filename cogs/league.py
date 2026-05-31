@@ -2,10 +2,14 @@ import discord
 from discord.ext import commands
 import aiohttp
 import unicodedata
+import os # ✨ 補上了這個，不然 os.getenv 會報錯喔！
 
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # ✨ 在啟動時就把頻道清單算好，存進 self 裡面 (最高效能寫法)
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
 
     # 📏 輔助函數：計算中英文等寬對齊
     def pad_text(self, text, target_width):
@@ -13,9 +17,14 @@ class LeagueTracker(commands.Cog):
         current_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text_str)
         return text_str + " " * max(0, target_width - current_width)
 
+    # ✨ 這裡加上了參數接收與預設值，解決變數未定義的問題！
     @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
         
+        # 🛡️ 資安防護網：如果不是在戰情室頻道，機器人就裝死
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return 
+
         # 💡 友善的提示訊息 (參數回顯機制)
         hint_msg = (
             f"🛰️ **啟動宇宙聯賽觀測站**\n"
@@ -44,7 +53,7 @@ class LeagueTracker(commands.Cog):
         }
 
         try:
-            # 直接使用全域 session
+            # ✨ 直接使用全域 session，不重複建立連線！
             async with self.bot.session.post(api_url, json=payload, headers=headers, ssl=False, timeout=10) as response:
                 if response.status != 200:
                     return await processing_msg.edit(content=f"❌ API 連線失敗 (狀態碼: {response.status})。請確認 API 網址是否正確。")

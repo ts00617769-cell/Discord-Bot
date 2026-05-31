@@ -89,8 +89,7 @@ class RankTracker(commands.Cog):
             all_players = []
             
             if is_global:
-                # ✨ 注意：這裡傳入的是 session，不是 self.bot.session
-                tasks = [self.fetch_server_data(session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
+                tasks = [self.fetch_server_data(self.bot.session, g_id, w_id) for _, (g_id, w_id) in SERVER_MAP.items()]
                 results = await asyncio.gather(*tasks)
                 for r in results:
                     all_players.extend(r)
