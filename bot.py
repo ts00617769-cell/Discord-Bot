@@ -38,6 +38,23 @@ bot = PrasiaBot()
 async def on_ready():
     print(f'🤖 {bot.user} 已成功登入 Discord 並準備就緒！')
 
+# ==========================================
+# 👇 推薦新功能：開發者熱重載指令
+# ==========================================
+@bot.command(name="reload", hidden=True)
+@commands.is_owner() # 🛡️ 資安防護：只允許機器人的「擁有者」執行這個指令
+async def reload_cog(ctx, extension: str):
+    """(開發者專用) 重新載入特定的模組，不用重開機器人！"""
+    try:
+        # discord.py 內建的重新載入功能
+        await bot.reload_extension(f"cogs.{extension}")
+        await ctx.send(f"✅ 模組 `cogs.{extension}` 重新載入成功！")
+    except Exception as e:
+        await ctx.send(f"❌ 重新載入失敗：\n```py\n{e}\n```")
+
 # 4. 啟動機器人
 if __name__ == '__main__':
-    bot.run(TOKEN)
+    if not TOKEN:
+        print("❌ 未設定 DISCORD_TOKEN！請檢查 .env 檔案。")
+    else:
+        bot.run(TOKEN)

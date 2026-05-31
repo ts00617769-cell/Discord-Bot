@@ -123,6 +123,5 @@ class LeagueTracker(commands.Cog):
 
         except Exception as e:
             await processing_msg.edit(content=f"❌ 模組發生錯誤：{str(e)}")
-
 async def setup(bot):
     await bot.add_cog(LeagueTracker(bot))
