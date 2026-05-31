@@ -491,6 +491,79 @@ class ExpTracker(commands.Cog):
             
         except Exception as e:
             await processing_msg.edit(content=f"❌ 尋人系統發生錯誤: {e}")
+    # ==========================================
+    # 👇 從這裡開始複製，把這整段貼到 track_player 的下面 👇
+    # ==========================================
+    @commands.command(name="轉服掃描", aliases=["移民清單", "抓包"], help="全服掃描近期利用轉服空窗期改名或移動的玩家")
+    async def global_transfer_scan(self, ctx):
+        processing_msg = await ctx.send("📡 正在進行全資料庫特徵碰撞比對，這可能需要幾秒鐘...")
+
+        try:
+            # 1. 找出所有「被兩個以上不同(玩家+伺服器)組合」共用的經驗值 (為了防誤判，僅限大於 1 兆的活躍玩家)
+            async with self.bot.db.execute('''
+                SELECT exp
+                FROM exp_history
+                WHERE exp > 1000000000000
+                GROUP BY exp
+                HAVING COUNT(DISTINCT player_name || server_name) > 1
+                ORDER BY MAX(record_time) DESC
+                LIMIT 10
+            ''') as cursor:
+                shared_exps = await cursor.fetchall()
+            
+            if not shared_exps:
+                return await processing_msg.edit(content="💤 目前資料庫中沒有偵測到任何轉服或改名的活動軌跡。")
+
+            exp_list = [row[0] for row in shared_exps]
+            placeholders = ','.join('?' for _ in exp_list)
+            
+            # 2. 把這些有碰撞的經驗值詳細資料抓出來
+            async with self.bot.db.execute(f'''
+                SELECT exp, player_name, server_name, MIN(record_time), MAX(record_time)
+                FROM exp_history
+                WHERE exp IN ({placeholders})
+                GROUP BY exp, player_name, server_name
+                ORDER BY exp DESC, MIN(record_time) ASC
+            ''', tuple(exp_list)) as cursor:
+                records = await cursor.fetchall()
+
+            # 3. 組合報表
+            grouped_data = {}
+            for exp, p_name, s_name, first_seen, last_seen in records:
+                if exp not in grouped_data:
+                    grouped_data[exp] = []
+                grouped_data[exp].append({"name": p_name, "server": s_name, "first": first_seen, "last": last_seen})
+
+            embeds = []
+            desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊：**\n\n"
+            
+            for exp, players in grouped_data.items():
+                exp_zhao = exp / 1_000_000_000_000
+                desc += f"🔗 **特徵碼：{exp_zhao:.3f} 兆**\n```yaml\n"
+                
+                for idx, p in enumerate(players, 1):
+                    desc += f"{idx}. {p['name']} [{p['server']}]\n"
+                    desc += f"   (觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]})\n"
+                desc += "```\n"
+
+                # 分頁處理避免超過 Discord 字數限制
+                if len(desc) > 1500:
+                    embeds.append(discord.Embed(title="✈️ 全服轉服與改名掃描報告", description=desc, color=0xe67e22))
+                    desc = ""
+                    
+            if desc:
+                embeds.append(discord.Embed(title="✈️ 全服轉服與改名掃描報告", description=desc, color=0xe67e22))
+
+            await processing_msg.delete()
+            for e in embeds:
+                e.set_footer(text="※ 原理：轉服期間經驗值會凍結，利用相同特徵追蹤移動軌跡。")
+                await ctx.send(embed=e)
+
+        except Exception as e:
+            await processing_msg.edit(content=f"❌ 掃描發生錯誤: {e}")
+    # ==========================================
+    # 👆 複製到這裡結束 👆
+    # ==========================================        
 
 # setup 獨立在最外層
 async def setup(bot):
