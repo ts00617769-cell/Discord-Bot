@@ -409,82 +409,129 @@ class ExpTracker(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ 系統錯誤: {e}")
     # ==========================================
-    # 🕵️ 天眼追蹤系統：全歷史經驗值特徵碰撞比對
+    # 🕵️ 天眼追蹤系統：全歷史經驗值與職業連續特徵匹配 (進化版)
     # ==========================================
-    @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 西巴豆仔")
+    @commands.command(name="尋人", help="利用職業與經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 魔羯座")
     async def track_player(self, ctx, target_name: str):
-        processing_msg = await ctx.send(f"🔍 啟動天眼系統，正在分析「{target_name}」的所有歷史經驗值軌跡...")
+        processing_msg = await ctx.send(f"🔍 啟動天眼系統，正在分析「{target_name}」的【職業與經驗值】連續特徵...")
 
         try:
-            # 1. 找出這個玩家在資料庫裡擁有的「所有經驗值」，並檢查這些經驗值有沒有被「其他人/其他伺服器」共用
-            sql = '''
-                SELECT exp
+            # 1. 取得目標的所有分身/伺服器紀錄
+            async with self.bot.db.execute('''
+                SELECT server_name, class_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp)
                 FROM exp_history
-                WHERE exp IN (
-                    SELECT DISTINCT exp 
-                    FROM exp_history 
-                    WHERE player_name = ?
-                )
-                GROUP BY exp
-                HAVING COUNT(DISTINCT player_name || server_name) > 1
-                ORDER BY exp DESC
-            '''
-            async with self.bot.db.execute(sql, (target_name,)) as cursor:
-                shared_exps = await cursor.fetchall()
+                WHERE player_name = ?
+                GROUP BY server_name, class_name
+            ''', (target_name,)) as cursor:
+                target_profiles = await cursor.fetchall()
 
-            # 如果沒有發現重疊的經驗值，就回報最後紀錄
-            if not shared_exps:
-                async with self.bot.db.execute('SELECT exp FROM exp_history WHERE player_name = ? ORDER BY record_time DESC LIMIT 1', (target_name,)) as cursor:
-                    last_record = await cursor.fetchone()
-                
-                if not last_record:
-                    return await processing_msg.edit(content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。")
-                else:
-                    return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {last_record[0]/1000000000000:.2f} 兆。\n系統找遍了該玩家的歷史經驗值，沒有發現與其他人重疊的轉服軌跡。")
+            if not target_profiles:
+                return await processing_msg.edit(content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。")
 
-            # 2. 抓出這些有碰撞的經驗值的詳細資料
-            exp_list = [row[0] for row in shared_exps]
-            placeholders = ','.join('?' for _ in exp_list)
+            fmt = '%Y-%m-%d %H:%M:%S'
+            EXP_MARGIN = 1.0 * 1000000000000  # 容許高達 1.0 兆的練功誤差 (絕對夠包容轉服期間的偷練)
             
-            async with self.bot.db.execute(f'''
-                SELECT exp, player_name, server_name, level, class_name, MIN(record_time), MAX(record_time)
-                FROM exp_history
-                WHERE exp IN ({placeholders})
-                GROUP BY exp, player_name, server_name
-                ORDER BY exp DESC, MIN(record_time) ASC
-            ''', tuple(exp_list)) as cursor:
-                records = await cursor.fetchall()
-
-            # 3. 組合報表
-            grouped_data = {}
-            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen in records:
-                if exp not in grouped_data:
-                    grouped_data[exp] = []
-                grouped_data[exp].append({
-                    "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name, 
-                    "first": first_seen, "last": last_seen
+            timeline = []
+            
+            for t_server, t_class, t_lvl, t_first_str, t_last_str, t_min_exp, t_max_exp in target_profiles:
+                # 把目標自己加進時間軸
+                timeline.append({
+                    "name": target_name, "server": t_server, "lvl": t_lvl, "cls": t_class,
+                    "type": "🎯 查詢目標",
+                    "first": t_first_str, "last": t_last_str,
+                    "min_exp": t_min_exp, "max_exp": t_max_exp,
+                    "diff_text": ""
                 })
-
-            desc = f"🚨 **發現「{target_name}」的歷史活動軌跡！**\n\n"
-            
-            for exp, players in grouped_data.items():
-                exp_zhao = exp / 1_000_000_000_000
-                desc += f"🔗 **發生碰撞的特徵碼：{exp_zhao:,.2f} 兆**\n```yaml\n"
                 
-                for idx, p in enumerate(players, 1):
-                    if p['name'] == target_name:
-                        mark = "🎯 (查詢目標)"
-                    else:
-                        mark = "✈️ (分身/改名/轉服)"
-                        
-                    desc += f"{idx}. {p['name']} [{p['server']}] {mark}\n"
-                    desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']}\n"
-                    desc += f"   ▶ 觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]}\n\n"
-                desc += "```\n"
+                # 切斷微秒以防時間格式報錯
+                t_first_str_clean = t_first_str.split('.')[0]
+                t_last_str_clean = t_last_str.split('.')[0]
+                
+                t_first = datetime.datetime.strptime(t_first_str_clean, fmt)
+                t_last = datetime.datetime.strptime(t_last_str_clean, fmt)
 
-            # 避免字數超過 Discord 限制
-            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 - {target_name}", description=desc[:4000], color=0xff0000)
-            embed.set_footer(text="系統：全歷史經驗值軌跡比對演算法")
+                # 2. 找同職業的所有其他人 (利用職業大幅縮小範圍，提升速度)
+                async with self.bot.db.execute('''
+                    SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp)
+                    FROM exp_history
+                    WHERE class_name = ? AND player_name != ?
+                    GROUP BY player_name, server_name
+                ''', (t_class, target_name)) as cursor:
+                    candidates = await cursor.fetchall()
+                    
+                for c_name, c_server, c_lvl, c_first_str, c_last_str, c_min_exp, c_max_exp in candidates:
+                    c_first_str_clean = c_first_str.split('.')[0]
+                    c_last_str_clean = c_last_str.split('.')[0]
+                    
+                    c_first = datetime.datetime.strptime(c_first_str_clean, fmt)
+                    c_last = datetime.datetime.strptime(c_last_str_clean, fmt)
+                    
+                    time_gap_1 = (t_first - c_last).total_seconds()
+                    exp_diff_1 = t_min_exp - c_max_exp
+                    
+                    time_gap_2 = (c_first - t_last).total_seconds()
+                    exp_diff_2 = c_min_exp - t_max_exp
+                    
+                    matched = False
+                    match_type = ""
+                    diff_text = ""
+                    
+                    # 判斷 A: 前身 (Candidate 消失 -> Target 出現)
+                    # 允許 1 小時的時間重疊，且經驗值增加介於 0 ~ 1兆 之間
+                    if -3600 <= time_gap_1 <= 7 * 86400 and 0 <= exp_diff_1 <= EXP_MARGIN:
+                        matched = True
+                        match_type = "🔍 前身 (轉服前/改名前)"
+                        diff_text = f"無縫接軌 (EXP偷練 +{exp_diff_1/100000000:,.0f} 億)"
+                        
+                    # 判斷 B: 後繼 (Target 消失 -> Candidate 出現)
+                    elif -3600 <= time_gap_2 <= 7 * 86400 and 0 <= exp_diff_2 <= EXP_MARGIN:
+                        matched = True
+                        match_type = "🚀 後繼 (轉服後/改名後)"
+                        diff_text = f"無縫接軌 (EXP偷練 +{exp_diff_2/100000000:,.0f} 億)"
+                        
+                    # 判斷 C: 絕對經驗值碰撞 (防呆機制，完全沒打怪的人)
+                    elif abs(c_max_exp - t_min_exp) < 1000 or abs(c_min_exp - t_max_exp) < 1000:
+                        matched = True
+                        match_type = "🔗 經驗值絕對碰撞"
+                        diff_text = "EXP 完全一致"
+                        
+                    if matched:
+                        # 避免重複加入
+                        if not any(x['name'] == c_name and x['server'] == c_server for x in timeline):
+                            timeline.append({
+                                "name": c_name, "server": c_server, "lvl": c_lvl, "cls": t_class,
+                                "type": match_type,
+                                "first": c_first_str, "last": c_last_str,
+                                "min_exp": c_min_exp, "max_exp": c_max_exp,
+                                "diff_text": diff_text
+                            })
+
+            # 依照首次出現時間排序，排出一條完美的轉服時間軸
+            timeline.sort(key=lambda x: x['first'])
+
+            if len(timeline) <= len(target_profiles):
+                return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {target_profiles[-1][6]/1000000000000:.2f} 兆。\n系統利用【同職業+合理經驗值增幅】過濾了全服資料，沒有發現轉服接軌紀錄。")
+
+            desc = f"🚨 **利用進化版【同職業特徵 + 經驗值接軌】演算法，發現以下軌跡！**\n\n"
+            
+            for idx, p in enumerate(timeline, 1):
+                exp_zhao_min = p['min_exp'] / 1_000_000_000_000
+                exp_zhao_max = p['max_exp'] / 1_000_000_000_000
+                
+                desc += f"{idx}. {p['name']} [{p['server']}] {p['type']}\n"
+                desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']}\n"
+                desc += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                if p['min_exp'] == p['max_exp']:
+                    desc += f"   ▶ EXP: {exp_zhao_min:,.2f} 兆\n"
+                else:
+                    desc += f"   ▶ EXP: {exp_zhao_min:,.2f} 兆 ➡️ {exp_zhao_max:,.2f} 兆\n"
+                    
+                if p['diff_text']:
+                    desc += f"   ▶ 備註: {p['diff_text']}\n"
+                desc += "\n"
+
+            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (終極版) - {target_name}", description=desc[:4000], color=0xff0000)
+            embed.set_footer(text="系統：基於同職業特徵與無縫接軌增幅的模糊匹配演算法")
 
             await processing_msg.delete()
             await ctx.send(embed=embed)
