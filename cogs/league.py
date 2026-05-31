@@ -121,7 +121,17 @@ class LeagueTracker(commands.Cog):
             for emb in embeds:
                 await ctx.send(embed=emb)
 
+        # ==========================================
+        # 👇 替換這段：加上雙重保護的錯誤攔截機制
+        # ==========================================
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 模組發生錯誤：{str(e)}")
+            error_text = f"❌ 模組發生錯誤：{str(e)}"
+            try:
+                # 先嘗試編輯原本的提示訊息
+                await processing_msg.edit(content=error_text)
+            except discord.NotFound:
+                # 如果提示訊息已經被刪除了，就直接發送新的訊息
+                await ctx.send(error_text)
+        # ==========================================
 async def setup(bot):
     await bot.add_cog(LeagueTracker(bot))
