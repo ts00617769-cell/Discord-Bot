@@ -409,95 +409,45 @@ class ExpTracker(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ 系統錯誤: {e}")
     # ==========================================
-    # 🕵️ 天眼追蹤系統：利用絕對經驗值尋找改名/轉服玩家
+    # 🕵️ 天眼追蹤系統：全歷史經驗值特徵碰撞比對
     # ==========================================
     @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 西巴豆仔")
     async def track_player(self, ctx, target_name: str):
-        processing_msg = await ctx.send(f"🔍 啟動天眼系統，正在分析「{target_name}」的經驗值特徵碼...")
+        processing_msg = await ctx.send(f"🔍 啟動天眼系統，正在分析「{target_name}」的所有歷史經驗值軌跡...")
 
         try:
-            # 1. 取得目標最後一次的精確經驗值
-            async with self.bot.db.execute('''
-                SELECT exp, level, class_name, server_name, record_time
-                FROM exp_history
-                WHERE player_name = ?
-                ORDER BY record_time DESC LIMIT 1
-            ''', (target_name,)) as cursor:
-                target_data = await cursor.fetchone()
-
-            if not target_data:
-                return await processing_msg.edit(content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。")
-
-            target_exp, target_level, target_class, target_server, target_time = target_data
-
-            # 2. 尋找歷史中擁有完全相同經驗值的實體 (跨越不同伺服器或名字)
-            async with self.bot.db.execute('''
-                SELECT player_name, server_name, level, class_name, MIN(record_time), MAX(record_time)
-                FROM exp_history
-                WHERE exp = ?
-                GROUP BY player_name, server_name
-                ORDER BY MIN(record_time) ASC
-            ''', (target_exp,)) as cursor:
-                matches = await cursor.fetchall()
-
-            if len(matches) <= 1:
-                return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {target_exp/1000000000000:.2f} 兆。\n系統找不到其他擁有相同經驗值的人，目標可能尚未改名或轉服。")
-
-            description = f"**鎖定特徵值：** `{target_exp:,.0f}` (約 {target_exp/1000000000000:.2f} 兆)\n"
-            description += f"**目標最後觀測：** `{target_time}`\n\n"
-            description += "🚨 **發現以下高度吻合的活動軌跡：**\n```yaml\n"
-
-            for idx, (p_name, s_name, lvl, cls_name, first_seen, last_seen) in enumerate(matches, 1):
-                if p_name == target_name and s_name == target_server:
-                    mark = "🎯 (查詢目標)"
-                elif s_name == target_server:
-                    mark = "🔄 (同服改名)"
-                else:
-                    mark = "✈️ (疑似轉服)"
-                    
-                description += f"{idx}. {p_name} [{s_name}] {mark}\n"
-                description += f"   ▶ 職業: {cls_name} | Lv.{lvl}\n"
-                description += f"   ▶ 首次出現: {first_seen[5:16]}\n"
-                description += f"   ▶ 最後觀測: {last_seen[5:16]}\n\n"
-
-            description += "```"
-
-            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 - {target_name}", description=description, color=0xff0000)
-            embed.set_footer(text="系統：基於絕對經驗值 (gc_exp) 碰撞匹配演算法")
-
-            await processing_msg.delete()
-            await ctx.send(embed=embed)
-            
-        except Exception as e:
-            await processing_msg.edit(content=f"❌ 尋人系統發生錯誤: {e}")
-
-
-    @commands.command(name="轉服掃描", aliases=["移民清單", "抓包"], help="全服掃描近期利用轉服空窗期改名或移動的玩家")
-    async def global_transfer_scan(self, ctx):
-        processing_msg = await ctx.send("📡 正在進行全資料庫特徵碰撞比對，這可能需要幾秒鐘...")
-
-        try:
-            # 1. 找出所有「被兩個以上不同(玩家+伺服器)組合」共用的經驗值 (為了防誤判，僅限大於 1 兆的活躍玩家)
-            async with self.bot.db.execute('''
+            # 1. 找出這個玩家在資料庫裡擁有的「所有經驗值」，並檢查這些經驗值有沒有被「其他人/其他伺服器」共用
+            sql = '''
                 SELECT exp
                 FROM exp_history
-                WHERE exp > 1000000000000
+                WHERE exp IN (
+                    SELECT DISTINCT exp 
+                    FROM exp_history 
+                    WHERE player_name = ?
+                )
                 GROUP BY exp
                 HAVING COUNT(DISTINCT player_name || server_name) > 1
-                ORDER BY MAX(record_time) DESC
-                LIMIT 10
-            ''') as cursor:
+                ORDER BY exp DESC
+            '''
+            async with self.bot.db.execute(sql, (target_name,)) as cursor:
                 shared_exps = await cursor.fetchall()
-            
-            if not shared_exps:
-                return await processing_msg.edit(content="💤 目前資料庫中沒有偵測到任何轉服或改名的活動軌跡。")
 
+            # 如果沒有發現重疊的經驗值，就回報最後紀錄
+            if not shared_exps:
+                async with self.bot.db.execute('SELECT exp FROM exp_history WHERE player_name = ? ORDER BY record_time DESC LIMIT 1', (target_name,)) as cursor:
+                    last_record = await cursor.fetchone()
+                
+                if not last_record:
+                    return await processing_msg.edit(content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。")
+                else:
+                    return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {last_record[0]/1000000000000:.2f} 兆。\n系統找遍了該玩家的歷史經驗值，沒有發現與其他人重疊的轉服軌跡。")
+
+            # 2. 抓出這些有碰撞的經驗值的詳細資料
             exp_list = [row[0] for row in shared_exps]
             placeholders = ','.join('?' for _ in exp_list)
             
-            # 2. 把這些有碰撞的經驗值詳細資料抓出來
             async with self.bot.db.execute(f'''
-                SELECT exp, player_name, server_name, MIN(record_time), MAX(record_time)
+                SELECT exp, player_name, server_name, level, class_name, MIN(record_time), MAX(record_time)
                 FROM exp_history
                 WHERE exp IN ({placeholders})
                 GROUP BY exp, player_name, server_name
@@ -507,38 +457,40 @@ class ExpTracker(commands.Cog):
 
             # 3. 組合報表
             grouped_data = {}
-            for exp, p_name, s_name, first_seen, last_seen in records:
+            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen in records:
                 if exp not in grouped_data:
                     grouped_data[exp] = []
-                grouped_data[exp].append({"name": p_name, "server": s_name, "first": first_seen, "last": last_seen})
+                grouped_data[exp].append({
+                    "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name, 
+                    "first": first_seen, "last": last_seen
+                })
 
-            embeds = []
-            desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊：**\n\n"
+            desc = f"🚨 **發現「{target_name}」的歷史活動軌跡！**\n\n"
             
             for exp, players in grouped_data.items():
                 exp_zhao = exp / 1_000_000_000_000
-                desc += f"🔗 **特徵碼：{exp_zhao:.3f} 兆**\n```yaml\n"
+                desc += f"🔗 **發生碰撞的特徵碼：{exp_zhao:,.2f} 兆**\n```yaml\n"
                 
                 for idx, p in enumerate(players, 1):
-                    desc += f"{idx}. {p['name']} [{p['server']}]\n"
-                    desc += f"   (觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]})\n"
+                    if p['name'] == target_name:
+                        mark = "🎯 (查詢目標)"
+                    else:
+                        mark = "✈️ (分身/改名/轉服)"
+                        
+                    desc += f"{idx}. {p['name']} [{p['server']}] {mark}\n"
+                    desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']}\n"
+                    desc += f"   ▶ 觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]}\n\n"
                 desc += "```\n"
 
-                # 分頁處理避免超過 Discord 字數限制
-                if len(desc) > 1500:
-                    embeds.append(discord.Embed(title="✈️ 全服轉服與改名掃描報告", description=desc, color=0xe67e22))
-                    desc = ""
-                    
-            if desc:
-                embeds.append(discord.Embed(title="✈️ 全服轉服與改名掃描報告", description=desc, color=0xe67e22))
+            # 避免字數超過 Discord 限制
+            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 - {target_name}", description=desc[:4000], color=0xff0000)
+            embed.set_footer(text="系統：全歷史經驗值軌跡比對演算法")
 
             await processing_msg.delete()
-            for e in embeds:
-                e.set_footer(text="※ 原理：轉服期間經驗值會凍結，利用相同特徵追蹤移動軌跡。")
-                await ctx.send(embed=e)
-
+            await ctx.send(embed=embed)
+            
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 掃描發生錯誤: {e}")
+            await processing_msg.edit(content=f"❌ 尋人系統發生錯誤: {e}")
 
 # setup 獨立在最外層
 async def setup(bot):
