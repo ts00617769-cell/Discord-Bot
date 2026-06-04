@@ -3,6 +3,9 @@ from discord.ext import commands, tasks
 import traceback
 import datetime
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class WarRoom(commands.Cog):
     def __init__(self, bot):
@@ -18,7 +21,7 @@ class WarRoom(commands.Cog):
     # ==========================================
     @commands.Cog.listener()
     async def on_ready(self):
-        print(f'[模組載入] WarRoom (戰情室監控與排程) 運作中')
+        logger.info(f'[模組載入] WarRoom (戰情室監控與排程) 運作中')
         channel = self.bot.get_channel(self.log_channel_id)
         if channel:
             await channel.send("🟢 **【系統廣播】** 戰情雷達已重新啟動，後勤監視與自動排程上線。")

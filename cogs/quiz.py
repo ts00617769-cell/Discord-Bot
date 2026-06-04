@@ -175,7 +175,7 @@ class QuizSystem(commands.Cog):
                 
                 # 重新綁定按鈕監聽 (讓重啟前發送的按鈕繼續有效)
                 self.bot.add_view(SecretQuizView(q_data))
-                print(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
+                logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
 
     async def get_unrepeated_quiz(self):
         """防重複抽題機制"""
