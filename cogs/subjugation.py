@@ -3,7 +3,11 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
+import os
+from dotenv import load_dotenv
 from game_data import SERVER_MAP
+
+load_dotenv()
 
 class SubjugationCog(commands.Cog):
     # ✅ 加回引擎
@@ -19,7 +23,7 @@ class SubjugationCog(commands.Cog):
         }
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
         try:
-            async with session.post(api_url, json=payload, headers=headers, ssl=False) as resp:
+            async with session.post(api_url, json=payload, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", {}).get("gc", [])
@@ -30,9 +34,13 @@ class SubjugationCog(commands.Cog):
 
     @commands.command(name="討伐排名", aliases=["討伐"], help="查詢全服前 100 名討伐等級排行")
     async def get_subjugation_ranking(self, ctx):
-        # 🛡️ 【資安防護網】(順便幫你加上來了)
-        # allowed_channel_ids = [1477966312411107493, 1476506457032884328] 
-        # if ctx.channel.id not in allowed_channel_ids: return 
+        # 🛡️ 【資安防護網】頻道權限檢查
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        if allowed_channels_str:
+            allowed_channel_ids = [int(ch_id.strip()) for ch_id in allowed_channels_str.split(",") if ch_id.strip()]
+            if allowed_channel_ids and ctx.channel.id not in allowed_channel_ids:
+                await ctx.send("❌ 此指令只能在指定的戰情室使用")
+                return
 
         processing_msg = await ctx.send("📡 啟動全服討伐雷達掃描中，請稍候...")
 
