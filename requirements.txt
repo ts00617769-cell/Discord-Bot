@@ -6,7 +6,7 @@ attrs==25.3.0
 beautifulsoup4==4.13.3
 discord.py==2.5.2
 frozenlist==1.6.0
-google-auth==2.36.1
+google-auth==2.36.0
 google-generativeai==0.8.3
 gspread==6.1.2
 idna==3.10
