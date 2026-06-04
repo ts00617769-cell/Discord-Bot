@@ -29,7 +29,7 @@ class CastleTracker(commands.Cog):
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         try:
-            async with session.post(api_url, json=payload, headers=headers) as response:
+            async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     territories = json_data.get("data", {}).get("territory") or []
@@ -78,14 +78,13 @@ class CastleTracker(commands.Cog):
 
         try:
             all_territories = []
-            async with aiohttp.ClientSession() as session:
-                if is_global:
-                    tasks = [self.fetch_territory_data(self.bot.session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
-                    results = await asyncio.gather(*tasks)
-                    for r in results: all_territories.extend(r)
-                else:
-                    territories = await self.fetch_territory_data(self.bot.session, target_server, target_group_id, target_world_id)
-                    all_territories.extend(territories)
+            if is_global:
+                tasks = [self.fetch_territory_data(self.bot.session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
+                results = await asyncio.gather(*tasks)
+                for r in results: all_territories.extend(r)
+            else:
+                territories = await self.fetch_territory_data(self.bot.session, target_server, target_group_id, target_world_id)
+                all_territories.extend(territories)
 
             if not all_territories:
                 return await processing_msg.edit(content=f"❌ 掃描失敗，該區目前沒有據點資料。")
