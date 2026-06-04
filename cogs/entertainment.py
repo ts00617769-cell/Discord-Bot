@@ -67,7 +67,7 @@ class Entertainment(commands.Cog):
     async def daily_tarot(self, ctx):
         today_str = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y%m%d')
         seed = f"tarot_{ctx.author.id}_{today_str}"
-        random.seed(seed)
+        rng = random.Random(seed)
         
         tarot_cards = {
             "🃏 0. 愚者 (The Fool)": "正位：放下得失心，適合隨手單抽，常有意外驚喜。\n逆位：切忌上頭！絕對不要把留著保底的鑽石拿去亂抽。",
@@ -94,14 +94,14 @@ class Entertainment(commands.Cog):
             "🌍 21. 世界 (The World)": "正位：完美圓滿！心想事成，缺什麼裝備今天就能打到或抽到！\n逆位：距離目標只差最後一哩路，鍊成卡在最後一柱，請保持平常心。"
         }
         
-        drawn_card = random.choice(list(tarot_cards.keys()))
+        drawn_card = rng.choice(list(tarot_cards.keys()))
         interpretation_full = tarot_cards[drawn_card]
         
         parts = interpretation_full.split("\n逆位：")
         upright_text = parts[0].replace("正位：", "").strip()
         reversed_text = parts[1].strip() if len(parts) > 1 else "無逆位解釋"
 
-        is_upright = random.choice([True, False])
+        is_upright = rng.choice([True, False])
         
         if is_upright:
             final_title = f"**{drawn_card} (正位)**"
@@ -110,8 +110,6 @@ class Entertainment(commands.Cog):
             final_title = f"**{drawn_card} (逆位) 🙃**"
             final_desc = reversed_text
 
-        random.seed()
-        
         embed = discord.Embed(
             title="🔮 塔羅神諭 - 今日遊戲運勢",
             description=f"{ctx.author.mention} 抽出的命運之牌是：",

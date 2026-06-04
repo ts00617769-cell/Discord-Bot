@@ -2,7 +2,10 @@ import discord
 from discord.ext import commands
 import aiohttp
 import unicodedata
-import os # ✨ 補上了這個，不然 os.getenv 會報錯喔！
+import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
@@ -24,6 +27,27 @@ class LeagueTracker(commands.Cog):
         # 🛡️ 資安防護網：如果不是在戰情室頻道，機器人就裝死
         if ctx.channel.id not in self.allowed_channel_ids:
             return 
+        
+        # ✅ 新增參數驗證
+        try:
+            season_int = int(season)
+            round_int = int(round_num)
+            league_int = int(league_id)
+            
+            # 合理性檢查
+            if not (1 <= season_int <= 10):
+                await ctx.send("❌ 賽季必須是 1-10 的數字")
+                return
+            if not (1 <= round_int <= 20):
+                await ctx.send("❌ 回合必須是 1-20 的數字")
+                return
+            if not (1 <= league_int <= 5):
+                await ctx.send("❌ 級別必須是 1-5 的數字 (1:挑戰者 2:菁英 3:超級菁英 4:傳奇 5:不朽)")
+                return
+                
+        except ValueError:
+            await ctx.send("❌ 請輸入數字。用法: `!聯賽 [季] [回合] [級別]` 例: `!聯賽 3 3 1`")
+            return
 
         # 💡 友善的提示訊息 (參數回顯機制)
         hint_msg = (
@@ -54,7 +78,7 @@ class LeagueTracker(commands.Cog):
 
         try:
             # ✨ 直接使用全域 session，不重複建立連線！
-            async with self.bot.session.post(api_url, json=payload, headers=headers, ssl=False, timeout=10) as response:
+            async with self.bot.session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status != 200:
                     return await processing_msg.edit(content=f"❌ API 連線失敗 (狀態碼: {response.status})。請確認 API 網址是否正確。")
                 
@@ -124,14 +148,36 @@ class LeagueTracker(commands.Cog):
         # ==========================================
         # 👇 替換這段：加上雙重保護的錯誤攔截機制
         # ==========================================
-        except Exception as e:
-            error_text = f"❌ 模組發生錯誤：{str(e)}"
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout fetching league data for S{season} R{round_num}: {e}")
             try:
-                # 先嘗試編輯原本的提示訊息
-                await processing_msg.edit(content=error_text)
+                await processing_msg.edit(content="❌ 連線逾時：抓取聯賽資料花時過久，請重試")
             except discord.NotFound:
-                # 如果提示訊息已經被刪除了，就直接發送新的訊息
-                await ctx.send(error_text)
+                await ctx.send("❌ 連線逾時：抓取聯賽資料花時過久，請重試")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching league data: {e}")
+            try:
+                await processing_msg.edit(content="❌ 網路連線失敗：無法連接到遊戲伺服器")
+            except discord.NotFound:
+                await ctx.send("❌ 網路連線失敗：無法連接到遊戲伺服器")
+        except ValueError as e:
+            logger.error(f"JSON parsing error while fetching league data: {e}")
+            try:
+                await processing_msg.edit(content="❌ 資料解析錯誤：伺服器回傳的資料格式異常")
+            except discord.NotFound:
+                await ctx.send("❌ 資料解析錯誤：伺服器回傳的資料格式異常")
+        except KeyError as e:
+            logger.error(f"Missing required field in league data: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 模組發生錯誤：資料欄位異常")
+            except discord.NotFound:
+                await ctx.send("❌ 模組發生錯誤：資料欄位異常")
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching league data: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 模組發生錯誤：{type(e).__name__}")
+            except discord.NotFound:
+                await ctx.send(f"❌ 模組發生錯誤：{type(e).__name__}")
         # ==========================================
 async def setup(bot):
     await bot.add_cog(LeagueTracker(bot))

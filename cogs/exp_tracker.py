@@ -6,7 +6,9 @@ import datetime
 import unicodedata
 from game_data import SERVER_MAP
 import os
-# 移除了 import sqlite3，因為我們直接使用 self.bot.db
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
@@ -60,8 +62,11 @@ class ExpTracker(commands.Cog):
             async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,)) as cursor:
                 result = await cursor.fetchone()
                 return f"({result[0]})" if result else ""
+        except asyncio.TimeoutError as e:
+            logger.error(f"Database timeout while fetching member info for '{name}': {e}")
+            return ""
         except Exception as e:
-            print(f"讀取標記失敗: {e}")
+            logger.error(f"Unexpected error while fetching member info for '{name}': {e}")
             return ""
 
     async def fetch_server_data(self, session, group_id, world_id):
@@ -73,33 +78,43 @@ class ExpTracker(commands.Cog):
                 if response.status == 200:
                     json_data = await response.json()
                     return json_data.get("data", {}).get("gc", [])[:50]
-        except Exception:
-            pass
+        except asyncio.TimeoutError as e:
+            logger.error(f"API timeout while fetching data for group {group_id}, world {world_id}: {e}")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching server data: {e}")
+        except ValueError as e:
+            logger.error(f"JSON parsing error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching server data: {e}")
         return []
 
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
-            print(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
+            logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
             
             # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
             for server_name, (g_id, w_id) in SERVER_MAP.items():
-                # 這裡傳入 self.bot.session
-                players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
+                try:
+                    # 這裡傳入 self.bot.session
+                    players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
-                for p in players:
-                    await self.bot.db.execute('''
-                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
-                await self.bot.db.commit()
+                    for p in players:
+                        await self.bot.db.execute('''
+                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                    await self.bot.db.commit()
+                except Exception as e:
+                    logger.error(f"Error processing server {server_name}: {e}")
+                    continue
                 await asyncio.sleep(0.5)
             
             if self.alerts_enabled:
                 await self.check_for_alerts(now_time)
         except Exception as e:
-            print(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
+            logger.error(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
     async def check_for_alerts(self, current_time):
         async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
@@ -406,8 +421,18 @@ class ExpTracker(commands.Cog):
             for e in embeds:
                 await ctx.send(embed=e)
 
+        except asyncio.TimeoutError as e:
+            logger.error(f"Database timeout while fetching historical ranking: {e}")
+            await processing_msg.edit(content="❌ 資料庫查詢逾時，請重試")
+        except ValueError as e:
+            logger.error(f"Invalid value in historical ranking query: {e}")
+            await processing_msg.edit(content="❌ 資料格式錯誤，請檢查查詢參數")
         except Exception as e:
-            await ctx.send(f"❌ 系統錯誤: {e}")
+            logger.error(f"Error while fetching historical ranking: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 系統錯誤: {type(e).__name__}")
+            except discord.NotFound:
+                await ctx.send(f"❌ 系統錯誤: {type(e).__name__}")
     # ==========================================
     # 🕵️ 天眼追蹤系統：V4 雙引擎版 (絕對碰撞 + 無縫接軌)
     # ==========================================
@@ -534,8 +559,24 @@ class ExpTracker(commands.Cog):
             await processing_msg.delete()
             await ctx.send(embed=embed)
             
+        except asyncio.TimeoutError as e:
+            logger.error(f"Database timeout while tracking player '{target_name}': {e}")
+            try:
+                await processing_msg.edit(content="❌ 天眼系統查詢逾時，請重試")
+            except discord.NotFound:
+                pass
+        except KeyError as e:
+            logger.error(f"Missing required field in player tracking: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 尋人系統資料欄位異常")
+            except discord.NotFound:
+                pass
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 尋人系統發生錯誤: {e}")
+            logger.error(f"Error while tracking player '{target_name}': {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 尋人系統發生錯誤: {type(e).__name__}")
+            except discord.NotFound:
+                pass
     # ==========================================
     # 👇 從這裡開始複製，把這整段貼到 track_player 的下面 👇
     # ==========================================
@@ -604,8 +645,24 @@ class ExpTracker(commands.Cog):
                 e.set_footer(text="※ 原理：轉服期間經驗值會凍結，利用相同特徵追蹤移動軌跡。")
                 await ctx.send(embed=e)
 
+        except asyncio.TimeoutError as e:
+            logger.error(f"Database timeout during transfer scan: {e}")
+            try:
+                await processing_msg.edit(content="❌ 掃描查詢逾時，請重試")
+            except discord.NotFound:
+                pass
+        except ValueError as e:
+            logger.error(f"Invalid value during transfer scan: {e}")
+            try:
+                await processing_msg.edit(content="❌ 掃描資料格式錯誤")
+            except discord.NotFound:
+                pass
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 掃描發生錯誤: {e}")
+            logger.error(f"Error during transfer scan: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 掃描發生錯誤: {type(e).__name__}")
+            except discord.NotFound:
+                pass
     # ==========================================
     # 👆 複製到這裡結束 👆
     # ==========================================        

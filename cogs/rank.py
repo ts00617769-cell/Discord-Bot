@@ -5,6 +5,9 @@ import asyncio
 import unicodedata
 from game_data import SERVER_MAP
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RankTracker(commands.Cog):
     def __init__(self, bot):
@@ -24,21 +27,27 @@ class RankTracker(commands.Cog):
             async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,)) as cursor:
                 result = await cursor.fetchone()
                 return f"({result[0]})" if result else ""
-        except:
+        except aiohttp.ClientError as e:
+            logger.error(f"Database connection error while fetching member info for '{name}': {e}")
+            return ""
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching member info for '{name}': {e}")
             return ""
 
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
         try:
-            # ✨ 乾乾淨淨，不加標頭，只加 timeout=10
             async with session.post(api_url, json=payload, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     return json_data.get("data", {}).get("gc") or []
+        except asyncio.TimeoutError as e:
+            logger.error(f"API timeout while fetching ranking for group {group_id}, world {world_id}: {e}")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching ranking: {e}")
         except Exception as e:
-            # 把錯誤印在終端機，以後萬一沒抓到才知道原因
-            print(f"API 發生錯誤: {e}")
+            logger.error(f"Unexpected error while fetching ranking data: {e}")
         return []
 
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
@@ -141,8 +150,23 @@ class RankTracker(commands.Cog):
             await processing_msg.delete()
             await ctx.send(embed=embed)
 
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout while fetching ranking data: {e}")
+            await processing_msg.edit(content=f"❌ 連線逾時：抓取排名資料花時過久，請重試")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching ranking: {e}")
+            await processing_msg.edit(content=f"❌ 網路連線失敗：無法連接到遊戲伺服器")
+        except ValueError as e:
+            logger.error(f"Data parsing error while formatting ranking: {e}")
+            await processing_msg.edit(content=f"❌ 資料解析錯誤：伺服器回傳的資料格式異常")
+        except discord.NotFound:
+            logger.error("Processing message was deleted before we could edit it")
         except Exception as e:
-            await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{str(e)}")
+            logger.error(f"Unexpected error while fetching ranking: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{type(e).__name__}")
+            except discord.NotFound:
+                pass
 
 async def setup(bot):
     await bot.add_cog(RankTracker(bot))
