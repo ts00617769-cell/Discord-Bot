@@ -4,6 +4,9 @@ import aiohttp
 import asyncio
 import unicodedata
 from game_data import SERVER_MAP
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CastleTracker(commands.Cog):
     def __init__(self, bot):
@@ -26,7 +29,7 @@ class CastleTracker(commands.Cog):
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         try:
-            async with session.post(api_url, json=payload, headers=headers, ssl=False) as response:
+            async with session.post(api_url, json=payload, headers=headers) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     territories = json_data.get("data", {}).get("territory") or []
@@ -35,8 +38,14 @@ class CastleTracker(commands.Cog):
                     t['real_server_name'] = server_name
                         
                 return territories
-        except Exception:
-            pass
+        except asyncio.TimeoutError as e:
+            logger.error(f"API timeout while fetching territory data for {server_name}: {e}")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching territory data: {e}")
+        except ValueError as e:
+            logger.error(f"JSON parsing error while fetching territory data: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching territory data: {e}")
         return []
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
