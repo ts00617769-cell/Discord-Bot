@@ -44,6 +44,8 @@ class ExpTracker(commands.Cog):
             columns = [row[1] for row in await cursor.fetchall()]
             if 'class_name' not in columns:
                 await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN class_name TEXT DEFAULT '未知'")
+            if 'subjugation_grade' not in columns:
+                await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0")
                 
         await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)')
 
@@ -114,10 +116,17 @@ class ExpTracker(commands.Cog):
                     players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
                     for p in players:
+                        # 擷取討伐等級
+                        grade_val = (p.get("string_map") or {}).get("grade", "0")
+                        try:
+                            grade = int(grade_val)
+                        except (ValueError, TypeError):
+                            grade = 0
+
                         await self.bot.db.execute('''
-                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知'), grade))
                     await self.bot.db.commit()
                 except Exception as e:
                     logger.error(f"Error processing server {server_name}: {e}")
@@ -190,16 +199,18 @@ class ExpTracker(commands.Cog):
             # - 新紀錄的經驗值大於等於舊紀錄的經驗值，且差距在 1 兆以內 (無縫接軌/偷練)
             # - 職業必須相同 (不可能轉服變換職業)
             # - 等級大於等於舊等級 (等級不可能倒退)
+            # - 討伐等級大於等於舊討伐等級 (討伐不會因為轉服而退步)
             # - 名字或伺服器其中一項不同
             # - ✨ 確保 t_now 是新面孔（他在 time_prev 的名單中並不存在同伺服器同名字的紀錄）
             sql = '''
                 SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
                                 t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
-                                t_old.exp
+                                t_old.exp, t_now.subjugation_grade
                 FROM exp_history t_now
                 JOIN exp_history t_old ON t_now.class_name = t_old.class_name
                 WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
                   AND t_now.level >= t_old.level
+                  AND t_now.subjugation_grade >= t_old.subjugation_grade
                   AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
                   AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
                   AND t_old.record_time <= ? AND t_old.record_time >= datetime(?, '-7 days')
@@ -227,6 +238,7 @@ class ExpTracker(commands.Cog):
                 new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
                 old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
                 old_exp = row[9]
+                new_sub_grade = row[10]
 
                 # 防止單次掃描中重複推播
                 pair_key = (old_name, old_server, new_name, new_server)
@@ -278,7 +290,7 @@ class ExpTracker(commands.Cog):
                                     f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
                                     f"**{new_name}** ({new_server})\n"
                                     f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
-                                    f"[屬性]: Lv.{new_lvl} / {new_cls}",
+                                    f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
                         color=0xf1c40f
                     )
                     await channel.send(embed=embed)
