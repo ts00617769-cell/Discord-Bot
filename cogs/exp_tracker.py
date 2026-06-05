@@ -138,7 +138,7 @@ class ExpTracker(commands.Cog):
         async with self.bot.db.execute(sql, (time_now, time_prev)) as cursor:
             records = await cursor.fetchall()
         
-        # ... (後續警報發送邏輯保持原樣，沒有 SQL 變動) ...
+        # 超速警報邏輯
         alert_list = []
         for name, server, level, exp_now, exp_prev in records:
             diff = exp_now - exp_prev
@@ -162,6 +162,71 @@ class ExpTracker(commands.Cog):
                 embed.description = desc
                 embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
                 await channel.send(embed=embed)
+
+        # ✨ 新增：自動轉服/改名偵測
+        await self.check_for_transfers(time_now, time_prev)
+
+    async def check_for_transfers(self, time_now, time_prev):
+        """自動偵測轉服與改名"""
+        try:
+            # 1. 找出有嫌疑的經驗值 (大於 1 兆，且在近期兩次掃描中有跨身分重疊)
+            # 條件：在 time_now 有人擁有這個 exp，且在之前的紀錄也有人擁有這個 exp，但身分不同
+            sql = '''
+                SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
+                                t_old.player_name, t_old.server_name, t_old.level, t_old.class_name
+                FROM exp_history t_now
+                JOIN exp_history t_old ON t_now.exp = t_old.exp
+                WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
+                  AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
+                  AND t_old.record_time <= ? AND t_old.record_time >= datetime(?, '-7 days')
+            '''
+            async with self.bot.db.execute(sql, (time_now, time_prev, time_prev)) as cursor:
+                transfer_records = await cursor.fetchall()
+
+            if not transfer_records:
+                return
+
+            channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
+            if not channel:
+                return
+
+            # 過濾並整理報告
+            reported_exps = set()
+            for row in transfer_records:
+                exp_val = row[0]
+                if exp_val in reported_exps:
+                    continue
+
+                new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
+                old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
+
+                # 確定這個舊名字在 time_now 真的消失了 (如果還在，可能只是剛好同經驗的巧合)
+                async with self.bot.db.execute('SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?', (time_now, old_name, old_server)) as check_cursor:
+                    is_old_still_active = await check_cursor.fetchone()
+
+                if not is_old_still_active:
+                    reported_exps.add(exp_val)
+
+                    # 判斷是轉服還是改名
+                    status_str = "跨服轉移並改名"
+                    if new_name == old_name:
+                        status_str = "跨服轉移"
+                    elif new_server == old_server:
+                        status_str = "原地改名"
+
+                    # 由於是絕對碰撞，EXP 變動為 0.00%
+                    embed = discord.Embed(
+                        title="【波拉西亞戰記】轉移/改名變動警報",
+                        description=f"時間：{time_now}\n{'-'*30}\n"
+                                    f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔ **{new_name}** ({new_server})\n"
+                                    f"[狀態]: {status_str} | [EXP變動]: +0.00%\n"
+                                    f"[屬性]: Lv.{new_lvl} / {new_cls}",
+                        color=0xf1c40f
+                    )
+                    await channel.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error in automatic transfer check: {e}")
 
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):

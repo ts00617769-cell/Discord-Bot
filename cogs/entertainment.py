@@ -156,7 +156,7 @@ class Entertainment(commands.Cog):
             loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
             try:
                 url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
-                async with self.bot.session.get(url) as response:
+                async with self.bot.session.get(url, timeout=10) as response:
                     response.raise_for_status() 
                     html_bytes = await response.read()
                     html = html_bytes.decode('utf-8', errors='ignore')
