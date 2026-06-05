@@ -14,6 +14,7 @@ class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.ALERT_CHANNEL_ID = int(os.getenv("EXP_ALERT_CHANNEL_ID", 0))
+        self.TRANSFER_ALERT_CHANNEL_ID = int(os.getenv("TRANSFER_ALERT_CHANNEL_ID", 0))
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
@@ -227,7 +228,7 @@ class ExpTracker(commands.Cog):
             if not transfer_records:
                 return
 
-            channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
+            channel = self.bot.get_channel(self.TRANSFER_ALERT_CHANNEL_ID)
             if not channel:
                 return
 
