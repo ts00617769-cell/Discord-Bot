@@ -88,7 +88,7 @@ class ExpTracker(commands.Cog):
             logger.error(f"Unexpected error while fetching server data: {e}")
         return []
 
-    @tasks.loop(minutes=10.0)
+    @tasks.loop(minutes=5.0)
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
