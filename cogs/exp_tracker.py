@@ -44,8 +44,23 @@ class ExpTracker(commands.Cog):
             columns = [row[1] for row in await cursor.fetchall()]
             if 'class_name' not in columns:
                 await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN class_name TEXT DEFAULT '未知'")
+            if 'subjugation_grade' not in columns:
+                await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0")
                 
         await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)')
+
+        # ✨ 新增：用於記錄已發送過轉移警報的資料表，防止無限洗頻
+        await self.bot.db.execute('''
+            CREATE TABLE IF NOT EXISTS transfer_alerts_log (
+                old_name TEXT,
+                old_server TEXT,
+                new_name TEXT,
+                new_server TEXT,
+                alert_time TIMESTAMP,
+                PRIMARY KEY (old_name, old_server, new_name, new_server)
+            )
+        ''')
+
         await self.bot.db.commit()
 
     async def get_member_info(self, name):
@@ -88,7 +103,7 @@ class ExpTracker(commands.Cog):
             logger.error(f"Unexpected error while fetching server data: {e}")
         return []
 
-    @tasks.loop(minutes=10.0)
+    @tasks.loop(minutes=5.0)
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
@@ -101,10 +116,17 @@ class ExpTracker(commands.Cog):
                     players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
                     for p in players:
+                        # 擷取討伐等級
+                        grade_val = (p.get("string_map") or {}).get("grade", "0")
+                        try:
+                            grade = int(grade_val)
+                        except (ValueError, TypeError):
+                            grade = 0
+
                         await self.bot.db.execute('''
-                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知'), grade))
                     await self.bot.db.commit()
                 except Exception as e:
                     logger.error(f"Error processing server {server_name}: {e}")
@@ -167,20 +189,39 @@ class ExpTracker(commands.Cog):
         await self.check_for_transfers(time_now, time_prev)
 
     async def check_for_transfers(self, time_now, time_prev):
-        """自動偵測轉服與改名"""
+        """自動偵測轉服與改名 (V4 雙引擎升級版)"""
         try:
-            # 1. 找出有嫌疑的經驗值 (大於 1 兆，且在近期兩次掃描中有跨身分重疊)
-            # 條件：在 time_now 有人擁有這個 exp，且在之前的紀錄也有人擁有這個 exp，但身分不同
+            # 容許的經驗值偷練誤差 (1 兆以內)
+            EXP_MARGIN = 1.0 * 1000000000000
+
+            # 1. 找出嫌疑人 (經驗值 > 1兆)
+            # 條件：
+            # - 新紀錄的經驗值大於等於舊紀錄的經驗值，且差距在 1 兆以內 (無縫接軌/偷練)
+            # - 職業必須相同 (不可能轉服變換職業)
+            # - 等級大於等於舊等級 (等級不可能倒退)
+            # - 討伐等級大於等於舊討伐等級 (討伐不會因為轉服而退步)
+            # - 名字或伺服器其中一項不同
+            # - ✨ 確保 t_now 是新面孔（他在 time_prev 的名單中並不存在同伺服器同名字的紀錄）
             sql = '''
                 SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
-                                t_old.player_name, t_old.server_name, t_old.level, t_old.class_name
+                                t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
+                                t_old.exp, t_now.subjugation_grade
                 FROM exp_history t_now
-                JOIN exp_history t_old ON t_now.exp = t_old.exp
+                JOIN exp_history t_old ON t_now.class_name = t_old.class_name
                 WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
+                  AND t_now.level >= t_old.level
+                  AND t_now.subjugation_grade >= t_old.subjugation_grade
+                  AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
                   AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
                   AND t_old.record_time <= ? AND t_old.record_time >= datetime(?, '-7 days')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM exp_history t_check
+                      WHERE t_check.record_time = ?
+                        AND t_check.player_name = t_now.player_name
+                        AND t_check.server_name = t_now.server_name
+                  )
             '''
-            async with self.bot.db.execute(sql, (time_now, time_prev, time_prev)) as cursor:
+            async with self.bot.db.execute(sql, (time_now, EXP_MARGIN, time_prev, time_prev, time_prev)) as cursor:
                 transfer_records = await cursor.fetchall()
 
             if not transfer_records:
@@ -191,36 +232,65 @@ class ExpTracker(commands.Cog):
                 return
 
             # 過濾並整理報告
-            reported_exps = set()
+            reported_pairs = set()
             for row in transfer_records:
-                exp_val = row[0]
-                if exp_val in reported_exps:
-                    continue
-
+                new_exp = row[0]
                 new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
                 old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
+                old_exp = row[9]
+                new_sub_grade = row[10]
 
-                # 確定這個舊名字在 time_now 真的消失了 (如果還在，可能只是剛好同經驗的巧合)
+                # 防止單次掃描中重複推播
+                pair_key = (old_name, old_server, new_name, new_server)
+                if pair_key in reported_pairs:
+                    continue
+
+                # 🛡️ 防無限洗頻：檢查是否在資料庫中已經報過了
+                async with self.bot.db.execute('''
+                    SELECT 1 FROM transfer_alerts_log
+                    WHERE old_name = ? AND old_server = ? AND new_name = ? AND new_server = ?
+                ''', pair_key) as check_log_cursor:
+                    already_alerted = await check_log_cursor.fetchone()
+
+                if already_alerted:
+                    continue
+
+                # 🛡️ 最終防呆：確定舊名字在 time_now 真的「從榜單上消失了」
+                # 如果舊名字還在現在的榜單上，代表這只是巧合 (例如兩人剛好練到同一門檻)
                 async with self.bot.db.execute('SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?', (time_now, old_name, old_server)) as check_cursor:
                     is_old_still_active = await check_cursor.fetchone()
 
                 if not is_old_still_active:
-                    reported_exps.add(exp_val)
+                    reported_pairs.add(pair_key)
 
-                    # 判斷是轉服還是改名
+                    # 將這筆發送過的紀錄存入資料庫
+                    await self.bot.db.execute('''
+                        INSERT INTO transfer_alerts_log (old_name, old_server, new_name, new_server, alert_time)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (old_name, old_server, new_name, new_server, time_now))
+                    await self.bot.db.commit()
+
+                    # 判斷狀態
                     status_str = "跨服轉移並改名"
                     if new_name == old_name:
                         status_str = "跨服轉移"
                     elif new_server == old_server:
                         status_str = "原地改名"
 
-                    # 由於是絕對碰撞，EXP 變動為 0.00%
+                    # 計算經驗變動
+                    exp_diff = new_exp - old_exp
+                    if exp_diff == 0:
+                        diff_str = "+0.00% (完美吻合)"
+                    else:
+                        diff_str = f"+{(exp_diff/100000000):,.0f} 億 (轉移期間偷練)"
+
                     embed = discord.Embed(
-                        title="【波拉西亞戰記】轉移/改名變動警報",
+                        title="【波拉西亞戰記】轉移/旅團變動警報",
                         description=f"時間：{time_now}\n{'-'*30}\n"
-                                    f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔ **{new_name}** ({new_server})\n"
-                                    f"[狀態]: {status_str} | [EXP變動]: +0.00%\n"
-                                    f"[屬性]: Lv.{new_lvl} / {new_cls}",
+                                    f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
+                                    f"**{new_name}** ({new_server})\n"
+                                    f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
+                                    f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
                         color=0xf1c40f
                     )
                     await channel.send(embed=embed)
