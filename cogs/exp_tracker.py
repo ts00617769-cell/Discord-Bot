@@ -334,7 +334,14 @@ class ExpTracker(commands.Cog):
 
         processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
 
-        async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
+        sql_times = 'SELECT DISTINCT record_time FROM exp_history '
+        params_times = []
+        if not is_global:
+            sql_times += 'WHERE server_name = ? '
+            params_times.append(target_server)
+        sql_times += 'ORDER BY record_time DESC LIMIT 2'
+
+        async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")
