@@ -140,7 +140,15 @@ class ExpTracker(commands.Cog):
             logger.error(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
     async def check_for_alerts(self, current_time):
-        async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
+        # 確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙導致誤判)
+        sql_times = '''
+            SELECT record_time
+            FROM exp_history
+            GROUP BY record_time
+            HAVING COUNT(DISTINCT server_name) >= 4
+            ORDER BY record_time DESC LIMIT 2
+        '''
+        async with self.bot.db.execute(sql_times) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return
