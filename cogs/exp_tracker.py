@@ -334,12 +334,19 @@ class ExpTracker(commands.Cog):
 
         processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
 
-        sql_times = 'SELECT DISTINCT record_time FROM exp_history '
-        params_times = []
-        if not is_global:
-            sql_times += 'WHERE server_name = ? '
-            params_times.append(target_server)
-        sql_times += 'ORDER BY record_time DESC LIMIT 2'
+        if is_global:
+            # 針對全服測速，確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙)
+            sql_times = '''
+                SELECT record_time
+                FROM exp_history
+                GROUP BY record_time
+                HAVING COUNT(DISTINCT server_name) >= 4
+                ORDER BY record_time DESC LIMIT 2
+            '''
+            params_times = []
+        else:
+            sql_times = 'SELECT DISTINCT record_time FROM exp_history WHERE server_name = ? ORDER BY record_time DESC LIMIT 2'
+            params_times = [target_server]
 
         async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
             times = await cursor.fetchall()
