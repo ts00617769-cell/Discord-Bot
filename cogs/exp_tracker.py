@@ -578,7 +578,7 @@ class ExpTracker(commands.Cog):
         try:
             # 1. 取得目標的所有分身/伺服器紀錄 (作為基準點)
             async with self.bot.db.execute('''
-                SELECT server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name
+                SELECT server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
                 FROM exp_history
                 WHERE player_name = ?
                 GROUP BY server_name
@@ -592,7 +592,7 @@ class ExpTracker(commands.Cog):
 
             # 🚀 引擎 A：絕對碰撞 (上一版的完美邏輯，不管時間跟職業，只要 EXP 一模一樣就抓)
             sql_exact = '''
-                SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time)
+                SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(subjugation_grade)
                 FROM exp_history
                 WHERE exp IN (SELECT DISTINCT exp FROM exp_history WHERE player_name = ?)
                 GROUP BY exp, player_name, server_name
@@ -600,7 +600,7 @@ class ExpTracker(commands.Cog):
             async with self.bot.db.execute(sql_exact, (target_name,)) as cursor:
                 exact_matches = await cursor.fetchall()
             
-            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen in exact_matches:
+            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
                 match_type = "🎯 查詢目標" if p_name == target_name else "🔗 絕對經驗值碰撞"
                 diff_text = "EXP 完全一致" if p_name != target_name else ""
                 timeline_entries.append({
@@ -608,17 +608,18 @@ class ExpTracker(commands.Cog):
                     "first": first_seen, "last": last_seen,
                     "match_type": match_type,
                     "diff_text": diff_text,
-                    "exp_val": exp
+                    "exp_val": exp,
+                    "sub_grade": sub_grade
                 })
 
             # 🚀 引擎 B：無縫接軌偷練 (解決轉服空窗期偷打怪的問題)
             EXP_MARGIN = 1.0 * 1000000000000 # 容許 1 兆以內的偷練誤差
             
-            for t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls in target_profiles:
+            for t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade in target_profiles:
                 
                 # 尋找後繼者 (目標消失後出現，經驗值微幅增加)
                 sql_forward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp)
+                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(subjugation_grade)
                     FROM exp_history
                     WHERE player_name != ?
                     GROUP BY player_name, server_name
@@ -628,18 +629,19 @@ class ExpTracker(commands.Cog):
                 async with self.bot.db.execute(sql_forward, (target_name, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN)) as cursor:
                     forward_matches = await cursor.fetchall()
                     
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp in forward_matches:
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_sub_grade in forward_matches:
                     timeline_entries.append({
                         "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
                         "first": c_first, "last": c_last,
                         "match_type": "✈️ 無縫接軌 (轉服/改名後)",
                         "diff_text": f"轉服空窗偷練 +{(c_min_exp - t_max_exp)/100000000:,.0f} 億",
-                        "exp_val": c_min_exp
+                        "exp_val": c_min_exp,
+                        "sub_grade": c_sub_grade
                     })
 
                 # 尋找前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
                 sql_backward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(exp)
+                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
                     WHERE player_name != ?
                     GROUP BY player_name, server_name
@@ -649,13 +651,14 @@ class ExpTracker(commands.Cog):
                 async with self.bot.db.execute(sql_backward, (target_name, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN)) as cursor:
                     backward_matches = await cursor.fetchall()
 
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_max_exp in backward_matches:
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_max_exp, c_sub_grade in backward_matches:
                     timeline_entries.append({
                         "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
                         "first": c_first, "last": c_last,
                         "match_type": "🔍 前身 (轉服/改名前)",
                         "diff_text": f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億",
-                        "exp_val": c_max_exp
+                        "exp_val": c_max_exp,
+                        "sub_grade": c_sub_grade
                     })
 
             # 過濾重複資料 (因為引擎A和引擎B可能會抓到同一筆紀錄)
@@ -680,7 +683,7 @@ class ExpTracker(commands.Cog):
                 exp_zhao = p['exp_val'] / 1_000_000_000_000
                 desc += f"{idx}. {p['name']} [{p['server']}]\n"
                 desc += f"   ▶ {p['match_type']}\n"
-                desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']}\n"
+                desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
                 desc += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
                 if p['diff_text']:
                     desc += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
