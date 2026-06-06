@@ -6,6 +6,7 @@ import unicodedata
 from game_data import SERVER_MAP
 import os
 import logging
+from . import error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -156,20 +157,19 @@ class RankTracker(commands.Cog):
             await ctx.send(embed=embed)
 
         except asyncio.TimeoutError as e:
-            logger.error(f"Timeout while fetching ranking data: {e}")
-            await processing_msg.edit(content=f"❌ 連線逾時：抓取排名資料花時過久，請重試")
+            await error_handler.handle_api_error(ctx, "連線逾時：抓取排名資料花時過久，請重試", str(e))
         except aiohttp.ClientError as e:
-            logger.error(f"HTTP client error while fetching ranking: {e}")
-            await processing_msg.edit(content=f"❌ 網路連線失敗：無法連接到遊戲伺服器")
+            await error_handler.handle_api_error(ctx, "網路連線失敗：無法連接到遊戲伺服器", str(e))
         except ValueError as e:
-            logger.error(f"Data parsing error while formatting ranking: {e}")
-            await processing_msg.edit(content=f"❌ 資料解析錯誤：伺服器回傳的資料格式異常")
+            await error_handler.handle_api_error(ctx, "資料解析錯誤：伺服器回傳的資料格式異常", str(e))
         except discord.NotFound:
             logger.error("Processing message was deleted before we could edit it")
         except Exception as e:
-            logger.error(f"Unexpected error while fetching ranking: {e}")
+            error_handler.log_command_error(ctx, "排名", e)
+            await error_handler.handle_api_error(ctx, f"發生嚴重錯誤：{type(e).__name__}", str(e))
+        finally:
             try:
-                await processing_msg.edit(content=f"❌ 發生嚴重錯誤：{type(e).__name__}")
+                await processing_msg.delete()
             except discord.NotFound:
                 pass
 

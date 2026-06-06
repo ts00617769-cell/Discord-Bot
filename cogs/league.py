@@ -4,6 +4,7 @@ import aiohttp
 import unicodedata
 import os
 import logging
+from . import error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -148,35 +149,21 @@ class LeagueTracker(commands.Cog):
         # 👇 替換這段：加上雙重保護的錯誤攔截機制
         # ==========================================
         except asyncio.TimeoutError as e:
-            logger.error(f"Timeout fetching league data for S{season} R{round_num}: {e}")
-            try:
-                await processing_msg.edit(content="❌ 連線逾時：抓取聯賽資料花時過久，請重試")
-            except discord.NotFound:
-                await ctx.send("❌ 連線逾時：抓取聯賽資料花時過久，請重試")
+            await error_handler.handle_api_error(ctx, "連線逾時：抓取聯賽資料花時過久，請重試", str(e))
         except aiohttp.ClientError as e:
-            logger.error(f"HTTP client error while fetching league data: {e}")
-            try:
-                await processing_msg.edit(content="❌ 網路連線失敗：無法連接到遊戲伺服器")
-            except discord.NotFound:
-                await ctx.send("❌ 網路連線失敗：無法連接到遊戲伺服器")
+            await error_handler.handle_api_error(ctx, "網路連線失敗：無法連接到遊戲伺服器", str(e))
         except ValueError as e:
-            logger.error(f"JSON parsing error while fetching league data: {e}")
-            try:
-                await processing_msg.edit(content="❌ 資料解析錯誤：伺服器回傳的資料格式異常")
-            except discord.NotFound:
-                await ctx.send("❌ 資料解析錯誤：伺服器回傳的資料格式異常")
+            await error_handler.handle_api_error(ctx, "資料解析錯誤：伺服器回傳的資料格式異常", str(e))
         except KeyError as e:
-            logger.error(f"Missing required field in league data: {e}")
-            try:
-                await processing_msg.edit(content=f"❌ 模組發生錯誤：資料欄位異常")
-            except discord.NotFound:
-                await ctx.send("❌ 模組發生錯誤：資料欄位異常")
+            await error_handler.handle_api_error(ctx, "模組發生錯誤：資料欄位異常", str(e))
         except Exception as e:
-            logger.error(f"Unexpected error while fetching league data: {e}")
+            error_handler.log_command_error(ctx, "聯賽", e)
+            await error_handler.handle_api_error(ctx, f"模組發生錯誤：{type(e).__name__}", str(e))
+        finally:
             try:
-                await processing_msg.edit(content=f"❌ 模組發生錯誤：{type(e).__name__}")
+                await processing_msg.delete()
             except discord.NotFound:
-                await ctx.send(f"❌ 模組發生錯誤：{type(e).__name__}")
+                pass
         # ==========================================
 async def setup(bot):
     await bot.add_cog(LeagueTracker(bot))
