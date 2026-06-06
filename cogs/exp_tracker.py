@@ -98,7 +98,7 @@ class ExpTracker(commands.Cog):
             async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    return json_data.get("data", {}).get("gc", [])[:50]
+                    return json_data.get("data", {}).get("gc", [])[:100]
         except asyncio.TimeoutError as e:
             logger.error(f"API timeout while fetching data for group {group_id}, world {world_id}: {e}")
         except aiohttp.ClientError as e:
@@ -113,7 +113,7 @@ class ExpTracker(commands.Cog):
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
-            logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
+            logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前100名...")
             
             # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
             for server_name, (g_id, w_id) in SERVER_MAP.items():
