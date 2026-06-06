@@ -46,11 +46,11 @@ class WarRoom(commands.Cog):
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點自動刪除 30 天前的過期資料"""
+        """每天凌晨 4 點自動刪除 60 天前的過期資料"""
         try:
             async with self.bot.db.execute("""
                 DELETE FROM exp_history 
-                WHERE record_time < datetime('now', 'localtime', '-30 days')
+                WHERE record_time < datetime('now', 'localtime', '-60 days')
             """) as cursor:
                 deleted_rows = cursor.rowcount
             
@@ -59,7 +59,7 @@ class WarRoom(commands.Cog):
             # 將清理結果回報給戰情室
             log_channel = self.bot.get_channel(self.log_channel_id) 
             if log_channel and deleted_rows > 0:
-                await log_channel.send(f"🧹 **【資料庫維護】** 系統已於凌晨自動清理 `{deleted_rows}` 筆 30 天前的過期紀錄，釋放儲存空間。")
+                await log_channel.send(f"🧹 **【資料庫維護】** 系統已於凌晨自動清理 `{deleted_rows}` 筆 60 天前的過期紀錄，釋放儲存空間。")
                 
         except Exception as e:
             # 發生錯誤時回報
