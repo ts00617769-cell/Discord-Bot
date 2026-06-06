@@ -24,8 +24,8 @@ class CastleTracker(commands.Cog):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiTerritoryByWorldId"
         payload = {"world_group_id": group_id, "world_id": world_id, "territory_grade": None, "guild_id": None}
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Content-Type": "application/json",
+            "Origin": "https://warsofprasia.beanfun.com",
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         try:

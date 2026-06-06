@@ -23,7 +23,8 @@ class PrasiaBot(commands.Bot):
 
     async def setup_hook(self):
         try:
-            self.session = aiohttp.ClientSession()
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+            self.session = aiohttp.ClientSession(headers=headers)
             # ✨ 建立全域的非同步資料庫連線
             db_path = os.path.join(os.path.dirname(__file__), 'prasia_data.db')
             self.db = await aiosqlite.connect(db_path)

@@ -70,7 +70,6 @@ class LeagueTracker(commands.Cog):
         }
         
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
             "Origin": "https://warsofprasia.beanfun.com",
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
