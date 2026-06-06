@@ -746,7 +746,7 @@ class ExpTracker(commands.Cog):
             unique_entries.sort(key=lambda x: x['first'])
 
             # 判斷是否只有目標自己
-            if len(unique_entries) <= len(target_profiles) and all(x['name'] == target_name for x in unique_entries):
+            if len(unique_entries) <= 1 and all(x['name'] == target_name for x in unique_entries):
                 target_last_exp = max(p[6] for p in target_profiles)
                 return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n系統啟動了【絕對碰撞】與【無縫接軌】雙引擎掃描，沒有發現轉服或改名軌跡。")
 
