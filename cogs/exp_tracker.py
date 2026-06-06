@@ -221,13 +221,17 @@ class ExpTracker(commands.Cog):
                                 t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
                                 t_old.exp, t_now.subjugation_grade
                 FROM exp_history t_now
-                JOIN exp_history t_old ON t_now.class_name = t_old.class_name
+                JOIN (
+                    SELECT player_name, server_name, class_name, level, subjugation_grade, exp, MAX(record_time) as record_time
+                    FROM exp_history
+                    WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
+                    GROUP BY player_name, server_name
+                ) t_old ON t_now.class_name = t_old.class_name
                 WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
                   AND t_now.level >= t_old.level
                   AND t_now.subjugation_grade >= t_old.subjugation_grade
                   AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
                   AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
-                  AND t_old.record_time <= ? AND t_old.record_time >= datetime(?, '-7 days')
                   AND NOT EXISTS (
                       SELECT 1 FROM exp_history t_check
                       WHERE t_check.record_time = ?
@@ -235,7 +239,7 @@ class ExpTracker(commands.Cog):
                         AND t_check.server_name = t_now.server_name
                   )
             '''
-            async with self.bot.db.execute(sql, (time_now, EXP_MARGIN, time_prev, time_prev, time_prev)) as cursor:
+            async with self.bot.db.execute(sql, (time_prev, time_prev, time_now, EXP_MARGIN, time_prev)) as cursor:
                 transfer_records = await cursor.fetchall()
 
             if not transfer_records:
