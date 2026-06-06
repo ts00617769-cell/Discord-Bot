@@ -839,6 +839,37 @@ class ExpTracker(commands.Cog):
                 await processing_msg.edit(content=f"❌ 掃描發生錯誤: {type(e).__name__}")
             except discord.NotFound:
                 pass
+    @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
+    async def test_transfer_alert(self, ctx):
+        channel_id = self.TRANSFER_ALERT_CHANNEL_ID
+        if not channel_id:
+            return await ctx.send("❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。")
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return await ctx.send(f"❌ 找不到頻道 ID：`{channel_id}`。請確認 ID 是否正確，且機器人是否在該頻道擁有權限。")
+
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        embed = discord.Embed(
+            title="【波拉西亞戰記】轉移/旅團變動警報 (測試)",
+            description=f"時間：{now}\n{'-'*30}\n"
+                        f"✨ [即時轉移辨識] **測試玩家_舊** (測試伺服器_舊) ➔\n"
+                        f"**測試玩家_新** (測試伺服器_新)\n"
+                        f"[狀態]: 跨服轉移並改名 | [EXP變動]: +999 億 (轉移期間偷練)\n"
+                        f"[屬性]: Lv.99 / 測試職業 / 討伐 99\n\n"
+                        f"✅ **如果您看到此訊息，表示轉移警報頻道設定與權限皆正常運作中！**",
+            color=0xf1c40f
+        )
+
+        try:
+            await channel.send(embed=embed)
+            await ctx.send("✅ 測試轉移警報已成功發送！請檢查警報頻道。")
+        except discord.Forbidden:
+            await ctx.send("❌ 機器人沒有權限在該頻道發送訊息或嵌入連結 (Embed Links)。")
+        except Exception as e:
+            await ctx.send(f"❌ 發送警報時發生錯誤：{e}")
+
     # ==========================================
     # 👆 複製到這裡結束 👆
     # ==========================================        
