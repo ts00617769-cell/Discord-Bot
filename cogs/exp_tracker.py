@@ -139,8 +139,7 @@ class ExpTracker(commands.Cog):
                     continue
                 await asyncio.sleep(0.5)
             
-            if self.alerts_enabled:
-                await self.check_for_alerts(now_time)
+            await self.check_for_alerts(now_time)
         except Exception as e:
             logger.error(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
@@ -165,39 +164,40 @@ class ExpTracker(commands.Cog):
         minutes_diff = (t1 - t2).total_seconds() / 60
         if minutes_diff <= 0: return
 
-        sql = '''
-            SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
-            FROM exp_history t1
-            JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-            WHERE t1.record_time = ? AND t2.record_time = ?
-        '''
-        async with self.bot.db.execute(sql, (time_now, time_prev)) as cursor:
-            records = await cursor.fetchall()
-        
-        # 超速警報邏輯
-        alert_list = []
-        for name, server, level, exp_now, exp_prev in records:
-            diff = exp_now - exp_prev
-            if diff > 0:
-                hourly_speed = (diff / minutes_diff) * 60
-                speed_yi = hourly_speed / 100_000_000 
-                if speed_yi >= self.SPEED_LIMIT:
-                    alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
+        if self.alerts_enabled:
+            sql = '''
+                SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                FROM exp_history t1
+                JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                WHERE t1.record_time = ? AND t2.record_time = ?
+            '''
+            async with self.bot.db.execute(sql, (time_now, time_prev)) as cursor:
+                records = await cursor.fetchall()
 
-        if alert_list:
-            alert_list.sort(key=lambda x: x['speed'], reverse=True)
-            channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
-            if channel:
-                embed = discord.Embed(title="🚨 偵測到練功超速玩家！", color=0xff0000)
-                desc = f"以下玩家時速超過 {self.SPEED_LIMIT} 億，可能正在強力衝等：\n```yaml\n"
-                for p in alert_list:
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
-                    name_padded = p['name'] + " " * max(0, 14 - name_width)
-                    desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                desc += "```"
-                embed.description = desc
-                embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
-                await channel.send(embed=embed)
+            # 超速警報邏輯
+            alert_list = []
+            for name, server, level, exp_now, exp_prev in records:
+                diff = exp_now - exp_prev
+                if diff > 0:
+                    hourly_speed = (diff / minutes_diff) * 60
+                    speed_yi = hourly_speed / 100_000_000
+                    if speed_yi >= self.SPEED_LIMIT:
+                        alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
+
+            if alert_list:
+                alert_list.sort(key=lambda x: x['speed'], reverse=True)
+                channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
+                if channel:
+                    embed = discord.Embed(title="🚨 偵測到練功超速玩家！", color=0xff0000)
+                    desc = f"以下玩家時速超過 {self.SPEED_LIMIT} 億，可能正在強力衝等：\n```yaml\n"
+                    for p in alert_list:
+                        name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
+                        name_padded = p['name'] + " " * max(0, 14 - name_width)
+                        desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
+                    desc += "```"
+                    embed.description = desc
+                    embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+                    await channel.send(embed=embed)
 
         # ✨ 新增：自動轉服/改名偵測
         await self.check_for_transfers(time_now, time_prev)

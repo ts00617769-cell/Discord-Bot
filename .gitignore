@@ -6,3 +6,4 @@ __pycache__/
 # Google Sheets API 服務帳號金鑰
 service_account.json
 bank_ledger.json
+prasia_data.db
