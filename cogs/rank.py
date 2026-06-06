@@ -37,24 +37,39 @@ class RankTracker(commands.Cog):
 
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
-        payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
         headers = {
             "Content-Type": "application/json",
             "Origin": "https://warsofprasia.beanfun.com",
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
-        try:
-            async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    json_data = await response.json()
-                    return json_data.get("data", {}).get("gc") or []
-        except asyncio.TimeoutError as e:
-            logger.error(f"API timeout while fetching ranking for group {group_id}, world {world_id}: {e}")
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP client error while fetching ranking: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while fetching ranking data: {e}")
-        return []
+        classes = [None, "abyssrevenant", "SolarSentinel", "MirageBlade", "IncenseArcher", "RuneScribe", "Enforcer"]
+
+        async def fetch_class(c):
+            payload = {"world_group_id": group_id, "world_id": world_id, "class": c}
+            try:
+                async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        json_data = await response.json()
+                        return json_data.get("data", {}).get("gc", [])[:100]
+            except asyncio.TimeoutError as e:
+                logger.error(f"API timeout while fetching ranking for group {group_id}, world {world_id}, class {c}: {e}")
+            except aiohttp.ClientError as e:
+                logger.error(f"HTTP client error while fetching ranking (class {c}): {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error while fetching ranking data (class {c}): {e}")
+            return []
+
+        tasks = [fetch_class(c) for c in classes]
+        results = await asyncio.gather(*tasks)
+
+        unique_players = {}
+        for res in results:
+            for p in res:
+                name = p.get('gc_name')
+                if name and name not in unique_players:
+                    unique_players[name] = p
+
+        return list(unique_players.values())
 
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
