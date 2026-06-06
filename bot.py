@@ -31,7 +31,7 @@ class PrasiaBot(commands.Bot):
             logger.info(f"✅ 資料庫已連接: {db_path}")
             
             for filename in os.listdir('./cogs'):
-                if filename.endswith('.py') and not filename.startswith('__'):
+                if filename.endswith('.py') and not filename.startswith('__') and filename != 'error_handler.py':
                     try:
                         await self.load_extension(f'cogs.{filename[:-3]}')
                         logger.info(f"✅ 模組 {filename} 已成功掛載！")

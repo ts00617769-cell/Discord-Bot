@@ -121,6 +121,8 @@ class ExpTracker(commands.Cog):
                     # 這裡傳入 self.bot.session
                     players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
+                    # 建立一個空列表來收集所有玩家的資料參數
+                    insert_batch = []
                     for p in players:
                         # 擷取討伐等級
                         grade_val = (p.get("string_map") or {}).get("grade", "0")
@@ -129,10 +131,22 @@ class ExpTracker(commands.Cog):
                         except (ValueError, TypeError):
                             grade = 0
 
-                        await self.bot.db.execute('''
-                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知'), grade))
+                        # 將每筆資料打包成 Tuple 並加入列表
+                        insert_batch.append((
+                            now_time,
+                            server_name,
+                            p.get('gc_name'),
+                            p.get('gc_level'),
+                            p.get('gc_exp', 0),
+                            p.get('class_name', '未知'),
+                            grade
+                        ))
+
+                    # 使用 executemany 進行一次性批次寫入 (效能大幅提升！)
+                    await self.bot.db.executemany('''
+                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', insert_batch)
                     await self.bot.db.commit()
                 except Exception as e:
                     logger.error(f"Error processing server {server_name}: {e}")
