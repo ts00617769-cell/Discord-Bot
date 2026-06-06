@@ -46,7 +46,7 @@ class RankTracker(commands.Cog):
             async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    return json_data.get("data", {}).get("gc") or []
+                    return (json_data.get("data") or {}).get("gc") or []
         except asyncio.TimeoutError as e:
             logger.error(f"API timeout while fetching ranking for group {group_id}, world {world_id}: {e}")
         except aiohttp.ClientError as e:

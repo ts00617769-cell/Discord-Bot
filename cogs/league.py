@@ -83,7 +83,7 @@ class LeagueTracker(commands.Cog):
                 
                 json_data = await response.json()
                     
-            league_ranking = json_data.get("data", {}).get("league_ranking", [])
+            league_ranking = (json_data.get("data") or {}).get("league_ranking") or []
             if not league_ranking:
                 return await processing_msg.edit(content="❌ 找不到該季/回合的聯賽資料，可能尚未開打或參數輸入錯誤。")
 

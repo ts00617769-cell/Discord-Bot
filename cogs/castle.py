@@ -32,7 +32,7 @@ class CastleTracker(commands.Cog):
             async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    territories = json_data.get("data", {}).get("territory") or []
+                    territories = (json_data.get("data") or {}).get("territory") or []
                     
                 for t in territories:
                     t['real_server_name'] = server_name
