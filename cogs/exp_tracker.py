@@ -647,7 +647,13 @@ class ExpTracker(commands.Cog):
             async with self.bot.db.execute(sql_exact, (target_name,)) as cursor:
                 exact_matches = await cursor.fetchall()
             
+            target_classes = {p[6] for p in target_profiles}
+
             for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
+                # 過濾掉不同職業的絕對碰撞 (轉服/改名不會變更職業)
+                if p_name != target_name and cls_name not in target_classes:
+                    continue
+
                 match_type = "🎯 查詢目標" if p_name == target_name else "🔗 絕對經驗值碰撞"
                 diff_text = "EXP 完全一致" if p_name != target_name else ""
                 timeline_entries.append({
@@ -668,12 +674,13 @@ class ExpTracker(commands.Cog):
                 sql_forward = '''
                     SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ?
+                    WHERE player_name != ? AND class_name = ?
                     GROUP BY player_name, server_name
                     HAVING MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
                        AND MIN(exp) >= ? AND MIN(exp) <= ?
+                       AND MAX(subjugation_grade) >= ?
                 '''
-                async with self.bot.db.execute(sql_forward, (target_name, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN)) as cursor:
+                async with self.bot.db.execute(sql_forward, (target_name, t_cls, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade)) as cursor:
                     forward_matches = await cursor.fetchall()
                     
                 for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_sub_grade in forward_matches:
@@ -690,12 +697,13 @@ class ExpTracker(commands.Cog):
                 sql_backward = '''
                     SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ?
+                    WHERE player_name != ? AND class_name = ?
                     GROUP BY player_name, server_name
                     HAVING MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
                        AND MAX(exp) <= ? AND MAX(exp) >= ?
+                       AND MAX(subjugation_grade) <= ?
                 '''
-                async with self.bot.db.execute(sql_backward, (target_name, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN)) as cursor:
+                async with self.bot.db.execute(sql_backward, (target_name, t_cls, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade)) as cursor:
                     backward_matches = await cursor.fetchall()
 
                 for c_name, c_server, c_lvl, c_class, c_first, c_last, c_max_exp, c_sub_grade in backward_matches:
