@@ -104,7 +104,7 @@ class ExpTracker(commands.Cog):
             logger.error(f"Unexpected error while fetching server data: {e}")
         return []
 
-    @tasks.loop(minutes=5.0)
+    @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
@@ -140,7 +140,15 @@ class ExpTracker(commands.Cog):
             logger.error(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
     async def check_for_alerts(self, current_time):
-        async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
+        # 確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙導致誤判)
+        sql_times = '''
+            SELECT record_time
+            FROM exp_history
+            GROUP BY record_time
+            HAVING COUNT(DISTINCT server_name) >= 4
+            ORDER BY record_time DESC LIMIT 2
+        '''
+        async with self.bot.db.execute(sql_times) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return
@@ -302,6 +310,21 @@ class ExpTracker(commands.Cog):
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
+
+        # 為了配合官方 10, 20, 30... 更新，我們將啟動時間對齊到下個 10 分鐘，並加上 30 秒的緩衝時間
+        # (例如 10:00:30, 10:10:30...)
+        now = datetime.datetime.now()
+        # 算出下一個 10 分鐘的時間點
+        next_run = now.replace(minute=(now.minute // 10) * 10, second=30, microsecond=0) + datetime.timedelta(minutes=10)
+        # 如果當前時間才剛過 10 的倍數（例如 10:00:15），next_run 會算到 10:10:30。如果我們想要在當下的 10:00:30 執行，就可以減少 10 分鐘。
+        # 這裡我們統一使用安全的等待方式
+        if now.minute % 10 == 0 and now.second < 30:
+             next_run = now.replace(second=30, microsecond=0)
+
+        seconds_to_wait = (next_run - now).total_seconds()
+        if seconds_to_wait > 0:
+            logger.info(f"等待 {seconds_to_wait:.1f} 秒以對齊官方每 10 分鐘更新時間...")
+            await asyncio.sleep(seconds_to_wait)
 
     @commands.command(name="警報", help="開啟或關閉自動超速警報 (用法: !警報 開 或 !警報 關)")
     async def toggle_alerts(self, ctx, state: str = None):
