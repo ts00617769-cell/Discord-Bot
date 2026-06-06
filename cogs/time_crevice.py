@@ -9,15 +9,15 @@ class TimeCrevice(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="隙縫戰報", aliases=["時間隙縫", "時空隙縫", "crevice戰報"])
+    @commands.command(name="時空王", aliases=["交叉王", "時間隙縫", "時空隙縫", "隙縫戰報", "crevice戰報"])
     async def time_crevice(self, ctx, server_name: str = None):
         """
         查詢時間隙縫首領擊殺戰報
-        用法: !隙縫戰報 [伺服器名稱]
-        範例: !隙縫戰報 萊涅01
+        用法: !時空王 [伺服器名稱]
+        範例: !時空王 萊涅01
         """
         if not server_name:
-            await ctx.send("請指定伺服器名稱，例如：`!隙縫戰報 萊涅01`")
+            await ctx.send("請指定伺服器名稱，例如：`!時空王 萊涅01`")
             return
 
         status_msg = await ctx.send(f"正在查詢 **{server_name}** 的時間隙縫資訊...")
