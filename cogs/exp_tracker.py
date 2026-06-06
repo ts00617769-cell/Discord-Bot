@@ -89,8 +89,13 @@ class ExpTracker(commands.Cog):
         # (保持原樣，這本來就是非同步的)
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://warsofprasia.beanfun.com",
+            "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
+        }
         try:
-            async with session.post(api_url, json=payload, timeout=10) as response:
+            async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     return json_data.get("data", {}).get("gc", [])[:50]
