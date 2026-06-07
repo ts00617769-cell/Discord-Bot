@@ -23,14 +23,15 @@ class PrasiaBot(commands.Bot):
 
     async def setup_hook(self):
         try:
-            self.session = aiohttp.ClientSession()
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+            self.session = aiohttp.ClientSession(headers=headers)
             # ✨ 建立全域的非同步資料庫連線
             db_path = os.path.join(os.path.dirname(__file__), 'prasia_data.db')
             self.db = await aiosqlite.connect(db_path)
             logger.info(f"✅ 資料庫已連接: {db_path}")
             
             for filename in os.listdir('./cogs'):
-                if filename.endswith('.py') and not filename.startswith('__'):
+                if filename.endswith('.py') and not filename.startswith('__') and filename != 'error_handler.py':
                     try:
                         await self.load_extension(f'cogs.{filename[:-3]}')
                         logger.info(f"✅ 模組 {filename} 已成功掛載！")

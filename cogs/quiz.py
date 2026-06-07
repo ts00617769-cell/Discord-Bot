@@ -87,7 +87,21 @@ class SecretQuizView(discord.ui.View):
 
 # ================= 測驗模組 (Cog) 核心 =================
 
+
+tz_taipei = pytz.timezone('Asia/Taipei')
+post_time_str = os.getenv("QUIZ_POST_TIME", "12:00")
+reveal_time_str = os.getenv("QUIZ_REVEAL_TIME", "18:00")
+try:
+    post_h, post_m = map(int, post_time_str.split(':'))
+    reveal_h, reveal_m = map(int, reveal_time_str.split(':'))
+except (ValueError, IndexError):
+    post_h, post_m, reveal_h, reveal_m = 12, 0, 18, 0
+
+POST_TIME = datetime.time(hour=post_h, minute=post_m, tzinfo=tz_taipei)
+REVEAL_TIME = datetime.time(hour=reveal_h, minute=reveal_m, tzinfo=tz_taipei)
+
 class QuizSystem(commands.Cog):
+
     def __init__(self, bot):
         self.bot = bot
         self.quiz_data = [] # 👈 1. 建立一個屬性來存題庫
@@ -109,6 +123,24 @@ class QuizSystem(commands.Cog):
         self.post_time = datetime.time(hour=post_h, minute=post_m, tzinfo=self.tz_taipei)
         self.reveal_time = datetime.time(hour=reveal_h, minute=reveal_m, tzinfo=self.tz_taipei)
         logger.info(f"Quiz times configured - Post: {self.post_time}, Reveal: {self.reveal_time}")
+
+    def load_quiz_data(self):
+        """讀取心理測驗題庫 JSON 檔案"""
+        try:
+            # 使用絕對路徑定位，抓取專案根目錄的 quiz.json
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            file_path = os.path.join(base_dir, 'quiz.json')
+
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.quiz_data = json.load(f)
+                logger.info(f"[測驗系統] 成功載入 {len(self.quiz_data)} 題測驗！")
+            else:
+                logger.error(f"[測驗系統] 找不到檔案！預期路徑為：{file_path}")
+                self.quiz_data = [] # 找不到時給予空陣列防呆
+        except Exception as e:
+            logger.error(f"[測驗系統] 讀取題庫失敗: {e}")
+            self.quiz_data = []
 
     async def cog_load(self):
         """模組載入時，初始化資料庫與接關機制"""
@@ -175,7 +207,7 @@ class QuizSystem(commands.Cog):
                 
                 # 重新綁定按鈕監聽 (讓重啟前發送的按鈕繼續有效)
                 self.bot.add_view(SecretQuizView(q_data))
-                print(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
+                logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
 
     async def get_unrepeated_quiz(self):
         """防重複抽題機制"""
@@ -219,7 +251,7 @@ class QuizSystem(commands.Cog):
     # =======================================================
     # 2. ✨ 修改排程：中午 12 點自動發布
     # =======================================================
-    @tasks.loop(time=post_time) # 👈 這裡原本是 (minutes=1)，改成指定我們設定好的 post_time
+    @tasks.loop(time=POST_TIME) # 👈 這裡原本是 (minutes=1)，改成指定我們設定好的 post_time
     async def auto_post_quiz(self):
         tz = pytz.timezone('Asia/Taipei')
         now = datetime.datetime.now(tz)
@@ -261,7 +293,7 @@ class QuizSystem(commands.Cog):
     # =======================================================
     # 3. ✨ 修改排程：晚上 18 點自動開獎
     # =======================================================
-    @tasks.loop(time=reveal_time) # 👈 這裡也改成指定 reveal_time
+    @tasks.loop(time=REVEAL_TIME) # 👈 這裡也改成指定 reveal_time
     async def auto_reveal_quiz(self):
         # ✂️ 刪除了原本的 [if now.hour == 18 and now.minute == 0:] 這一行！
         # 👇 下方的程式碼同樣全部「往左推 4 個空格」對齊！

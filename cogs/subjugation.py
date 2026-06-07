@@ -6,8 +6,11 @@ import unicodedata
 import os
 from dotenv import load_dotenv
 from game_data import SERVER_MAP
+import logging
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class SubjugationCog(commands.Cog):
     # ✅ 加回引擎
@@ -17,8 +20,8 @@ class SubjugationCog(commands.Cog):
     async def fetch_server_data(self, session, group_id, world_id):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Content-Type": "application/json",
+            "Origin": "https://warsofprasia.beanfun.com",
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
@@ -27,8 +30,14 @@ class SubjugationCog(commands.Cog):
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", {}).get("gc", [])
-        except Exception:
-            pass
+        except asyncio.TimeoutError as e:
+            logger.error(f"API timeout while fetching subjugation ranking for group {group_id}, world {world_id}: {e}")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching subjugation ranking: {e}")
+        except ValueError as e:
+            logger.error(f"JSON parsing error while fetching subjugation ranking: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching subjugation ranking data: {e}")
         return []
     
 
@@ -57,7 +66,7 @@ class SubjugationCog(commands.Cog):
         def sort_key(player):
             grade_val = (player.get("string_map") or {}).get("grade", "0")
             try: grade = int(grade_val)
-            except: grade = 0
+            except (ValueError, TypeError): grade = 0
             return (grade, player.get("gc_exp", 0))
 
         all_players.sort(key=sort_key, reverse=True)

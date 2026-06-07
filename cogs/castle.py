@@ -4,6 +4,9 @@ import aiohttp
 import asyncio
 import unicodedata
 from game_data import SERVER_MAP
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CastleTracker(commands.Cog):
     def __init__(self, bot):
@@ -21,12 +24,12 @@ class CastleTracker(commands.Cog):
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiTerritoryByWorldId"
         payload = {"world_group_id": group_id, "world_id": world_id, "territory_grade": None, "guild_id": None}
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Content-Type": "application/json",
+            "Origin": "https://warsofprasia.beanfun.com",
             "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
         }
         try:
-            async with session.post(api_url, json=payload, headers=headers, ssl=False) as response:
+            async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     json_data = await response.json()
                     territories = json_data.get("data", {}).get("territory") or []
@@ -35,8 +38,14 @@ class CastleTracker(commands.Cog):
                     t['real_server_name'] = server_name
                         
                 return territories
-        except Exception:
-            pass
+        except asyncio.TimeoutError as e:
+            logger.error(f"API timeout while fetching territory data for {server_name}: {e}")
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error while fetching territory data: {e}")
+        except ValueError as e:
+            logger.error(f"JSON parsing error while fetching territory data: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching territory data: {e}")
         return []
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
@@ -69,14 +78,13 @@ class CastleTracker(commands.Cog):
 
         try:
             all_territories = []
-            async with aiohttp.ClientSession() as session:
-                if is_global:
-                    tasks = [self.fetch_territory_data(self.bot.session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
-                    results = await asyncio.gather(*tasks)
-                    for r in results: all_territories.extend(r)
-                else:
-                    territories = await self.fetch_territory_data(self.bot.session, target_server, target_group_id, target_world_id)
-                    all_territories.extend(territories)
+            if is_global:
+                tasks = [self.fetch_territory_data(self.bot.session, s_name, g_id, w_id) for s_name, (g_id, w_id) in SERVER_MAP.items()]
+                results = await asyncio.gather(*tasks)
+                for r in results: all_territories.extend(r)
+            else:
+                territories = await self.fetch_territory_data(self.bot.session, target_server, target_group_id, target_world_id)
+                all_territories.extend(territories)
 
             if not all_territories:
                 return await processing_msg.edit(content=f"❌ 掃描失敗，該區目前沒有據點資料。")

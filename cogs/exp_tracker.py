@@ -14,8 +14,11 @@ class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.ALERT_CHANNEL_ID = int(os.getenv("EXP_ALERT_CHANNEL_ID", 0))
+        self.TRANSFER_ALERT_CHANNEL_ID = int(os.getenv("TRANSFER_ALERT_CHANNEL_ID", 0))
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
+        self.alert_count = 50
+        self.alert_server = "全服"
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
 
     # ✨ discord.py 提供的非同步初始化入口
@@ -44,8 +47,23 @@ class ExpTracker(commands.Cog):
             columns = [row[1] for row in await cursor.fetchall()]
             if 'class_name' not in columns:
                 await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN class_name TEXT DEFAULT '未知'")
+            if 'subjugation_grade' not in columns:
+                await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0")
                 
         await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)')
+
+        # ✨ 新增：用於記錄已發送過轉移警報的資料表，防止無限洗頻
+        await self.bot.db.execute('''
+            CREATE TABLE IF NOT EXISTS transfer_alerts_log (
+                old_name TEXT,
+                old_server TEXT,
+                new_name TEXT,
+                new_server TEXT,
+                alert_time TIMESTAMP,
+                PRIMARY KEY (old_name, old_server, new_name, new_server)
+            )
+        ''')
+
         await self.bot.db.commit()
 
     async def get_member_info(self, name):
@@ -70,29 +88,48 @@ class ExpTracker(commands.Cog):
             return ""
 
     async def fetch_server_data(self, session, group_id, world_id):
-        # (保持原樣，這本來就是非同步的)
         api_url = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
-        payload = {"world_group_id": group_id, "world_id": world_id, "class": None}
-        try:
-            async with session.post(api_url, json=payload, timeout=10) as response:
-                if response.status == 200:
-                    json_data = await response.json()
-                    return json_data.get("data", {}).get("gc", [])[:50]
-        except asyncio.TimeoutError as e:
-            logger.error(f"API timeout while fetching data for group {group_id}, world {world_id}: {e}")
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP client error while fetching server data: {e}")
-        except ValueError as e:
-            logger.error(f"JSON parsing error: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while fetching server data: {e}")
-        return []
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://warsofprasia.beanfun.com",
+            "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
+        }
+        classes = [None, "abyssrevenant", "SolarSentinel", "MirageBlade", "IncenseArcher", "RuneScribe", "Enforcer"]
+
+        async def fetch_class(c):
+            payload = {"world_group_id": group_id, "world_id": world_id, "class": c}
+            try:
+                async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        json_data = await response.json()
+                        return json_data.get("data", {}).get("gc", [])[:100]
+            except asyncio.TimeoutError as e:
+                logger.error(f"API timeout while fetching data for group {group_id}, world {world_id}, class {c}: {e}")
+            except aiohttp.ClientError as e:
+                logger.error(f"HTTP client error while fetching server data (class {c}): {e}")
+            except ValueError as e:
+                logger.error(f"JSON parsing error (class {c}): {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error while fetching server data (class {c}): {e}")
+            return []
+
+        tasks = [fetch_class(c) for c in classes]
+        results = await asyncio.gather(*tasks)
+
+        unique_players = {}
+        for res in results:
+            for p in res:
+                name = p.get('gc_name')
+                if name and name not in unique_players:
+                    unique_players[name] = p
+
+        return list(unique_players.values())
 
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
         try:
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
-            logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前50名...")
+            logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前100名...")
             
             # 👇 直接移除 async with aiohttp.ClientSession() 的區塊，改用 self.bot.session
             for server_name, (g_id, w_id) in SERVER_MAP.items():
@@ -100,24 +137,52 @@ class ExpTracker(commands.Cog):
                     # 這裡傳入 self.bot.session
                     players = await self.fetch_server_data(self.bot.session, g_id, w_id) 
 
+                    # 建立一個空列表來收集所有玩家的資料參數
+                    insert_batch = []
                     for p in players:
-                        await self.bot.db.execute('''
-                            INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (now_time, server_name, p.get('gc_name'), p.get('gc_level'), p.get('gc_exp', 0), p.get('class_name', '未知')))
+                        # 擷取討伐等級
+                        grade_val = (p.get("string_map") or {}).get("grade", "0")
+                        try:
+                            grade = int(grade_val)
+                        except (ValueError, TypeError):
+                            grade = 0
+
+                        # 將每筆資料打包成 Tuple 並加入列表
+                        insert_batch.append((
+                            now_time,
+                            server_name,
+                            p.get('gc_name'),
+                            p.get('gc_level'),
+                            p.get('gc_exp', 0),
+                            p.get('class_name', '未知'),
+                            grade
+                        ))
+
+                    # 使用 executemany 進行一次性批次寫入 (效能大幅提升！)
+                    await self.bot.db.executemany('''
+                        INSERT INTO exp_history (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', insert_batch)
                     await self.bot.db.commit()
                 except Exception as e:
                     logger.error(f"Error processing server {server_name}: {e}")
                     continue
                 await asyncio.sleep(0.5)
             
-            if self.alerts_enabled:
-                await self.check_for_alerts(now_time)
+            await self.check_for_alerts(now_time)
         except Exception as e:
             logger.error(f"🚨 [經驗值雷達] 發生未預期錯誤，已攔截以防崩潰：{e}")
 
     async def check_for_alerts(self, current_time):
-        async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
+        # 確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙導致誤判)
+        sql_times = '''
+            SELECT record_time
+            FROM exp_history
+            GROUP BY record_time
+            HAVING COUNT(DISTINCT server_name) >= 4
+            ORDER BY record_time DESC LIMIT 2
+        '''
+        async with self.bot.db.execute(sql_times) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return
@@ -129,56 +194,236 @@ class ExpTracker(commands.Cog):
         minutes_diff = (t1 - t2).total_seconds() / 60
         if minutes_diff <= 0: return
 
-        sql = '''
-            SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
-            FROM exp_history t1
-            JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-            WHERE t1.record_time = ? AND t2.record_time = ?
-        '''
-        async with self.bot.db.execute(sql, (time_now, time_prev)) as cursor:
-            records = await cursor.fetchall()
-        
-        # ... (後續警報發送邏輯保持原樣，沒有 SQL 變動) ...
-        alert_list = []
-        for name, server, level, exp_now, exp_prev in records:
-            diff = exp_now - exp_prev
-            if diff > 0:
-                hourly_speed = (diff / minutes_diff) * 60
-                speed_yi = hourly_speed / 100_000_000 
-                if speed_yi >= self.SPEED_LIMIT:
+        if self.alerts_enabled:
+            if self.alert_server == "全服":
+                sql = '''
+                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                    FROM exp_history t1
+                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                    WHERE t1.record_time = ? AND t2.record_time = ?
+                '''
+                params = (time_now, time_prev)
+            else:
+                sql = '''
+                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                    FROM exp_history t1
+                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                    WHERE t1.record_time = ? AND t2.record_time = ? AND t1.server_name = ?
+                '''
+                params = (time_now, time_prev, self.alert_server)
+
+            async with self.bot.db.execute(sql, params) as cursor:
+                records = await cursor.fetchall()
+
+            # 超速警報邏輯
+            alert_list = []
+            for name, server, level, exp_now, exp_prev in records:
+                diff = exp_now - exp_prev
+                if diff > 0:
+                    hourly_speed = (diff / minutes_diff) * 60
+                    speed_yi = hourly_speed / 100_000_000
                     alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
 
-        if alert_list:
-            alert_list.sort(key=lambda x: x['speed'], reverse=True)
-            channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
-            if channel:
-                embed = discord.Embed(title="🚨 偵測到練功超速玩家！", color=0xff0000)
-                desc = f"以下玩家時速超過 {self.SPEED_LIMIT} 億，可能正在強力衝等：\n```yaml\n"
-                for p in alert_list:
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
-                    name_padded = p['name'] + " " * max(0, 14 - name_width)
-                    desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                desc += "```"
-                embed.description = desc
-                embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
-                await channel.send(embed=embed)
+            if alert_list:
+                alert_list.sort(key=lambda x: x['speed'], reverse=True)
+                alert_list = alert_list[:self.alert_count]
+
+                channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
+                if channel:
+                    # 分頁處理避免超過 Discord 4096 字元限制
+                    chunk_size = 50
+                    for i in range(0, len(alert_list), chunk_size):
+                        chunk = alert_list[i:i+chunk_size]
+                        embed = discord.Embed(title=f"🚨 練功時速排行 ({self.alert_server} Top {self.alert_count})", color=0xff0000)
+
+                        desc = ""
+                        if i == 0:
+                            desc += f"以下是本次週期內時速最高的前 {self.alert_count} 名玩家：\n"
+                        desc += "```yaml\n"
+
+                        for p in chunk:
+                            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
+                            name_padded = p['name'] + " " * max(0, 14 - name_width)
+                            desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
+                        desc += "```"
+
+                        embed.description = desc
+                        if i + chunk_size >= len(alert_list):
+                            embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+
+                        await channel.send(embed=embed)
+
+        # ✨ 新增：自動轉服/改名偵測
+        await self.check_for_transfers(time_now, time_prev)
+
+    async def check_for_transfers(self, time_now, time_prev):
+        """自動偵測轉服與改名 (V4 雙引擎升級版)"""
+        try:
+            # 容許的經驗值偷練誤差 (1 兆以內)
+            EXP_MARGIN = 1.0 * 1000000000000
+
+            # 1. 找出嫌疑人 (經驗值 > 1兆)
+            # 條件：
+            # - 新紀錄的經驗值大於等於舊紀錄的經驗值，且差距在 1 兆以內 (無縫接軌/偷練)
+            # - 職業必須相同 (不可能轉服變換職業)
+            # - 等級大於等於舊等級 (等級不可能倒退)
+            # - 討伐等級大於等於舊討伐等級 (討伐不會因為轉服而退步)
+            # - 名字或伺服器其中一項不同
+            # - ✨ 確保 t_now 是新面孔（他在 time_prev 的名單中並不存在同伺服器同名字的紀錄）
+            sql = '''
+                SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
+                                t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
+                                t_old.exp, t_now.subjugation_grade
+                FROM exp_history t_now
+                JOIN (
+                    SELECT player_name, server_name, class_name, level, subjugation_grade, exp, MAX(record_time) as record_time
+                    FROM exp_history
+                    WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
+                    GROUP BY player_name, server_name
+                ) t_old ON t_now.class_name = t_old.class_name
+                WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
+                  AND t_now.level >= t_old.level
+                  AND t_now.subjugation_grade >= t_old.subjugation_grade
+                  AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
+                  AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM exp_history t_check
+                      WHERE t_check.record_time = ?
+                        AND t_check.player_name = t_now.player_name
+                        AND t_check.server_name = t_now.server_name
+                  )
+            '''
+            async with self.bot.db.execute(sql, (time_prev, time_prev, time_now, EXP_MARGIN, time_prev)) as cursor:
+                transfer_records = await cursor.fetchall()
+
+            if not transfer_records:
+                return
+
+            channel = self.bot.get_channel(self.TRANSFER_ALERT_CHANNEL_ID)
+            if not channel:
+                return
+
+            # 過濾並整理報告
+            reported_pairs = set()
+            for row in transfer_records:
+                new_exp = row[0]
+                new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
+                old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
+                old_exp = row[9]
+                new_sub_grade = row[10]
+
+                # 防止單次掃描中重複推播
+                pair_key = (old_name, old_server, new_name, new_server)
+                if pair_key in reported_pairs:
+                    continue
+
+                # 🛡️ 防無限洗頻：檢查是否在資料庫中已經報過了
+                async with self.bot.db.execute('''
+                    SELECT 1 FROM transfer_alerts_log
+                    WHERE old_name = ? AND old_server = ? AND new_name = ? AND new_server = ?
+                ''', pair_key) as check_log_cursor:
+                    already_alerted = await check_log_cursor.fetchone()
+
+                if already_alerted:
+                    continue
+
+                # 🛡️ 最終防呆：確定舊名字在 time_now 真的「從榜單上消失了」
+                # 如果舊名字還在現在的榜單上，代表這只是巧合 (例如兩人剛好練到同一門檻)
+                async with self.bot.db.execute('SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?', (time_now, old_name, old_server)) as check_cursor:
+                    is_old_still_active = await check_cursor.fetchone()
+
+                if not is_old_still_active:
+                    reported_pairs.add(pair_key)
+
+                    # 將這筆發送過的紀錄存入資料庫
+                    await self.bot.db.execute('''
+                        INSERT INTO transfer_alerts_log (old_name, old_server, new_name, new_server, alert_time)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (old_name, old_server, new_name, new_server, time_now))
+                    await self.bot.db.commit()
+
+                    # 判斷狀態
+                    status_str = "跨服轉移並改名"
+                    if new_name == old_name:
+                        status_str = "跨服轉移"
+                    elif new_server == old_server:
+                        status_str = "原地改名"
+
+                    # 計算經驗變動
+                    exp_diff = new_exp - old_exp
+                    if exp_diff == 0:
+                        diff_str = "+0.00% (完美吻合)"
+                    else:
+                        diff_str = f"+{(exp_diff/100000000):,.0f} 億 (轉移期間偷練)"
+
+                    embed = discord.Embed(
+                        title="【波拉西亞戰記】轉移/旅團變動警報",
+                        description=f"時間：{time_now}\n{'-'*30}\n"
+                                    f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
+                                    f"**{new_name}** ({new_server})\n"
+                                    f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
+                                    f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
+                        color=0xf1c40f
+                    )
+                    await channel.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error in automatic transfer check: {e}")
 
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="警報", help="開啟或關閉自動超速警報 (用法: !警報 開 或 !警報 關)")
-    async def toggle_alerts(self, ctx, state: str = None):
-        # ... 保持原樣 ...
-        if state in ["開", "on"]:
-            self.alerts_enabled = True
-            await ctx.send(f"🚨 **【自動超速警報】已開啟！** (門檻: {self.SPEED_LIMIT}億)")
-        elif state in ["關", "off"]:
-            self.alerts_enabled = False
-            await ctx.send("🔕 **【自動超速警報】已關閉！**")
-        else:
+        # 為了配合官方 10, 20, 30... 更新，我們將啟動時間對齊到下個 10 分鐘，並加上 30 秒的緩衝時間
+        # (例如 10:00:30, 10:10:30...)
+        now = datetime.datetime.now()
+        # 算出下一個 10 分鐘的時間點
+        next_run = now.replace(minute=(now.minute // 10) * 10, second=30, microsecond=0) + datetime.timedelta(minutes=10)
+        # 如果當前時間才剛過 10 的倍數（例如 10:00:15），next_run 會算到 10:10:30。如果我們想要在當下的 10:00:30 執行，就可以減少 10 分鐘。
+        # 這裡我們統一使用安全的等待方式
+        if now.minute % 10 == 0 and now.second < 30:
+             next_run = now.replace(second=30, microsecond=0)
+
+        seconds_to_wait = (next_run - now).total_seconds()
+        if seconds_to_wait > 0:
+            logger.info(f"等待 {seconds_to_wait:.1f} 秒以對齊官方每 10 分鐘更新時間...")
+            await asyncio.sleep(seconds_to_wait)
+
+    @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
+    async def toggle_alerts(self, ctx, *args):
+        args_list = list(args)
+        if not args_list:
             current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
-            await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開` 或 `!警報 關` 切換。")
+            return await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
+
+        state = args_list.pop(0)
+        if state in ["關", "off"]:
+            self.alerts_enabled = False
+            return await ctx.send("🔕 **【自動超速警報】已關閉！**")
+
+        if state in ["開", "on"]:
+            if len(args_list) > 0 and args_list[0].isdigit():
+                temp_alert_count = int(args_list.pop(0))
+            else:
+                temp_alert_count = 50
+
+            if temp_alert_count > 100: temp_alert_count = 100
+            if temp_alert_count < 1: temp_alert_count = 10
+
+            target_server = "".join(args_list) if args_list else "全服"
+            if target_server not in ["全服", "全部", "global"] and target_server not in SERVER_MAP:
+                valid_list = "、".join(SERVER_MAP.keys())
+                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
+
+            # Validation passed, apply settings
+            self.alerts_enabled = True
+            self.alert_count = temp_alert_count
+            self.alert_server = "全服" if target_server in ["全服", "全部", "global"] else target_server
+
+            return await ctx.send(f"🚨 **【自動測速警報】已開啟！** (設定: {self.alert_server} 前 {self.alert_count} 名)")
+
+        current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
+        await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
 
     @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
@@ -198,7 +443,21 @@ class ExpTracker(commands.Cog):
 
         processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
 
-        async with self.bot.db.execute('SELECT DISTINCT record_time FROM exp_history ORDER BY record_time DESC LIMIT 2') as cursor:
+        if is_global:
+            # 針對全服測速，確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙)
+            sql_times = '''
+                SELECT record_time
+                FROM exp_history
+                GROUP BY record_time
+                HAVING COUNT(DISTINCT server_name) >= 4
+                ORDER BY record_time DESC LIMIT 2
+            '''
+            params_times = []
+        else:
+            sql_times = 'SELECT DISTINCT record_time FROM exp_history WHERE server_name = ? ORDER BY record_time DESC LIMIT 2'
+            params_times = [target_server]
+
+        async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")
@@ -443,10 +702,10 @@ class ExpTracker(commands.Cog):
         try:
             # 1. 取得目標的所有分身/伺服器紀錄 (作為基準點)
             async with self.bot.db.execute('''
-                SELECT server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name
+                SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
                 FROM exp_history
                 WHERE player_name = ?
-                GROUP BY server_name
+                GROUP BY player_name, server_name
             ''', (target_name,)) as cursor:
                 target_profiles = await cursor.fetchall()
 
@@ -457,7 +716,7 @@ class ExpTracker(commands.Cog):
 
             # 🚀 引擎 A：絕對碰撞 (上一版的完美邏輯，不管時間跟職業，只要 EXP 一模一樣就抓)
             sql_exact = '''
-                SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time)
+                SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(subjugation_grade)
                 FROM exp_history
                 WHERE exp IN (SELECT DISTINCT exp FROM exp_history WHERE player_name = ?)
                 GROUP BY exp, player_name, server_name
@@ -465,7 +724,20 @@ class ExpTracker(commands.Cog):
             async with self.bot.db.execute(sql_exact, (target_name,)) as cursor:
                 exact_matches = await cursor.fetchall()
             
-            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen in exact_matches:
+            target_classes = {p[7] for p in target_profiles}
+            valid_target_classes = {c for c in target_classes if c and c != 'None'}
+
+            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
+                # 過濾掉不同職業的絕對碰撞 (轉服/改名不會變更職業)
+                # 容許 class_name 為 None 或是 target_classes 中有 None
+                is_class_match = True
+                if p_name != target_name and valid_target_classes and cls_name and cls_name != 'None':
+                    if cls_name not in valid_target_classes:
+                        is_class_match = False
+
+                if not is_class_match:
+                    continue
+
                 match_type = "🎯 查詢目標" if p_name == target_name else "🔗 絕對經驗值碰撞"
                 diff_text = "EXP 完全一致" if p_name != target_name else ""
                 timeline_entries.append({
@@ -473,55 +745,71 @@ class ExpTracker(commands.Cog):
                     "first": first_seen, "last": last_seen,
                     "match_type": match_type,
                     "diff_text": diff_text,
-                    "exp_val": exp
+                    "exp_val": exp,
+                    "sub_grade": sub_grade
                 })
 
             # 🚀 引擎 B：無縫接軌偷練 (解決轉服空窗期偷打怪的問題)
             EXP_MARGIN = 1.0 * 1000000000000 # 容許 1 兆以內的偷練誤差
             
-            for t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls in target_profiles:
+            queue = list(target_profiles)
+            seen_profiles = {(p[0], p[1]) for p in target_profiles}
+
+            while queue:
+                current_profile = queue.pop(0)
+                t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = current_profile
                 
                 # 尋找後繼者 (目標消失後出現，經驗值微幅增加)
                 sql_forward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp)
+                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ?
+                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name = 'None' OR ? IS NULL OR ? = 'None')
                     GROUP BY player_name, server_name
                     HAVING MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
                        AND MIN(exp) >= ? AND MIN(exp) <= ?
+                       AND MAX(subjugation_grade) >= ?
                 '''
-                async with self.bot.db.execute(sql_forward, (target_name, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN)) as cursor:
+                async with self.bot.db.execute(sql_forward, (t_name, t_cls, t_cls, t_cls, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade)) as cursor:
                     forward_matches = await cursor.fetchall()
                     
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp in forward_matches:
-                    timeline_entries.append({
-                        "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
-                        "first": c_first, "last": c_last,
-                        "match_type": "✈️ 無縫接軌 (轉服/改名後)",
-                        "diff_text": f"轉服空窗偷練 +{(c_min_exp - t_max_exp)/100000000:,.0f} 億",
-                        "exp_val": c_min_exp
-                    })
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade in forward_matches:
+                    if (c_name, c_server) not in seen_profiles:
+                        seen_profiles.add((c_name, c_server))
+                        timeline_entries.append({
+                            "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
+                            "first": c_first, "last": c_last,
+                            "match_type": "✈️ 無縫接軌 (轉服/改名後)",
+                            "diff_text": f"轉服空窗偷練 +{(c_min_exp - t_max_exp)/100000000:,.0f} 億",
+                            "exp_val": c_min_exp,
+                            "sub_grade": c_sub_grade
+                        })
+                        queue.append((c_name, c_server, c_lvl, c_first, c_last, c_min_exp, c_max_exp, c_class, c_sub_grade))
 
                 # 尋找前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
                 sql_backward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(exp)
+                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ?
+                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name = 'None' OR ? IS NULL OR ? = 'None')
                     GROUP BY player_name, server_name
                     HAVING MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
                        AND MAX(exp) <= ? AND MAX(exp) >= ?
+                       AND MAX(subjugation_grade) <= ?
                 '''
-                async with self.bot.db.execute(sql_backward, (target_name, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN)) as cursor:
+                async with self.bot.db.execute(sql_backward, (t_name, t_cls, t_cls, t_cls, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade)) as cursor:
                     backward_matches = await cursor.fetchall()
 
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_max_exp in backward_matches:
-                    timeline_entries.append({
-                        "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
-                        "first": c_first, "last": c_last,
-                        "match_type": "🔍 前身 (轉服/改名前)",
-                        "diff_text": f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億",
-                        "exp_val": c_max_exp
-                    })
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade in backward_matches:
+                    if (c_name, c_server) not in seen_profiles:
+                        seen_profiles.add((c_name, c_server))
+                        timeline_entries.append({
+                            "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
+                            "first": c_first, "last": c_last,
+                            "match_type": "🔍 前身 (轉服/改名前)",
+                            "diff_text": f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億",
+                            "exp_val": c_max_exp,
+                            "sub_grade": c_sub_grade
+                        })
+                        queue.append((c_name, c_server, c_lvl, c_first, c_last, c_min_exp, c_max_exp, c_class, c_sub_grade))
 
             # 過濾重複資料 (因為引擎A和引擎B可能會抓到同一筆紀錄)
             unique_entries = []
@@ -535,29 +823,43 @@ class ExpTracker(commands.Cog):
             unique_entries.sort(key=lambda x: x['first'])
 
             # 判斷是否只有目標自己
-            if len(unique_entries) <= len(target_profiles) and all(x['name'] == target_name for x in unique_entries):
-                target_last_exp = max(p[5] for p in target_profiles)
+            if len(unique_entries) <= 1 and all(x['name'] == target_name for x in unique_entries):
+                target_last_exp = max(p[6] for p in target_profiles)
                 return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n系統啟動了【絕對碰撞】與【無縫接軌】雙引擎掃描，沒有發現轉服或改名軌跡。")
 
+            embeds = []
             desc = f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n```yaml\n"
             
             for idx, p in enumerate(unique_entries, 1):
                 exp_zhao = p['exp_val'] / 1_000_000_000_000
-                desc += f"{idx}. {p['name']} [{p['server']}]\n"
-                desc += f"   ▶ {p['match_type']}\n"
-                desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']}\n"
-                desc += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                entry_text = f"{idx}. {p['name']} [{p['server']}]\n"
+                entry_text += f"   ▶ {p['match_type']}\n"
+                entry_text += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                entry_text += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
                 if p['diff_text']:
-                    desc += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+                    entry_text += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
                 else:
-                    desc += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
+                    entry_text += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
 
-            desc += "```"
-            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc[:4000], color=0xff0000)
-            embed.set_footer(text="系統：保留V2絕對碰撞優勢，並加入V3無縫接軌抓包技術")
+                if len(desc) + len(entry_text) > 3800:
+                    desc += "```"
+                    embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc, color=0xff0000)
+                    embeds.append(embed)
+                    desc = "```yaml\n" + entry_text
+                else:
+                    desc += entry_text
+
+            if desc != "```yaml\n":
+                desc += "```"
+                embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc, color=0xff0000)
+                embeds.append(embed)
+
+            if embeds:
+                embeds[-1].set_footer(text="系統：保留V2絕對碰撞優勢，並加入V3無縫接軌抓包技術")
 
             await processing_msg.delete()
-            await ctx.send(embed=embed)
+            for embed in embeds:
+                await ctx.send(embed=embed)
             
         except asyncio.TimeoutError as e:
             logger.error(f"Database timeout while tracking player '{target_name}': {e}")
@@ -663,6 +965,37 @@ class ExpTracker(commands.Cog):
                 await processing_msg.edit(content=f"❌ 掃描發生錯誤: {type(e).__name__}")
             except discord.NotFound:
                 pass
+    @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
+    async def test_transfer_alert(self, ctx):
+        channel_id = self.TRANSFER_ALERT_CHANNEL_ID
+        if not channel_id:
+            return await ctx.send("❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。")
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return await ctx.send(f"❌ 找不到頻道 ID：`{channel_id}`。請確認 ID 是否正確，且機器人是否在該頻道擁有權限。")
+
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        embed = discord.Embed(
+            title="【波拉西亞戰記】轉移/旅團變動警報 (測試)",
+            description=f"時間：{now}\n{'-'*30}\n"
+                        f"✨ [即時轉移辨識] **測試玩家_舊** (測試伺服器_舊) ➔\n"
+                        f"**測試玩家_新** (測試伺服器_新)\n"
+                        f"[狀態]: 跨服轉移並改名 | [EXP變動]: +999 億 (轉移期間偷練)\n"
+                        f"[屬性]: Lv.99 / 測試職業 / 討伐 99\n\n"
+                        f"✅ **如果您看到此訊息，表示轉移警報頻道設定與權限皆正常運作中！**",
+            color=0xf1c40f
+        )
+
+        try:
+            await channel.send(embed=embed)
+            await ctx.send("✅ 測試轉移警報已成功發送！請檢查警報頻道。")
+        except discord.Forbidden:
+            await ctx.send("❌ 機器人沒有權限在該頻道發送訊息或嵌入連結 (Embed Links)。")
+        except Exception as e:
+            await ctx.send(f"❌ 發送警報時發生錯誤：{e}")
+
     # ==========================================
     # 👆 複製到這裡結束 👆
     # ==========================================        
