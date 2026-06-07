@@ -17,6 +17,8 @@ class ExpTracker(commands.Cog):
         self.TRANSFER_ALERT_CHANNEL_ID = int(os.getenv("TRANSFER_ALERT_CHANNEL_ID", 0))
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
+        self.alert_count = 50
+        self.alert_server = "全服"
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
 
     # ✨ discord.py 提供的非同步初始化入口
@@ -193,13 +195,24 @@ class ExpTracker(commands.Cog):
         if minutes_diff <= 0: return
 
         if self.alerts_enabled:
-            sql = '''
-                SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                FROM exp_history t1
-                JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                WHERE t1.record_time = ? AND t2.record_time = ?
-            '''
-            async with self.bot.db.execute(sql, (time_now, time_prev)) as cursor:
+            if self.alert_server == "全服":
+                sql = '''
+                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                    FROM exp_history t1
+                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                    WHERE t1.record_time = ? AND t2.record_time = ?
+                '''
+                params = (time_now, time_prev)
+            else:
+                sql = '''
+                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                    FROM exp_history t1
+                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                    WHERE t1.record_time = ? AND t2.record_time = ? AND t1.server_name = ?
+                '''
+                params = (time_now, time_prev, self.alert_server)
+
+            async with self.bot.db.execute(sql, params) as cursor:
                 records = await cursor.fetchall()
 
             # 超速警報邏輯
@@ -209,23 +222,36 @@ class ExpTracker(commands.Cog):
                 if diff > 0:
                     hourly_speed = (diff / minutes_diff) * 60
                     speed_yi = hourly_speed / 100_000_000
-                    if speed_yi >= self.SPEED_LIMIT:
-                        alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
+                    alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
 
             if alert_list:
                 alert_list.sort(key=lambda x: x['speed'], reverse=True)
+                alert_list = alert_list[:self.alert_count]
+
                 channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
                 if channel:
-                    embed = discord.Embed(title="🚨 偵測到練功超速玩家！", color=0xff0000)
-                    desc = f"以下玩家時速超過 {self.SPEED_LIMIT} 億，可能正在強力衝等：\n```yaml\n"
-                    for p in alert_list:
-                        name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
-                        name_padded = p['name'] + " " * max(0, 14 - name_width)
-                        desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                    desc += "```"
-                    embed.description = desc
-                    embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
-                    await channel.send(embed=embed)
+                    # 分頁處理避免超過 Discord 4096 字元限制
+                    chunk_size = 50
+                    for i in range(0, len(alert_list), chunk_size):
+                        chunk = alert_list[i:i+chunk_size]
+                        embed = discord.Embed(title=f"🚨 練功時速排行 ({self.alert_server} Top {self.alert_count})", color=0xff0000)
+
+                        desc = ""
+                        if i == 0:
+                            desc += f"以下是本次週期內時速最高的前 {self.alert_count} 名玩家：\n"
+                        desc += "```yaml\n"
+
+                        for p in chunk:
+                            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
+                            name_padded = p['name'] + " " * max(0, 14 - name_width)
+                            desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
+                        desc += "```"
+
+                        embed.description = desc
+                        if i + chunk_size >= len(alert_list):
+                            embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+
+                        await channel.send(embed=embed)
 
         # ✨ 新增：自動轉服/改名偵測
         await self.check_for_transfers(time_now, time_prev)
@@ -363,18 +389,41 @@ class ExpTracker(commands.Cog):
             logger.info(f"等待 {seconds_to_wait:.1f} 秒以對齊官方每 10 分鐘更新時間...")
             await asyncio.sleep(seconds_to_wait)
 
-    @commands.command(name="警報", help="開啟或關閉自動超速警報 (用法: !警報 開 或 !警報 關)")
-    async def toggle_alerts(self, ctx, state: str = None):
-        # ... 保持原樣 ...
-        if state in ["開", "on"]:
-            self.alerts_enabled = True
-            await ctx.send(f"🚨 **【自動超速警報】已開啟！** (門檻: {self.SPEED_LIMIT}億)")
-        elif state in ["關", "off"]:
-            self.alerts_enabled = False
-            await ctx.send("🔕 **【自動超速警報】已關閉！**")
-        else:
+    @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
+    async def toggle_alerts(self, ctx, *args):
+        args_list = list(args)
+        if not args_list:
             current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
-            await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開` 或 `!警報 關` 切換。")
+            return await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
+
+        state = args_list.pop(0)
+        if state in ["關", "off"]:
+            self.alerts_enabled = False
+            return await ctx.send("🔕 **【自動超速警報】已關閉！**")
+
+        if state in ["開", "on"]:
+            if len(args_list) > 0 and args_list[0].isdigit():
+                temp_alert_count = int(args_list.pop(0))
+            else:
+                temp_alert_count = 50
+
+            if temp_alert_count > 100: temp_alert_count = 100
+            if temp_alert_count < 1: temp_alert_count = 10
+
+            target_server = "".join(args_list) if args_list else "全服"
+            if target_server not in ["全服", "全部", "global"] and target_server not in SERVER_MAP:
+                valid_list = "、".join(SERVER_MAP.keys())
+                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
+
+            # Validation passed, apply settings
+            self.alerts_enabled = True
+            self.alert_count = temp_alert_count
+            self.alert_server = "全服" if target_server in ["全服", "全部", "global"] else target_server
+
+            return await ctx.send(f"🚨 **【自動測速警報】已開啟！** (設定: {self.alert_server} 前 {self.alert_count} 名)")
+
+        current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
+        await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
 
     @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
