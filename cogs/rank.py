@@ -78,7 +78,7 @@ class RankTracker(commands.Cog):
             return
 
         count = 10
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
