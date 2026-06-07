@@ -391,7 +391,7 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
     async def toggle_alerts(self, ctx, *args):
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         if not args_list:
             current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
             return await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
