@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.ALERT_CHANNEL_ID = int(os.getenv("EXP_ALERT_CHANNEL_ID", 0))
-        self.TRANSFER_ALERT_CHANNEL_ID = int(os.getenv("TRANSFER_ALERT_CHANNEL_ID", 0))
+        self.ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("EXP_ALERT_CHANNEL_ID", "").split(",") if x.strip() and x.strip().isdigit()]
+        self.TRANSFER_ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").split(",") if x.strip() and x.strip().isdigit()]
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
         self.alert_count = 50
@@ -229,30 +229,36 @@ class ExpTracker(commands.Cog):
                 alert_list.sort(key=lambda x: x['speed'], reverse=True)
                 alert_list = alert_list[:self.alert_count]
 
-                channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
-                if channel:
-                    # 分頁處理避免超過 Discord 4096 字元限制
-                    chunk_size = 50
-                    for i in range(0, len(alert_list), chunk_size):
-                        chunk = alert_list[i:i+chunk_size]
-                        embed = discord.Embed(title=f"🚨 練功時速排行 ({self.alert_server} Top {self.alert_count})", color=0xff0000)
+                pass # Removed early channel check since we now support multiple channels
+                # removed faulty channel check
+                # 分頁處理避免超過 Discord 4096 字元限制
+                chunk_size = 50
+                for i in range(0, len(alert_list), chunk_size):
+                    chunk = alert_list[i:i+chunk_size]
+                    embed = discord.Embed(title=f"🚨 練功時速排行 ({self.alert_server} Top {self.alert_count})", color=0xff0000)
 
-                        desc = ""
-                        if i == 0:
-                            desc += f"以下是本次週期內時速最高的前 {self.alert_count} 名玩家：\n"
-                        desc += "```yaml\n"
+                    desc = ""
+                    if i == 0:
+                        desc += f"以下是本次週期內時速最高的前 {self.alert_count} 名玩家：\n"
+                    desc += "```yaml\n"
 
-                        for p in chunk:
-                            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
-                            name_padded = p['name'] + " " * max(0, 14 - name_width)
-                            desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                        desc += "```"
+                    for p in chunk:
+                        name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
+                        name_padded = p['name'] + " " * max(0, 14 - name_width)
+                        desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
+                    desc += "```"
 
-                        embed.description = desc
-                        if i + chunk_size >= len(alert_list):
-                            embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+                    embed.description = desc
+                    if i + chunk_size >= len(alert_list):
+                        embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
 
-                        await channel.send(embed=embed)
+                    for channel_id in self.ALERT_CHANNEL_IDS:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            try:
+                                await channel.send(embed=embed)
+                            except Exception as e:
+                                logger.error(f"Failed to send alert to channel {channel_id}: {e}")
 
         # ✨ 新增：自動轉服/改名偵測
         await self.check_for_transfers(time_now, time_prev)
@@ -300,9 +306,7 @@ class ExpTracker(commands.Cog):
             if not transfer_records:
                 return
 
-            channel = self.bot.get_channel(self.TRANSFER_ALERT_CHANNEL_ID)
-            if not channel:
-                return
+
 
             # 過濾並整理報告
             reported_pairs = set()
@@ -366,7 +370,13 @@ class ExpTracker(commands.Cog):
                                     f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
                         color=0xf1c40f
                     )
-                    await channel.send(embed=embed)
+                    for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            try:
+                                await channel.send(embed=embed)
+                            except Exception as e:
+                                logger.error(f"Failed to send transfer alert to channel {channel_id}: {e}")
 
         except Exception as e:
             logger.error(f"Error in automatic transfer check: {e}")
@@ -608,7 +618,7 @@ class ExpTracker(commands.Cog):
         target_server = "全服"
         target_class = None
         
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         class_parts = []
         
         for arg in args_list:
@@ -988,13 +998,20 @@ class ExpTracker(commands.Cog):
                 pass
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
     async def test_transfer_alert(self, ctx):
-        channel_id = self.TRANSFER_ALERT_CHANNEL_ID
-        if not channel_id:
+        channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
+        if not channel_ids:
             return await ctx.send("❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。")
 
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            return await ctx.send(f"❌ 找不到頻道 ID：`{channel_id}`。請確認 ID 是否正確，且機器人是否在該頻道擁有權限。")
+        channels = []
+        for cid in channel_ids:
+            ch = self.bot.get_channel(cid)
+            if ch:
+                channels.append(ch)
+            else:
+                await ctx.send(f"⚠️ 找不到頻道 ID：`{cid}`。請確認 ID 是否正確，且機器人是否在該頻道擁有權限。")
+
+        if not channels:
+            return
 
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -1009,13 +1026,18 @@ class ExpTracker(commands.Cog):
             color=0xf1c40f
         )
 
-        try:
-            await channel.send(embed=embed)
-            await ctx.send("✅ 測試轉移警報已成功發送！請檢查警報頻道。")
-        except discord.Forbidden:
-            await ctx.send("❌ 機器人沒有權限在該頻道發送訊息或嵌入連結 (Embed Links)。")
-        except Exception as e:
-            await ctx.send(f"❌ 發送警報時發生錯誤：{e}")
+        success_count = 0
+        for channel in channels:
+            try:
+                await channel.send(embed=embed)
+                success_count += 1
+            except discord.Forbidden:
+                await ctx.send(f"❌ 機器人沒有權限在頻道 `{channel.id}` 發送訊息或嵌入連結 (Embed Links)。")
+            except Exception as e:
+                await ctx.send(f"❌ 在頻道 `{channel.id}` 發送警報時發生錯誤：{e}")
+
+        if success_count > 0:
+            await ctx.send(f"✅ 測試轉移警報已成功發送到 {success_count} 個頻道！請檢查警報頻道。")
 
     # ==========================================
     # 👆 複製到這裡結束 👆

@@ -53,7 +53,7 @@ class CastleTracker(commands.Cog):
         # 🛡️ 頻道限制已移除，現在全頻道可用
 
         count = 15
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         if len(args_list) > 0 and args_list[0].isdigit():
             count = int(args_list.pop(0))
             
