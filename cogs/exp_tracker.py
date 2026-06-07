@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("EXP_ALERT_CHANNEL_ID", "").split(",") if x.strip()]
-        self.TRANSFER_ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").split(",") if x.strip()]
+        self.ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("EXP_ALERT_CHANNEL_ID", "").split(",") if x.strip() and x.strip().isdigit()]
+        self.TRANSFER_ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").split(",") if x.strip() and x.strip().isdigit()]
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
         self.alert_count = 50
