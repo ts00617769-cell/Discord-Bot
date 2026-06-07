@@ -287,10 +287,10 @@ class ExpTracker(commands.Cog):
                     FROM exp_history
                     WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
                     GROUP BY player_name, server_name
-                ) t_old ON t_now.class_name = t_old.class_name
+                ) t_old ON (t_now.class_name = t_old.class_name OR t_now.class_name IS NULL OR t_old.class_name IS NULL OR t_now.class_name = 'None' OR t_old.class_name = 'None' OR t_now.class_name = '未知' OR t_old.class_name = '未知')
                 WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
                   AND t_now.level >= t_old.level
-                  AND t_now.subjugation_grade >= t_old.subjugation_grade
+                  AND (t_now.subjugation_grade >= t_old.subjugation_grade OR t_now.subjugation_grade IS NULL OR t_old.subjugation_grade IS NULL)
                   AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
                   AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
                   AND NOT EXISTS (
@@ -309,7 +309,10 @@ class ExpTracker(commands.Cog):
 
 
             # 過濾並整理報告
-            reported_pairs = set()
+            # 過濾並整理報告
+            # 針對同一個新名字 (新角色)，可能會有多個舊角色候選人，我們要找出最可能的一個 (例如 EXP 差距最小的)
+            candidates_by_new_player = {}
+
             for row in transfer_records:
                 new_exp = row[0]
                 new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
@@ -317,9 +320,35 @@ class ExpTracker(commands.Cog):
                 old_exp = row[9]
                 new_sub_grade = row[10]
 
-                # 防止單次掃描中重複推播
+                new_key = (new_name, new_server)
+                if new_key not in candidates_by_new_player:
+                    candidates_by_new_player[new_key] = []
+
+                candidates_by_new_player[new_key].append({
+                    'new_exp': new_exp,
+                    'new_name': new_name, 'new_server': new_server, 'new_lvl': new_lvl, 'new_cls': new_cls,
+                    'old_name': old_name, 'old_server': old_server, 'old_lvl': old_lvl, 'old_cls': old_cls,
+                    'old_exp': old_exp, 'new_sub_grade': new_sub_grade,
+                    'diff': new_exp - old_exp
+                })
+
+            reported_pairs = set()
+            for new_key, candidates in candidates_by_new_player.items():
+                # 找出 diff 最小且 >= 0 的候選人 (最完美吻合的)
+                best_candidate = sorted(candidates, key=lambda x: x['diff'])[0]
+
+                old_name = best_candidate['old_name']
+                old_server = best_candidate['old_server']
+                new_name = best_candidate['new_name']
+                new_server = best_candidate['new_server']
+                new_exp = best_candidate['new_exp']
+                old_exp = best_candidate['old_exp']
+                new_lvl = best_candidate['new_lvl']
+                new_cls = best_candidate['new_cls']
+                new_sub_grade = best_candidate['new_sub_grade']
+
                 pair_key = (old_name, old_server, new_name, new_server)
-                if pair_key in reported_pairs:
+                if pair_key in reported_pairs or (new_name + new_server) in reported_pairs:
                     continue
 
                 # 🛡️ 防無限洗頻：檢查是否在資料庫中已經報過了
@@ -339,6 +368,7 @@ class ExpTracker(commands.Cog):
 
                 if not is_old_still_active:
                     reported_pairs.add(pair_key)
+                    reported_pairs.add(new_name + new_server)
 
                     # 將這筆發送過的紀錄存入資料庫
                     await self.bot.db.execute('''
@@ -355,12 +385,11 @@ class ExpTracker(commands.Cog):
                         status_str = "原地改名"
 
                     # 計算經驗變動
-                    exp_diff = new_exp - old_exp
-                    if exp_diff == 0:
+                    diff = new_exp - old_exp
+                    if diff == 0:
                         diff_str = "+0.00% (完美吻合)"
                     else:
-                        diff_str = f"+{(exp_diff/100000000):,.0f} 億 (轉移期間偷練)"
-
+                        diff_str = f"+{(diff/100000000):,.0f} 億 (轉移期間偷練)"
                     embed = discord.Embed(
                         title="【波拉西亞戰記】轉移/旅團變動警報",
                         description=f"時間：{time_now}\n{'-'*30}\n"
@@ -370,6 +399,10 @@ class ExpTracker(commands.Cog):
                                     f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
                         color=0xf1c40f
                     )
+
+                    if not self.TRANSFER_ALERT_CHANNEL_IDS:
+                        continue
+
                     for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
