@@ -778,25 +778,39 @@ class ExpTracker(commands.Cog):
                 target_last_exp = max(p[6] for p in target_profiles)
                 return await processing_msg.edit(content=f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n系統啟動了【絕對碰撞】與【無縫接軌】雙引擎掃描，沒有發現轉服或改名軌跡。")
 
+            embeds = []
             desc = f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n```yaml\n"
             
             for idx, p in enumerate(unique_entries, 1):
                 exp_zhao = p['exp_val'] / 1_000_000_000_000
-                desc += f"{idx}. {p['name']} [{p['server']}]\n"
-                desc += f"   ▶ {p['match_type']}\n"
-                desc += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
-                desc += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                entry_text = f"{idx}. {p['name']} [{p['server']}]\n"
+                entry_text += f"   ▶ {p['match_type']}\n"
+                entry_text += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                entry_text += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
                 if p['diff_text']:
-                    desc += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+                    entry_text += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
                 else:
-                    desc += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
+                    entry_text += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
 
-            desc += "```"
-            embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc[:4000], color=0xff0000)
-            embed.set_footer(text="系統：保留V2絕對碰撞優勢，並加入V3無縫接軌抓包技術")
+                if len(desc) + len(entry_text) > 3800:
+                    desc += "```"
+                    embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc, color=0xff0000)
+                    embeds.append(embed)
+                    desc = "```yaml\n" + entry_text
+                else:
+                    desc += entry_text
+
+            if desc != "```yaml\n":
+                desc += "```"
+                embed = discord.Embed(title=f"👁️ 天眼追蹤系統 (V4雙引擎版) - {target_name}", description=desc, color=0xff0000)
+                embeds.append(embed)
+
+            if embeds:
+                embeds[-1].set_footer(text="系統：保留V2絕對碰撞優勢，並加入V3無縫接軌抓包技術")
 
             await processing_msg.delete()
-            await ctx.send(embed=embed)
+            for embed in embeds:
+                await ctx.send(embed=embed)
             
         except asyncio.TimeoutError as e:
             logger.error(f"Database timeout while tracking player '{target_name}': {e}")
