@@ -7,6 +7,7 @@ import unicodedata
 from game_data import SERVER_MAP
 import os
 import logging
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -443,79 +444,99 @@ class ExpTracker(commands.Cog):
 
         processing_msg = await ctx.send(f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}...")
 
-        if is_global:
-            # 針對全服測速，確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙)
-            sql_times = '''
-                SELECT record_time
-                FROM exp_history
-                GROUP BY record_time
-                HAVING COUNT(DISTINCT server_name) >= 4
-                ORDER BY record_time DESC LIMIT 2
+        try:
+            if is_global:
+                # 針對全服測速，確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙)
+                sql_times = '''
+                    SELECT record_time
+                    FROM exp_history
+                    GROUP BY record_time
+                    HAVING COUNT(DISTINCT server_name) >= 4
+                    ORDER BY record_time DESC LIMIT 2
+                '''
+                params_times = []
+            else:
+                sql_times = 'SELECT DISTINCT record_time FROM exp_history WHERE server_name = ? ORDER BY record_time DESC LIMIT 2'
+                params_times = [target_server]
+
+            async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
+                times = await cursor.fetchall()
+
+            if len(times) < 2: return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")
+
+            time_now, time_prev = times[0][0], times[1][0]
+            fmt = '%Y-%m-%d %H:%M:%S'
+            t1, t2 = datetime.datetime.strptime(time_now, fmt), datetime.datetime.strptime(time_prev, fmt)
+            minutes_diff = (t1 - t2).total_seconds() / 60
+            if minutes_diff <= 0: minutes_diff = 10
+
+            sql = '''
+                SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                FROM exp_history t1
+                JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                WHERE t1.record_time = ? AND t2.record_time = ?
             '''
-            params_times = []
-        else:
-            sql_times = 'SELECT DISTINCT record_time FROM exp_history WHERE server_name = ? ORDER BY record_time DESC LIMIT 2'
-            params_times = [target_server]
+            params = [time_now, time_prev]
+            if not is_global:
+                sql += " AND t1.server_name = ?"
+                params.append(target_server)
 
-        async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
-            times = await cursor.fetchall()
+            async with self.bot.db.execute(sql, tuple(params)) as cursor:
+                speed_records = await cursor.fetchall()
+
+            speed_data = []
+            for name, server, level, exp_now, exp_prev in speed_records:
+                diff = exp_now - exp_prev
+                if diff > 0:
+                    speed_data.append({"name": name, "server": server, "level": level, "speed": (diff / minutes_diff) * 60})
             
-        if len(times) < 2: return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")
+            # ... (排版邏輯保持原樣，沒有 SQL 變動) ...
+            speed_data.sort(key=lambda x: x['speed'], reverse=True)
+            top_list = speed_data[:count]
 
-        time_now, time_prev = times[0][0], times[1][0]
-        fmt = '%Y-%m-%d %H:%M:%S'
-        t1, t2 = datetime.datetime.strptime(time_now, fmt), datetime.datetime.strptime(time_prev, fmt)
-        minutes_diff = (t1 - t2).total_seconds() / 60
-        if minutes_diff <= 0: minutes_diff = 10 
+            if not top_list: return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
 
-        sql = '''
-            SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp 
-            FROM exp_history t1
-            JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-            WHERE t1.record_time = ? AND t2.record_time = ?
-        '''
-        params = [time_now, time_prev]
-        if not is_global:
-            sql += " AND t1.server_name = ?"
-            params.append(target_server)
+            desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]} (約 {int(minutes_diff)} 分鐘)**\n```yaml\n"
+            embeds = []
+            for idx, p in enumerate(top_list, 1):
+                name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p['name']))
+                name_padded = str(p['name']) + " " * max(0, 14 - name_width)
+                srv_info = f"({p['server']})" if is_global else ""
+                line = f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | 時速:{p['speed']/100000000:>6.2f}億 {srv_info}\n"
 
-        async with self.bot.db.execute(sql, tuple(params)) as cursor:
-            speed_records = await cursor.fetchall()
-            
-        speed_data = []
-        for name, server, level, exp_now, exp_prev in speed_records:
-            diff = exp_now - exp_prev
-            if diff > 0:
-                speed_data.append({"name": name, "server": server, "level": level, "speed": (diff / minutes_diff) * 60})
-        
-        # ... (排版邏輯保持原樣，沒有 SQL 變動) ...
-        speed_data.sort(key=lambda x: x['speed'], reverse=True)
-        top_list = speed_data[:count] 
+                if len(desc) + len(line) > 1900:
+                    desc += "```"
+                    embeds.append(discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 (續)", description=desc, color=0x00ff00))
+                    desc = "```yaml\n"
+                desc += line
 
-        if not top_list: return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
-
-        desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]} (約 {int(minutes_diff)} 分鐘)**\n```yaml\n"
-        embeds = [] 
-        for idx, p in enumerate(top_list, 1):
-            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p['name']))
-            name_padded = str(p['name']) + " " * max(0, 14 - name_width)
-            srv_info = f"({p['server']})" if is_global else ""
-            line = f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | 時速:{p['speed']/100000000:>6.2f}億 {srv_info}\n"
-            
-            if len(desc) + len(line) > 1900:
+            if desc != "```yaml\n":
                 desc += "```"
-                embeds.append(discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 (續)", description=desc, color=0x00ff00))
-                desc = "```yaml\n" 
-            desc += line
-            
-        if desc != "```yaml\n":
-            desc += "```"
-            embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP {count}", description=desc, color=0x00ff00)
-            embed.set_footer(text="系統：全自動經驗值測速雷達")
-            embeds.append(embed)
+                embed = discord.Embed(title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP {count}", description=desc, color=0x00ff00)
+                embed.set_footer(text="系統：全自動經驗值測速雷達")
+                embeds.append(embed)
 
-        await processing_msg.delete()
-        for e in embeds: await ctx.send(embed=e)
+            await processing_msg.delete()
+            for e in embeds: await ctx.send(embed=e)
+
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Database error while checking exp speed: {e}")
+            try:
+                await processing_msg.edit(content="❌ 資料庫檔案損毀 (database disk image is malformed)，請聯絡管理員修復或刪除 prasia_data.db。")
+            except discord.NotFound:
+                pass
+        except asyncio.TimeoutError as e:
+            logger.error(f"Database timeout while checking exp speed: {e}")
+            try:
+                await processing_msg.edit(content="❌ 測速查詢逾時，請重試")
+            except discord.NotFound:
+                pass
+        except Exception as e:
+            logger.error(f"Error while checking exp speed: {e}")
+            try:
+                await processing_msg.edit(content=f"❌ 測速發生錯誤: {type(e).__name__}")
+            except discord.NotFound:
+                pass
 
     @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
     async def starlight_attendance(self, ctx, target_date: str = None):
