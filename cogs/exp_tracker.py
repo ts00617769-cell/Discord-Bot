@@ -392,7 +392,7 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
     async def toggle_alerts(self, ctx, *args):
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         if not args_list:
             current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
             return await ctx.send(f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。")
@@ -430,7 +430,7 @@ class ExpTracker(commands.Cog):
     async def check_exp_speed(self, ctx, *args):
         # 移除原有的 self.setup_database() (因為已經在 cog_load 執行過了)
         count = 15 
-        args_list = list(args)
+        args_list = [arg for arg in args if arg.strip()]
         if len(args_list) > 0 and args_list[0].isdigit(): count = int(args_list.pop(0))
         if count > 100: count = 100
         if count < 1: count = 10
