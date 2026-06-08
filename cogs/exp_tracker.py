@@ -795,11 +795,9 @@ class ExpTracker(commands.Cog):
             # 🚀 引擎 B：無縫接軌偷練 (解決轉服空窗期偷打怪的問題)
             EXP_MARGIN = 1.0 * 1000000000000 # 容許 1 兆以內的偷練誤差
             
-            queue = list(target_profiles)
             seen_profiles = {(p[0], p[1]) for p in target_profiles}
 
-            while queue:
-                current_profile = queue.pop(0)
+            for current_profile in target_profiles:
                 t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = current_profile
                 
                 # 尋找後繼者 (目標消失後出現，經驗值微幅增加)
@@ -826,7 +824,6 @@ class ExpTracker(commands.Cog):
                             "exp_val": c_min_exp,
                             "sub_grade": c_sub_grade
                         })
-                        queue.append((c_name, c_server, c_lvl, c_first, c_last, c_min_exp, c_max_exp, c_class, c_sub_grade))
 
                 # 尋找前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
                 sql_backward = '''
@@ -852,7 +849,6 @@ class ExpTracker(commands.Cog):
                             "exp_val": c_max_exp,
                             "sub_grade": c_sub_grade
                         })
-                        queue.append((c_name, c_server, c_lvl, c_first, c_last, c_min_exp, c_max_exp, c_class, c_sub_grade))
 
             # 過濾重複資料 (因為引擎A和引擎B可能會抓到同一筆紀錄)
             unique_entries = []
