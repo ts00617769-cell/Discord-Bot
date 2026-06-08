@@ -287,7 +287,7 @@ class ExpTracker(commands.Cog):
                     FROM exp_history
                     WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
                     GROUP BY player_name, server_name
-                ) t_old ON t_now.class_name = t_old.class_name
+                ) t_old ON (t_now.class_name = t_old.class_name OR t_now.class_name IS NULL OR t_now.class_name IN ('None', '未知') OR t_old.class_name IS NULL OR t_old.class_name IN ('None', '未知'))
                 WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
                   AND t_now.level >= t_old.level
                   AND t_now.subjugation_grade >= t_old.subjugation_grade
@@ -306,7 +306,11 @@ class ExpTracker(commands.Cog):
             if not transfer_records:
                 return
 
+            # Greedy 1-to-1 matching: Sort by exp diff (new_exp - old_exp) ascending
+            transfer_records.sort(key=lambda x: x[0] - x[9])
 
+            matched_old = set()
+            matched_new = set()
 
             # 過濾並整理報告
             reported_pairs = set()
@@ -316,6 +320,12 @@ class ExpTracker(commands.Cog):
                 old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
                 old_exp = row[9]
                 new_sub_grade = row[10]
+
+                # Ensure 1-to-1 matching
+                old_key = (old_name, old_server)
+                new_key = (new_name, new_server)
+                if old_key in matched_old or new_key in matched_new:
+                    continue
 
                 # 防止單次掃描中重複推播
                 pair_key = (old_name, old_server, new_name, new_server)
@@ -339,6 +349,8 @@ class ExpTracker(commands.Cog):
 
                 if not is_old_still_active:
                     reported_pairs.add(pair_key)
+                    matched_old.add(old_key)
+                    matched_new.add(new_key)
 
                     # 將這筆發送過的紀錄存入資料庫
                     await self.bot.db.execute('''
@@ -794,7 +806,7 @@ class ExpTracker(commands.Cog):
                 sql_forward = '''
                     SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name = 'None' OR ? IS NULL OR ? = 'None')
+                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
                     GROUP BY player_name, server_name
                     HAVING MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
                        AND MIN(exp) >= ? AND MIN(exp) <= ?
@@ -820,7 +832,7 @@ class ExpTracker(commands.Cog):
                 sql_backward = '''
                     SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
                     FROM exp_history
-                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name = 'None' OR ? IS NULL OR ? = 'None')
+                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
                     GROUP BY player_name, server_name
                     HAVING MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
                        AND MAX(exp) <= ? AND MAX(exp) >= ?
