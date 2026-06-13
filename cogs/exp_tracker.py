@@ -292,7 +292,7 @@ class ExpTracker(commands.Cog):
                   AND t_now.level >= t_old.level
                   AND t_now.subjugation_grade >= t_old.subjugation_grade
                   AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
-                  AND (t_now.player_name != t_old.player_name OR t_now.server_name != t_old.server_name)
+                  AND t_now.server_name != t_old.server_name
                   AND NOT EXISTS (
                       SELECT 1 FROM exp_history t_check
                       WHERE t_check.record_time = ?
@@ -363,8 +363,6 @@ class ExpTracker(commands.Cog):
                     status_str = "跨服轉移並改名"
                     if new_name == old_name:
                         status_str = "跨服轉移"
-                    elif new_server == old_server:
-                        status_str = "原地改名"
 
                     # 計算經驗變動
                     exp_diff = new_exp - old_exp
