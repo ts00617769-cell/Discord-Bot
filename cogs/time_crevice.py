@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 import logging
-import aiohttp
 
 logger = logging.getLogger(__name__)
 
