@@ -798,20 +798,51 @@ class ExpTracker(commands.Cog):
             for current_profile in target_profiles:
                 t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = current_profile
                 
-                # 尋找後繼者 (目標消失後出現，經驗值微幅增加)
-                sql_forward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
+                # 尋找後繼者與前身 (將兩次查詢合併為一次)
+                # 條件 1: 後繼者 (目標消失後出現，經驗值微幅增加)
+                # 條件 2: 前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
+                sql_combined = '''
+                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade),
+                           CASE
+                             WHEN MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
+                                  AND MIN(exp) >= ? AND MIN(exp) <= ?
+                                  AND MAX(subjugation_grade) >= ?
+                             THEN 'forward'
+                             WHEN MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
+                                  AND MAX(exp) <= ? AND MAX(exp) >= ?
+                                  AND MAX(subjugation_grade) <= ?
+                             THEN 'backward'
+                             ELSE NULL
+                           END as match_type
                     FROM exp_history
                     WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
                     GROUP BY player_name, server_name
-                    HAVING MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
-                       AND MIN(exp) >= ? AND MIN(exp) <= ?
-                       AND MAX(subjugation_grade) >= ?
+                    HAVING match_type IS NOT NULL
                 '''
-                async with self.bot.db.execute(sql_forward, (t_name, t_cls, t_cls, t_cls, t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade)) as cursor:
-                    forward_matches = await cursor.fetchall()
+
+                params = (
+                    # Forward conditions
+                    t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade,
+                    # Backward conditions
+                    t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade,
+                    # Where clause conditions
+                    t_name, t_cls, t_cls, t_cls
+                )
+
+                async with self.bot.db.execute(sql_combined, params) as cursor:
+                    matches = await cursor.fetchall()
                     
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade in forward_matches:
+                # To preserve the original output order (forward matches first, then backward matches)
+                forward_matches = []
+                backward_matches = []
+
+                for row in matches:
+                    if row[9] == 'forward':
+                        forward_matches.append(row)
+                    elif row[9] == 'backward':
+                        backward_matches.append(row)
+
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ in forward_matches:
                     if (c_name, c_server) not in seen_profiles:
                         seen_profiles.add((c_name, c_server))
                         timeline_entries.append({
@@ -823,20 +854,7 @@ class ExpTracker(commands.Cog):
                             "sub_grade": c_sub_grade
                         })
 
-                # 尋找前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
-                sql_backward = '''
-                    SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade)
-                    FROM exp_history
-                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
-                    GROUP BY player_name, server_name
-                    HAVING MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
-                       AND MAX(exp) <= ? AND MAX(exp) >= ?
-                       AND MAX(subjugation_grade) <= ?
-                '''
-                async with self.bot.db.execute(sql_backward, (t_name, t_cls, t_cls, t_cls, t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade)) as cursor:
-                    backward_matches = await cursor.fetchall()
-
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade in backward_matches:
+                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ in backward_matches:
                     if (c_name, c_server) not in seen_profiles:
                         seen_profiles.add((c_name, c_server))
                         timeline_entries.append({
