@@ -263,45 +263,63 @@ class ExpTracker(commands.Cog):
         # ✨ 新增：自動轉服/改名偵測
         await self.check_for_transfers(time_now, time_prev)
 
+    async def _get_potential_transfers(self, time_now, time_prev, exp_margin):
+        """取出所有可能為轉服或改名的紀錄"""
+        sql = '''
+            SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
+                            t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
+                            t_old.exp, t_now.subjugation_grade
+            FROM exp_history t_now
+            JOIN (
+                SELECT player_name, server_name, class_name, level, subjugation_grade, exp, MAX(record_time) as record_time
+                FROM exp_history
+                WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
+                GROUP BY player_name, server_name
+            ) t_old ON (t_now.class_name = t_old.class_name OR t_now.class_name IS NULL OR t_now.class_name IN ('None', '未知') OR t_old.class_name IS NULL OR t_old.class_name IN ('None', '未知'))
+            WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
+              AND t_now.level >= t_old.level
+              AND t_now.subjugation_grade >= t_old.subjugation_grade
+              AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
+              AND t_now.server_name != t_old.server_name
+              AND NOT EXISTS (
+                  SELECT 1 FROM exp_history t_check
+                  WHERE t_check.record_time = ?
+                    AND t_check.player_name = t_now.player_name
+                    AND t_check.server_name = t_now.server_name
+              )
+        '''
+        async with self.bot.db.execute(sql, (time_prev, time_prev, time_now, exp_margin, time_prev)) as cursor:
+            return await cursor.fetchall()
+
+    async def _send_transfer_alert(self, time_now, new_name, new_server, old_name, old_server, new_lvl, new_cls, new_sub_grade, status_str, exp_diff):
+        """格式化轉服/改名訊息並發送到各個警報頻道"""
+        if exp_diff == 0:
+            diff_str = "+0.00% (完美吻合)"
+        else:
+            diff_str = f"+{(exp_diff/100000000):,.0f} 億 (轉移期間偷練)"
+
+        embed = discord.Embed(
+            title="【波拉西亞戰記】轉移/旅團變動警報",
+            description=f"時間：{time_now}\n{'-'*30}\n"
+                        f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
+                        f"**{new_name}** ({new_server})\n"
+                        f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
+                        f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
+            color=0xf1c40f
+        )
+        for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Failed to send transfer alert to channel {channel_id}: {e}")
+
     async def check_for_transfers(self, time_now, time_prev):
         """自動偵測轉服與改名 (V4 雙引擎升級版)"""
         try:
-            # 容許的經驗值偷練誤差 (1 兆以內)
             EXP_MARGIN = 1.0 * 1000000000000
-
-            # 1. 找出嫌疑人 (經驗值 > 1兆)
-            # 條件：
-            # - 新紀錄的經驗值大於等於舊紀錄的經驗值，且差距在 1 兆以內 (無縫接軌/偷練)
-            # - 職業必須相同 (不可能轉服變換職業)
-            # - 等級大於等於舊等級 (等級不可能倒退)
-            # - 討伐等級大於等於舊討伐等級 (討伐不會因為轉服而退步)
-            # - 名字或伺服器其中一項不同
-            # - ✨ 確保 t_now 是新面孔（他在 time_prev 的名單中並不存在同伺服器同名字的紀錄）
-            sql = '''
-                SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
-                                t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
-                                t_old.exp, t_now.subjugation_grade
-                FROM exp_history t_now
-                JOIN (
-                    SELECT player_name, server_name, class_name, level, subjugation_grade, exp, MAX(record_time) as record_time
-                    FROM exp_history
-                    WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
-                    GROUP BY player_name, server_name
-                ) t_old ON (t_now.class_name = t_old.class_name OR t_now.class_name IS NULL OR t_now.class_name IN ('None', '未知') OR t_old.class_name IS NULL OR t_old.class_name IN ('None', '未知'))
-                WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
-                  AND t_now.level >= t_old.level
-                  AND t_now.subjugation_grade >= t_old.subjugation_grade
-                  AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
-                  AND t_now.server_name != t_old.server_name
-                  AND NOT EXISTS (
-                      SELECT 1 FROM exp_history t_check
-                      WHERE t_check.record_time = ?
-                        AND t_check.player_name = t_now.player_name
-                        AND t_check.server_name = t_now.server_name
-                  )
-            '''
-            async with self.bot.db.execute(sql, (time_prev, time_prev, time_now, EXP_MARGIN, time_prev)) as cursor:
-                transfer_records = await cursor.fetchall()
+            transfer_records = await self._get_potential_transfers(time_now, time_prev, EXP_MARGIN)
 
             if not transfer_records:
                 return
@@ -311,9 +329,8 @@ class ExpTracker(commands.Cog):
 
             matched_old = set()
             matched_new = set()
-
-            # 過濾並整理報告
             reported_pairs = set()
+
             for row in transfer_records:
                 new_exp = row[0]
                 new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
@@ -321,18 +338,15 @@ class ExpTracker(commands.Cog):
                 old_exp = row[9]
                 new_sub_grade = row[10]
 
-                # Ensure 1-to-1 matching
                 old_key = (old_name, old_server)
                 new_key = (new_name, new_server)
                 if old_key in matched_old or new_key in matched_new:
                     continue
 
-                # 防止單次掃描中重複推播
                 pair_key = (old_name, old_server, new_name, new_server)
                 if pair_key in reported_pairs:
                     continue
 
-                # 🛡️ 防無限洗頻：檢查是否在資料庫中已經報過了
                 async with self.bot.db.execute('''
                     SELECT 1 FROM transfer_alerts_log
                     WHERE old_name = ? AND old_server = ? AND new_name = ? AND new_server = ?
@@ -342,8 +356,6 @@ class ExpTracker(commands.Cog):
                 if already_alerted:
                     continue
 
-                # 🛡️ 最終防呆：確定舊名字在 time_now 真的「從榜單上消失了」
-                # 如果舊名字還在現在的榜單上，代表這只是巧合 (例如兩人剛好練到同一門檻)
                 async with self.bot.db.execute('SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?', (time_now, old_name, old_server)) as check_cursor:
                     is_old_still_active = await check_cursor.fetchone()
 
@@ -352,41 +364,19 @@ class ExpTracker(commands.Cog):
                     matched_old.add(old_key)
                     matched_new.add(new_key)
 
-                    # 將這筆發送過的紀錄存入資料庫
                     await self.bot.db.execute('''
                         INSERT INTO transfer_alerts_log (old_name, old_server, new_name, new_server, alert_time)
                         VALUES (?, ?, ?, ?, ?)
                     ''', (old_name, old_server, new_name, new_server, time_now))
                     await self.bot.db.commit()
 
-                    # 判斷狀態
-                    status_str = "跨服轉移並改名"
-                    if new_name == old_name:
-                        status_str = "跨服轉移"
-
-                    # 計算經驗變動
+                    status_str = "跨服轉移並改名" if new_name != old_name else "跨服轉移"
                     exp_diff = new_exp - old_exp
-                    if exp_diff == 0:
-                        diff_str = "+0.00% (完美吻合)"
-                    else:
-                        diff_str = f"+{(exp_diff/100000000):,.0f} 億 (轉移期間偷練)"
 
-                    embed = discord.Embed(
-                        title="【波拉西亞戰記】轉移/旅團變動警報",
-                        description=f"時間：{time_now}\n{'-'*30}\n"
-                                    f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
-                                    f"**{new_name}** ({new_server})\n"
-                                    f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
-                                    f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}",
-                        color=0xf1c40f
+                    await self._send_transfer_alert(
+                        time_now, new_name, new_server, old_name, old_server,
+                        new_lvl, new_cls, new_sub_grade, status_str, exp_diff
                     )
-                    for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
-                        channel = self.bot.get_channel(channel_id)
-                        if channel:
-                            try:
-                                await channel.send(embed=embed)
-                            except Exception as e:
-                                logger.error(f"Failed to send transfer alert to channel {channel_id}: {e}")
 
         except Exception as e:
             logger.error(f"Error in automatic transfer check: {e}")
