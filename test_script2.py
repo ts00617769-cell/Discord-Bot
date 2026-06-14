@@ -1,7 +1,6 @@
 import asyncio
 from unittest.mock import MagicMock, AsyncMock
 from cogs.exp_tracker import ExpTracker
-import datetime
 
 class DummyCursor:
     def __init__(self, records):
