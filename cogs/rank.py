@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
-import unicodedata
 from game_data import SERVER_MAP
 import os
 import logging
