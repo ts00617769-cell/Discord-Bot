@@ -3,7 +3,6 @@ from discord.ext import commands
 import random
 import datetime
 import pytz
-import aiohttp
 from bs4 import BeautifulSoup
 import logging
 # ✨ 移除了 import sqlite3，全面改用 bot.db
