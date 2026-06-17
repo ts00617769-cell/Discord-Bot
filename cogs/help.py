@@ -26,7 +26,10 @@ class HelpCog(commands.Cog):
         embed.add_field(name="🏆 即時排名", value="`!排名 [數量] [伺服器]`\n例：`!排名 50 萊涅01`", inline=False)
         embed.add_field(name="📜 歷史排名 (支援職業與日期篩選)", value="`!歷史排名 [數量] [日期] [伺服器] [職業]`\n條件順序可隨意打亂。\n例：`!歷史 2026-05-08 萊涅04 太陽監視者`", inline=False)
         embed.add_field(name="🏎️ 練功測速", value="`!測速 [數量] [伺服器]`\n例：`!測速 30 全服`", inline=False)
+        embed.add_field(name="🚨 飆車警報", value="`!警報 [開/關]`\n例：`!警報 開 50 萊涅01` 或 `!警報 關`", inline=False)
         embed.add_field(name="✨ 星光出席點名", value="`!星光點名 [日期]`\n例：`!星光點名 2026-05-05`", inline=False)
+        embed.add_field(name="🕵️ 尋人", value="`!尋人 [玩家名稱]`\n利用經驗值特徵追蹤改名或轉服的玩家。\n例：`!尋人 驕傲o`", inline=False)
+        embed.add_field(name="🛫 轉服掃描", value="`!轉服掃描`\n全服掃描近期利用轉服空窗期改名或移動的玩家。", inline=False)
         
         embed.set_footer(text="機密層級：最高 | 系統：O(1) 戰情終端機")
         await ctx.send(embed=embed)
@@ -42,6 +45,8 @@ class HelpCog(commands.Cog):
 
         # ⚔️ 1. 戰情與數據掃描系統
         intel_desc = (
+            "**`!討伐排名`**\n"
+            "查詢全服前 100 名討伐等級排行。\n\n"
             "**`!時空王 [伺服器]`**\n"
             "查詢時間隙縫(交叉王)首領擊殺與MVP戰報。例：`!時空王 萊涅01`\n\n"
             "**`!稅收 [數量] [伺服器]`**\n"
@@ -57,7 +62,8 @@ class HelpCog(commands.Cog):
             "**`!時空`**\n查詢當日「時空縫隙首領」召喚時間表。\n\n"
             "**`!鍊成 [階級]`**\n模擬裝備四合一鍊成(需連過四柱)。例：`!鍊成 英雄`\n\n"
             "**`!塔羅`**\n抽取當日專屬大阿爾克那塔羅牌，預測遊戲運勢。\n\n"
-            "**`!星座 [星座名稱]`**\n查詢真實每日星座運勢。例：`!星座 天蠍座`"
+            "**`!星座 [星座名稱]`**\n查詢真實每日星座運勢。例：`!星座 天蠍座`\n\n"
+            "**`!求籤 [你的問題]`**\n向菩薩請示。例：`!求籤 今年運勢`"
         )
         embed.add_field(name="🔮 遊戲輔助與工具", value=tools_desc, inline=False)
 
