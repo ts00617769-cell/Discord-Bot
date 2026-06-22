@@ -132,10 +132,66 @@ class RankTracker(commands.Cog):
                 return await processing_msg.edit(content=f"❌ 撈取失敗，找不到資料。")
 
             if target_class:
-                all_players = [p for p in all_players if target_class in str(p.get("class_name", ""))]
+                filters = target_class.split('+')
+                class_filter = ""
+                grade_filter = 0
+                level_filter = 0
+
+                for f in filters:
+                    if f.startswith('職業'):
+                        class_filter = f[2:]
+                    elif f.startswith('討伐'):
+                        try:
+                            grade_filter = int(f[2:])
+                        except ValueError:
+                            pass
+                    elif f.startswith('等級'):
+                        try:
+                            level_filter = int(f[2:])
+                        except ValueError:
+                            pass
+                    elif f.lower().startswith('lv.'):
+                        try:
+                            level_filter = int(f[3:])
+                        except ValueError:
+                            pass
+                    elif f.lower().startswith('lv'):
+                        try:
+                            level_filter = int(f[2:])
+                        except ValueError:
+                            pass
+                    elif not class_filter and not f.startswith('討伐') and not f.startswith('等級') and not f.lower().startswith('lv'):
+                         class_filter = f
+
+                filtered_players = []
+                for p in all_players:
+                    match = True
+                    if class_filter and class_filter not in str(p.get("class_name", "")):
+                        match = False
+
+                    if grade_filter > 0:
+                        p_grade_val = (p.get("string_map") or {}).get("grade", "0")
+                        try:
+                            p_grade = int(p_grade_val)
+                        except (ValueError, TypeError):
+                            p_grade = 0
+                        if p_grade < grade_filter:
+                            match = False
+
+                    if level_filter > 0:
+                        try:
+                            p_level = int(p.get('gc_level', 0))
+                        except (ValueError, TypeError):
+                            p_level = 0
+                        if p_level < level_filter:
+                            match = False
+
+                    if match:
+                        filtered_players.append(p)
+                all_players = filtered_players
 
             if not all_players:
-                return await processing_msg.edit(content=f"❌ 找不到符合【{target_class}】職業條件的即時排名資料。")
+                return await processing_msg.edit(content=f"❌ 找不到符合【{target_class}】條件的即時排名資料。")
 
             all_players.sort(key=lambda x: x.get("gc_exp", 0), reverse=True)
             top_list = all_players[:count]
@@ -148,13 +204,15 @@ class RankTracker(commands.Cog):
                 name = str(p.get('gc_name') or "未知")
                 class_name = str(p.get('class_name', '未知')) 
                 
+                grade_val = (p.get("string_map") or {}).get("grade", "0")
+
                 # ✨ 這裡要補上 await 來呼叫非同步的函式
                 tag = await self.get_member_info(name) 
                 
                 display_name = f"{name}{tag}"
                 level_str = p.get('gc_level', '?')
                 
-                line = f"{idx:02d}. [{display_name}] [{class_name}] Lv.{level_str} {server_info}\n"
+                line = f"{idx:02d}. [{display_name}] [{class_name}] Lv.{level_str} | 討伐 {grade_val} {server_info}\n"
                 line += f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"
                 
                 if len(description) + len(line) > 1900:

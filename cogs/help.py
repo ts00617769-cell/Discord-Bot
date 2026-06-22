@@ -27,7 +27,6 @@ class HelpCog(commands.Cog):
         embed.add_field(name="📜 歷史排名 (支援職業與日期篩選)", value="`!歷史排名 [數量] [日期] [伺服器] [職業]`\n條件順序可隨意打亂。\n例：`!歷史 2026-05-08 萊涅04 太陽監視者`", inline=False)
         embed.add_field(name="🏎️ 練功測速", value="`!測速 [數量] [伺服器]`\n例：`!測速 30 全服`", inline=False)
         embed.add_field(name="🚨 飆車警報", value="`!警報 [開/關]`\n例：`!警報 開 50 萊涅01` 或 `!警報 關`", inline=False)
-        embed.add_field(name="✨ 星光出席點名", value="`!星光點名 [日期]`\n例：`!星光點名 2026-05-05`", inline=False)
         embed.add_field(name="🕵️ 尋人", value="`!尋人 [玩家名稱]`\n利用經驗值特徵追蹤改名或轉服的玩家。\n例：`!尋人 驕傲o`", inline=False)
         embed.add_field(name="🛫 轉服掃描", value="`!轉服掃描`\n全服掃描近期利用轉服空窗期改名或移動的玩家。", inline=False)
         
