@@ -548,68 +548,6 @@ class ExpTracker(commands.Cog):
             except discord.NotFound:
                 pass
 
-    @commands.command(name="星光點名", help="檢驗 23:00~23:30 點名 (預設今日。查歷史用法: !星光點名 2026-05-05)")
-    async def starlight_attendance(self, ctx, target_date: str = None):
-        tz = datetime.timezone(datetime.timedelta(hours=8))
-        if target_date:
-            query_date, display_date = target_date, f"歷史調閱 ({target_date})"
-        else:
-            query_date, display_date = datetime.datetime.now(tz).strftime('%Y-%m-%d'), "今日"
-
-        processing_msg = await ctx.send(f"🛰️ 啟動星光點名系統，正在掃描 **全伺服器** {display_date} 23:00 ~ 23:30...")
-        
-        async with self.bot.db.execute('''
-            SELECT MIN(record_time), MAX(record_time) FROM exp_history 
-            WHERE record_time >= ? AND record_time <= ?
-        ''', (f"{query_date} 23:00:00", f"{query_date} 23:30:00")) as cursor:
-            times = await cursor.fetchone()
-        
-        if not times or not times[0] or not times[1] or times[0] == times[1]:
-            return await processing_msg.edit(content=f"❌ 找不到 {query_date} 23:00 ~ 23:30 的資料。")
-            
-        start_time, end_time = times[0], times[1]
-        fmt = '%Y-%m-%d %H:%M:%S'
-        minutes_diff = (datetime.datetime.strptime(end_time, fmt) - datetime.datetime.strptime(start_time, fmt)).total_seconds() / 60
-        if minutes_diff <= 0: minutes_diff = 30 
-
-        async with self.bot.db.execute('''
-            SELECT t1.server_name, t1.player_name, (t2.exp - t1.exp)
-            FROM exp_history t1 JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-            WHERE t1.record_time = ? AND t2.record_time = ?
-        ''', (start_time, end_time)) as cursor:
-            records = await cursor.fetchall()
-        
-        results = {}
-        for server, player, diff in records:
-            if diff > 0:
-                hourly_speed = (diff / minutes_diff) * 60
-                if 100000000000 <= hourly_speed <= 1500000000000:
-                    if server not in results: results[server] = []
-                    results[server].append((player, hourly_speed / 100000000))
-                
-        embed = discord.Embed(
-            title=f"✨ 星光解放戰 全服出席 {display_date}", 
-            description=f"📊 **採樣**：`{start_time[11:16]}` ~ `{end_time[11:16]}`\n🎯 **門檻**：時速 1000億 ~ 1.5兆", 
-            color=0xf1c40f
-        )
-        
-        if not results:
-            embed.add_field(name="狀態報告", value="全服無人符合時速條件。", inline=False)
-        else:
-            for server in sorted(results.keys()):
-                players = sorted(results[server], key=lambda x: x[1], reverse=True)
-                lines = []
-                for p_name, p_speed in players:
-                    name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(p_name))
-                    lines.append(f"• {str(p_name) + ' ' * max(0, 14 - name_width)} (時速 {p_speed:,.0f}億)")
-                    
-                full_text = "\n".join(lines)
-                if len(full_text) > 900: full_text = full_text[:900] + "\n... (截斷)"
-                embed.add_field(name=f"🌐 {server} (共 {len(players)} 人)", value=f"```yaml\n{full_text}\n```", inline=False)
-            
-        await processing_msg.delete()
-        await ctx.send(embed=embed)
-
     @commands.command(name="歷史排名", aliases=["查歷史", "歷史"], help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者")
     async def historical_ranking(self, ctx, *args):
         count = 100
