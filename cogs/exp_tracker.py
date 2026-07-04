@@ -18,7 +18,7 @@ class ExpTracker(commands.Cog):
         self.TRANSFER_ALERT_CHANNEL_IDS = [int(x.strip()) for x in os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").split(",") if x.strip() and x.strip().isdigit()]
         self.SPEED_LIMIT = 4000 
         self.alerts_enabled = False 
-        self.alert_count = 50
+        self.alert_count = 30
         self.alert_server = "全服"
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
 
@@ -416,7 +416,7 @@ class ExpTracker(commands.Cog):
             if len(args_list) > 0 and args_list[0].isdigit():
                 temp_alert_count = int(args_list.pop(0))
             else:
-                temp_alert_count = 50
+                temp_alert_count = 30
 
             if temp_alert_count > 100: temp_alert_count = 100
             if temp_alert_count < 1: temp_alert_count = 10
