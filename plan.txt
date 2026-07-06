@@ -1,0 +1,11 @@
+1. Read `cogs/exp_tracker.py` and modify `track_player` to implement a BFS/while-loop for discovering connected characters.
+2. In the BFS loop:
+   a. Check for exact EXP matches (ignoring same server if name is different? Wait, exact EXP matches can be on the same server?).
+   b. Check for forward seamless transitions (server != current_server, class matches/fallback, subjugation_grade >= current).
+   c. Check for backward seamless transitions (server != current_server, class matches/fallback, subjugation_grade <= current).
+   d. Apply greedy 1-to-1 matching for transitions by sorting candidates by EXP difference and selecting the best one.
+   e. Add the discovered profiles into a queue and visited set.
+3. Sort all discovered profiles by `first_seen` and output them.
+4. Modify `cogs/war_room.py` to change database retention to 180 days (currently 60).
+5. Run pre-commit checks.
+6. Commit and submit.

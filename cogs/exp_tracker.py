@@ -682,53 +682,93 @@ class ExpTracker(commands.Cog):
                 return await processing_msg.edit(content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。")
 
             timeline_entries = []
+            EXP_MARGIN = 1.0 * 1000000000000  # 容許 1 兆以內的偷練誤差
 
-            # 🚀 引擎 A：絕對碰撞 (上一版的完美邏輯，不管時間跟職業，只要 EXP 一模一樣就抓)
-            sql_exact = '''
-                SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(subjugation_grade)
+            seen_profiles = set()
+            queue = []
+
+            # Helper to add to queue and prevent unbounded recursion
+            async def add_to_queue(p_name, p_server, m_type, d_text, e_val, fetch_profile=True):
+                if (p_name, p_server) in seen_profiles:
+                    return
+                seen_profiles.add((p_name, p_server))
+
+                # Fetch full profile if not provided
+                if fetch_profile:
+                    async with self.bot.db.execute('''
+                        SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
+                        FROM exp_history
+                        WHERE player_name = ? AND server_name = ?
+                        GROUP BY player_name, server_name
+                    ''', (p_name, p_server)) as cursor:
+                        row = await cursor.fetchone()
+                    if not row:
+                        return
+                    profile = row
+                else:
+                    profile = None
+
+                # We will add it to the queue for BFS
+                queue.append({'profile': profile, 'match_type': m_type, 'diff_text': d_text, 'exp_val': e_val, 'name': p_name, 'server': p_server})
+
+            # Initialize queue with target profiles
+            for tp in target_profiles:
+                await add_to_queue(tp[0], tp[1], "🎯 查詢目標", "", tp[5], fetch_profile=False)
+                queue[-1]['profile'] = tp
+
+            # Initialize exact match search queue to prevent unbounded BFS but still catch same names
+            # Find all characters with the exact same name across servers, as name is a strong identifier
+            async with self.bot.db.execute('''
+                SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
                 FROM exp_history
-                WHERE exp IN (SELECT DISTINCT exp FROM exp_history WHERE player_name = ?)
-                GROUP BY exp, player_name, server_name
-            '''
-            async with self.bot.db.execute(sql_exact, (target_name,)) as cursor:
-                exact_matches = await cursor.fetchall()
+                WHERE player_name = ?
+                GROUP BY player_name, server_name
+            ''', (target_name,)) as cursor:
+                same_name_profiles = await cursor.fetchall()
+            for tp in same_name_profiles:
+                if (tp[0], tp[1]) not in seen_profiles:
+                    await add_to_queue(tp[0], tp[1], "🎯 查詢目標", "", tp[5], fetch_profile=False)
+                    queue[-1]['profile'] = tp
             
-            target_classes = {p[7] for p in target_profiles}
-            valid_target_classes = {c for c in target_classes if c and c != 'None'}
+            bfs_limit = 20
+            hops = 0
 
-            for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
-                # 過濾掉不同職業的絕對碰撞 (轉服/改名不會變更職業)
-                # 容許 class_name 為 None 或是 target_classes 中有 None
-                is_class_match = True
-                if p_name != target_name and valid_target_classes and cls_name and cls_name != 'None':
-                    if cls_name not in valid_target_classes:
-                        is_class_match = False
-
-                if not is_class_match:
+            while queue and hops < bfs_limit:
+                current = queue.pop(0)
+                profile = current['profile']
+                if not profile:
                     continue
 
-                match_type = "🎯 查詢目標" if p_name == target_name else "🔗 絕對經驗值碰撞"
-                diff_text = "EXP 完全一致" if p_name != target_name else ""
+                t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = profile
+
                 timeline_entries.append({
-                    "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name,
-                    "first": first_seen, "last": last_seen,
-                    "match_type": match_type,
-                    "diff_text": diff_text,
-                    "exp_val": exp,
-                    "sub_grade": sub_grade
+                    "name": t_name, "server": t_server, "lvl": t_lvl, "cls": t_cls,
+                    "first": t_first, "last": t_last,
+                    "match_type": current['match_type'],
+                    "diff_text": current['diff_text'],
+                    "exp_val": current['exp_val'] or t_min_exp,
+                    "sub_grade": t_sub_grade
                 })
-
-            # 🚀 引擎 B：無縫接軌偷練 (解決轉服空窗期偷打怪的問題)
-            EXP_MARGIN = 1.0 * 1000000000000 # 容許 1 兆以內的偷練誤差
-            
-            seen_profiles = {(p[0], p[1]) for p in target_profiles}
-
-            for current_profile in target_profiles:
-                t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = current_profile
                 
-                # 尋找後繼者與前身 (將兩次查詢合併為一次)
-                # 條件 1: 後繼者 (目標消失後出現，經驗值微幅增加)
-                # 條件 2: 前身 (目標出現前消失，經驗值微幅增加到目標的初始值)
+                # Find exact matches
+                sql_exact = '''
+                    SELECT exp, player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MAX(subjugation_grade)
+                    FROM exp_history
+                    WHERE exp IN (?, ?) AND server_name != ?
+                    GROUP BY exp, player_name, server_name
+                '''
+                async with self.bot.db.execute(sql_exact, (t_min_exp, t_max_exp, t_server)) as cursor:
+                    exact_matches = await cursor.fetchall()
+
+                for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
+                    is_class_match = True
+                    if t_cls and t_cls != 'None' and cls_name and cls_name != 'None':
+                        if cls_name != t_cls:
+                            is_class_match = False
+                    if is_class_match:
+                        await add_to_queue(p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp)
+
+                # Find forward/backward transitions
                 sql_combined = '''
                     SELECT player_name, server_name, MAX(level), class_name, MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), MAX(subjugation_grade),
                            CASE
@@ -743,58 +783,49 @@ class ExpTracker(commands.Cog):
                              ELSE NULL
                            END as match_type
                     FROM exp_history
-                    WHERE player_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
+                    WHERE server_name != ? AND (class_name = ? OR class_name IS NULL OR class_name IN ('None', '未知') OR ? IS NULL OR ? IN ('None', '未知'))
                     GROUP BY player_name, server_name
                     HAVING match_type IS NOT NULL
                 '''
-
                 params = (
-                    # Forward conditions
                     t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade,
-                    # Backward conditions
                     t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade,
-                    # Where clause conditions
-                    t_name, t_cls, t_cls, t_cls
+                    t_server, t_cls, t_cls, t_cls
                 )
-
                 async with self.bot.db.execute(sql_combined, params) as cursor:
                     matches = await cursor.fetchall()
-                    
-                # To preserve the original output order (forward matches first, then backward matches)
-                forward_matches = []
-                backward_matches = []
 
-                for row in matches:
-                    if row[9] == 'forward':
-                        forward_matches.append(row)
-                    elif row[9] == 'backward':
-                        backward_matches.append(row)
+                forward_matches = [m for m in matches if m[9] == 'forward']
+                backward_matches = [m for m in matches if m[9] == 'backward']
 
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ in forward_matches:
-                    if (c_name, c_server) not in seen_profiles:
-                        seen_profiles.add((c_name, c_server))
-                        timeline_entries.append({
-                            "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
-                            "first": c_first, "last": c_last,
-                            "match_type": "✈️ 無縫接軌 (轉服/改名後)",
-                            "diff_text": f"轉服空窗偷練 +{(c_min_exp - t_max_exp)/100000000:,.0f} 億",
-                            "exp_val": c_min_exp,
-                            "sub_grade": c_sub_grade
-                        })
+                # Greedy 1-to-1 matching: sort by EXP diff and pick best one
+                if forward_matches:
+                    forward_matches.sort(key=lambda x: x[6] - t_max_exp) # x[6] is MIN(exp) of next
+                    best_f = forward_matches[0]
+                    c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ = best_f
+                    await add_to_queue(c_name, c_server, "✈️ 無縫接軌 (轉服/改名後)", f"轉服空窗偷練 +{(c_min_exp - t_max_exp)/100000000:,.0f} 億", c_min_exp)
 
-                for c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ in backward_matches:
-                    if (c_name, c_server) not in seen_profiles:
-                        seen_profiles.add((c_name, c_server))
-                        timeline_entries.append({
-                            "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_class,
-                            "first": c_first, "last": c_last,
-                            "match_type": "🔍 前身 (轉服/改名前)",
-                            "diff_text": f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億",
-                            "exp_val": c_max_exp,
-                            "sub_grade": c_sub_grade
-                        })
+                if backward_matches:
+                    backward_matches.sort(key=lambda x: t_min_exp - x[7]) # x[7] is MAX(exp) of prev
+                    best_b = backward_matches[0]
+                    c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ = best_b
+                    await add_to_queue(c_name, c_server, "🔍 前身 (轉服/改名前)", f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億", c_max_exp)
 
-            # 過濾重複資料 (因為引擎A和引擎B可能會抓到同一筆紀錄)
+                # Propagate same name search on newly found characters
+                async with self.bot.db.execute('''
+                    SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
+                    FROM exp_history
+                    WHERE player_name = ?
+                    GROUP BY player_name, server_name
+                ''', (t_name,)) as cursor:
+                    same_name_matches = await cursor.fetchall()
+                for sm in same_name_matches:
+                    if (sm[0], sm[1]) not in seen_profiles:
+                        await add_to_queue(sm[0], sm[1], "🎯 查詢目標", "", sm[5], fetch_profile=False)
+                        queue[-1]['profile'] = sm
+
+                hops += 1
+
             unique_entries = []
             seen = set()
             for entry in timeline_entries:
