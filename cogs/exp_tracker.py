@@ -664,9 +664,16 @@ class ExpTracker(commands.Cog):
     # ==========================================
     # 🕵️ 天眼追蹤系統：V4 雙引擎版 (絕對碰撞 + 無縫接軌)
     # ==========================================
-    @commands.command(name="尋人回報", help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 或 !尋人回報 驕傲o 清除")
-    async def report_identity(self, ctx, current_name: str, original_name: str):
-        if original_name == "清除":
+    @commands.command(name="尋人回報", help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 艾雲o 或 !尋人回報 驕傲o 清除")
+    async def report_identity(self, ctx, *args):
+        args_list = [arg for arg in args if arg.strip()]
+        if len(args_list) < 2:
+            return await ctx.send("❌ 參數不足！用法範例：`!尋人回報 驕傲o 某某某 艾雲o` 或 `!尋人回報 驕傲o 清除`")
+
+        current_name = args_list[0]
+        original_names = args_list[1:]
+
+        if len(original_names) == 1 and original_names[0] == "清除":
             try:
                 await self.bot.db.execute('DELETE FROM member_registry WHERE player_name = ?', (current_name,))
                 await self.bot.db.commit()
@@ -676,13 +683,33 @@ class ExpTracker(commands.Cog):
                 await ctx.send(f"❌ 清除失敗: {e}")
         else:
             try:
+                # 取得目前已有的標記
+                async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (current_name,)) as cursor:
+                    result = await cursor.fetchone()
+
+                existing_identities = []
+                if result and result[0]:
+                    existing_identities = [x.strip() for x in result[0].split(',')]
+
+                # 把新輸入的名字加進去，並排除重複
+                added_names = []
+                for name in original_names:
+                    if name not in existing_identities:
+                        existing_identities.append(name)
+                        added_names.append(name)
+
+                if not added_names:
+                    return await ctx.send(f"⚠️ 你輸入的名字都已經標記過了。目前的標記為：({result[0]})")
+
+                new_identity_str = ", ".join(existing_identities)
+
                 await self.bot.db.execute('''
                     INSERT INTO member_registry (player_name, original_identity)
                     VALUES (?, ?)
                     ON CONFLICT(player_name) DO UPDATE SET original_identity=excluded.original_identity
-                ''', (current_name, original_name))
+                ''', (current_name, new_identity_str))
                 await self.bot.db.commit()
-                await ctx.send(f"✅ 已成功將【{current_name}】標記為【{original_name}】的前身或本尊。")
+                await ctx.send(f"✅ 已成功為【{current_name}】新增身分標記！目前累計的身分：【{new_identity_str}】")
             except Exception as e:
                 logger.error(f"Error updating member info for '{current_name}': {e}")
                 await ctx.send(f"❌ 標記失敗: {e}")
