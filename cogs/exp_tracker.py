@@ -676,13 +676,28 @@ class ExpTracker(commands.Cog):
                 await ctx.send(f"❌ 清除失敗: {e}")
         else:
             try:
+                # 取得目前已有的標記
+                async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (current_name,)) as cursor:
+                    result = await cursor.fetchone()
+
+                if result and result[0]:
+                    existing_identities = [x.strip() for x in result[0].split(',')]
+                    # 如果尚未標記過，則加入列表
+                    if original_name not in existing_identities:
+                        existing_identities.append(original_name)
+                        new_identity_str = ", ".join(existing_identities)
+                    else:
+                        return await ctx.send(f"⚠️ 【{current_name}】已經被標記過【{original_name}】了。目前的標記為：({result[0]})")
+                else:
+                    new_identity_str = original_name
+
                 await self.bot.db.execute('''
                     INSERT INTO member_registry (player_name, original_identity)
                     VALUES (?, ?)
                     ON CONFLICT(player_name) DO UPDATE SET original_identity=excluded.original_identity
-                ''', (current_name, original_name))
+                ''', (current_name, new_identity_str))
                 await self.bot.db.commit()
-                await ctx.send(f"✅ 已成功將【{current_name}】標記為【{original_name}】的前身或本尊。")
+                await ctx.send(f"✅ 已成功為【{current_name}】新增身分標記！目前累計的身分：【{new_identity_str}】")
             except Exception as e:
                 logger.error(f"Error updating member info for '{current_name}': {e}")
                 await ctx.send(f"❌ 標記失敗: {e}")
