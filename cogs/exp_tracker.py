@@ -65,19 +65,19 @@ class ExpTracker(commands.Cog):
             )
         ''')
 
+        # 初始化玩家標記資料庫
+        await self.bot.db.execute('''
+            CREATE TABLE IF NOT EXISTS member_registry (
+                player_name TEXT PRIMARY KEY,
+                original_identity TEXT
+            )
+        ''')
+
         await self.bot.db.commit()
 
     async def get_member_info(self, name):
         """改為非同步的讀取標記函數"""
         try:
-            await self.bot.db.execute('''
-                CREATE TABLE IF NOT EXISTS member_registry (
-                    player_name TEXT PRIMARY KEY,
-                    original_identity TEXT
-                )
-            ''')
-            await self.bot.db.commit()
-            
             async with self.bot.db.execute('SELECT original_identity FROM member_registry WHERE player_name = ?', (name,)) as cursor:
                 result = await cursor.fetchone()
                 return f"({result[0]})" if result else ""
@@ -664,6 +664,29 @@ class ExpTracker(commands.Cog):
     # ==========================================
     # 🕵️ 天眼追蹤系統：V4 雙引擎版 (絕對碰撞 + 無縫接軌)
     # ==========================================
+    @commands.command(name="尋人回報", help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 或 !尋人回報 驕傲o 清除")
+    async def report_identity(self, ctx, current_name: str, original_name: str):
+        if original_name == "清除":
+            try:
+                await self.bot.db.execute('DELETE FROM member_registry WHERE player_name = ?', (current_name,))
+                await self.bot.db.commit()
+                await ctx.send(f"✅ 已成功清除【{current_name}】的身分標記。")
+            except Exception as e:
+                logger.error(f"Error clearing member info for '{current_name}': {e}")
+                await ctx.send(f"❌ 清除失敗: {e}")
+        else:
+            try:
+                await self.bot.db.execute('''
+                    INSERT INTO member_registry (player_name, original_identity)
+                    VALUES (?, ?)
+                    ON CONFLICT(player_name) DO UPDATE SET original_identity=excluded.original_identity
+                ''', (current_name, original_name))
+                await self.bot.db.commit()
+                await ctx.send(f"✅ 已成功將【{current_name}】標記為【{original_name}】的前身或本尊。")
+            except Exception as e:
+                logger.error(f"Error updating member info for '{current_name}': {e}")
+                await ctx.send(f"❌ 標記失敗: {e}")
+
     @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o")
     async def track_player(self, ctx, target_name: str):
         processing_msg = await ctx.send(f"🔍 啟動天眼雙引擎，正在進行【絕對碰撞】與【無縫接軌】掃描...")
