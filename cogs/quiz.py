@@ -198,7 +198,6 @@ class QuizSystem(commands.Cog):
                     votes = await v_cursor.fetchall()
                 
                 # 恢復全域變數記憶體
-                global active_poll
                 active_poll["is_active"] = True
                 active_poll["date"] = date_str
                 active_poll["channel_id"] = channel_id

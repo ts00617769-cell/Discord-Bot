@@ -4,6 +4,7 @@ import aiohttp
 import unicodedata
 import os
 import logging
+import asyncio
 from . import error_handler
 
 logger = logging.getLogger(__name__)
