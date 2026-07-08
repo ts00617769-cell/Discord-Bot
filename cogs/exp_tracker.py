@@ -583,9 +583,12 @@ class ExpTracker(commands.Cog):
         processing_msg = await ctx.send(f"📊 正在潛入資料庫，調閱 `{date_str}` 的 {target_server}{filter_msg}歷史排行榜...")
 
         sql = '''
-            SELECT player_name, server_name, level, exp, class_name 
-            FROM exp_history 
-            WHERE record_time LIKE ? 
+            SELECT h1.player_name, h1.server_name, h1.level, h1.exp, h1.class_name
+            FROM exp_history h1
+            INNER JOIN (
+                SELECT player_name, server_name, MAX(record_time) as max_time
+                FROM exp_history
+                WHERE record_time LIKE ?
         '''
         params = [f"{date_str}%"]
         
@@ -598,9 +601,11 @@ class ExpTracker(commands.Cog):
             params.append(f"%{target_class}%")
             
         sql += '''
-            GROUP BY player_name, server_name
-            HAVING record_time = MAX(record_time)
-            ORDER BY exp DESC
+                GROUP BY player_name, server_name
+            ) h2 ON h1.player_name = h2.player_name
+                AND h1.server_name = h2.server_name
+                AND h1.record_time = h2.max_time
+            ORDER BY h1.exp DESC
             LIMIT ?
         '''
         params.append(count)
@@ -957,7 +962,7 @@ class ExpTracker(commands.Cog):
                 FROM exp_history
                 WHERE exp > 1000000000000
                 GROUP BY exp
-                HAVING COUNT(DISTINCT player_name || server_name) > 1
+                HAVING COUNT(DISTINCT server_name) > 1
                 ORDER BY MAX(record_time) DESC
                 LIMIT 10
             ''') as cursor:
