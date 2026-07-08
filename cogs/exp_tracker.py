@@ -817,10 +817,22 @@ class ExpTracker(commands.Cog):
 
                 for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
                     is_class_match = True
-                    if t_cls and t_cls != 'None' and cls_name and cls_name != 'None':
+                    wildcards = (None, 'None', '未知')
+                    if t_cls not in wildcards and cls_name not in wildcards:
                         if cls_name != t_cls:
                             is_class_match = False
-                    if is_class_match:
+
+                    is_sub_grade_match = True
+                    if t_sub_grade is not None and sub_grade is not None:
+                        # Check direction based on time
+                        if first_seen >= t_last: # Forward in time
+                            if sub_grade < t_sub_grade:
+                                is_sub_grade_match = False
+                        elif last_seen <= t_first: # Backward in time
+                            if t_sub_grade < sub_grade:
+                                is_sub_grade_match = False
+
+                    if is_class_match and is_sub_grade_match:
                         await add_to_queue(p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp)
 
                 # Find forward/backward transitions
@@ -829,11 +841,11 @@ class ExpTracker(commands.Cog):
                            CASE
                              WHEN MIN(record_time) >= datetime(?, '-2 hours') AND MIN(record_time) <= datetime(?, '+7 days')
                                   AND MIN(exp) >= ? AND MIN(exp) <= ?
-                                  AND MAX(subjugation_grade) >= ?
+                                  AND (MAX(subjugation_grade) >= ? OR MAX(subjugation_grade) IS NULL OR ? IS NULL)
                              THEN 'forward'
                              WHEN MAX(record_time) >= datetime(?, '-7 days') AND MAX(record_time) <= datetime(?, '+2 hours')
                                   AND MAX(exp) <= ? AND MAX(exp) >= ?
-                                  AND MAX(subjugation_grade) <= ?
+                                  AND (MAX(subjugation_grade) <= ? OR MAX(subjugation_grade) IS NULL OR ? IS NULL)
                              THEN 'backward'
                              ELSE NULL
                            END as match_type
@@ -843,8 +855,8 @@ class ExpTracker(commands.Cog):
                     HAVING match_type IS NOT NULL
                 '''
                 params = (
-                    t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade,
-                    t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade,
+                    t_last, t_last, t_max_exp, t_max_exp + EXP_MARGIN, t_sub_grade, t_sub_grade,
+                    t_first, t_first, t_min_exp, t_min_exp - EXP_MARGIN, t_sub_grade, t_sub_grade,
                     t_server, t_cls, t_cls, t_cls
                 )
                 async with self.bot.db.execute(sql_combined, params) as cursor:
@@ -865,19 +877,6 @@ class ExpTracker(commands.Cog):
                     best_b = backward_matches[0]
                     c_name, c_server, c_lvl, c_class, c_first, c_last, c_min_exp, c_max_exp, c_sub_grade, _ = best_b
                     await add_to_queue(c_name, c_server, "🔍 前身 (轉服/改名前)", f"轉服空窗偷練 +{(t_min_exp - c_max_exp)/100000000:,.0f} 億", c_max_exp)
-
-                # Propagate same name search on newly found characters
-                async with self.bot.db.execute('''
-                    SELECT player_name, server_name, MAX(level), MIN(record_time), MAX(record_time), MIN(exp), MAX(exp), class_name, MAX(subjugation_grade)
-                    FROM exp_history
-                    WHERE player_name = ?
-                    GROUP BY player_name, server_name
-                ''', (t_name,)) as cursor:
-                    same_name_matches = await cursor.fetchall()
-                for sm in same_name_matches:
-                    if (sm[0], sm[1]) not in seen_profiles:
-                        await add_to_queue(sm[0], sm[1], "🎯 查詢目標", "", sm[5], fetch_profile=False)
-                        queue[-1]['profile'] = sm
 
                 hops += 1
 
