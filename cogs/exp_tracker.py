@@ -20,6 +20,9 @@ class ExpTracker(commands.Cog):
         self.alerts_enabled = False 
         self.alert_count = 30
         self.alert_server = "全服"
+
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
 
     # ✨ discord.py 提供的非同步初始化入口
@@ -402,6 +405,8 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
     async def toggle_alerts(self, ctx, *args):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         args_list = [arg for arg in args if arg.strip()]
         if not args_list:
             current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
@@ -438,6 +443,8 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
     async def check_exp_speed(self, ctx, *args):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         # 移除原有的 self.setup_database() (因為已經在 cog_load 執行過了)
         count = 15 
         args_list = [arg for arg in args if arg.strip()]
@@ -550,6 +557,8 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="歷史排名", aliases=["查歷史", "歷史"], help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者")
     async def historical_ranking(self, ctx, *args):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         count = 100
         tz = datetime.timezone(datetime.timedelta(hours=8))
         date_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
@@ -671,6 +680,8 @@ class ExpTracker(commands.Cog):
     # ==========================================
     @commands.command(name="尋人回報", help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 艾雲o 或 !尋人回報 驕傲o 清除")
     async def report_identity(self, ctx, *args):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         args_list = [arg for arg in args if arg.strip()]
         if len(args_list) < 2:
             return await ctx.send("❌ 參數不足！用法範例：`!尋人回報 驕傲o 某某某 艾雲o` 或 `!尋人回報 驕傲o 清除`")
@@ -721,6 +732,8 @@ class ExpTracker(commands.Cog):
 
     @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o")
     async def track_player(self, ctx, target_name: str):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         processing_msg = await ctx.send(f"🔍 啟動天眼雙引擎，正在進行【絕對碰撞】與【無縫接軌】掃描...")
 
         try:
@@ -952,6 +965,8 @@ class ExpTracker(commands.Cog):
     # ==========================================
     @commands.command(name="轉服掃描", aliases=["移民清單", "抓包"], help="全服掃描近期利用轉服空窗期改名或移動的玩家")
     async def global_transfer_scan(self, ctx):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         processing_msg = await ctx.send("📡 正在進行全資料庫特徵碰撞比對，這可能需要幾秒鐘...")
 
         try:
@@ -1035,6 +1050,8 @@ class ExpTracker(commands.Cog):
                 pass
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
     async def test_transfer_alert(self, ctx):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
         if not channel_ids:
             return await ctx.send("❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。")
