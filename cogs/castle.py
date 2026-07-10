@@ -5,12 +5,15 @@ import asyncio
 import unicodedata
 from game_data import SERVER_MAP
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 class CastleTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
 
     def get_display_width(self, text):
         return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in str(text))
@@ -50,7 +53,8 @@ class CastleTracker(commands.Cog):
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
     async def get_castle_tax(self, ctx, *args):
-        # 🛡️ 頻道限制已移除，現在全頻道可用
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
 
         count = 15
         args_list = [arg for arg in args if arg.strip()]

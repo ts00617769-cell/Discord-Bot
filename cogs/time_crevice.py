@@ -1,15 +1,20 @@
 import discord
 from discord.ext import commands
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 class TimeCrevice(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
+        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
 
     @commands.command(name="時空王", aliases=["交叉王", "時間隙縫", "時空隙縫", "隙縫戰報", "crevice戰報"])
     async def time_crevice(self, ctx, server_name: str = None):
+        if ctx.channel.id not in self.allowed_channel_ids:
+            return
         """
         查詢時間隙縫首領擊殺戰報
         用法: !時空王 [伺服器名稱]
