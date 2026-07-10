@@ -327,8 +327,34 @@ class ExpTracker(commands.Cog):
             if not transfer_records:
                 return
 
-            # Greedy 1-to-1 matching: Sort by exp diff (new_exp - old_exp) ascending
-            transfer_records.sort(key=lambda x: x[0] - x[9])
+            # Fetch all known aliases to prioritize matches based on registry
+            async with self.bot.db.execute('SELECT player_name, original_identity FROM member_registry') as cursor:
+                registry_rows = await cursor.fetchall()
+
+            alias_map = {}
+            for row in registry_rows:
+                name = row[0]
+                identities = [i.strip() for i in row[1].split(',')] if row[1] else []
+                alias_map[name] = set(identities)
+
+            def is_known_alias(new_name, old_name):
+                if old_name in alias_map.get(new_name, set()):
+                    return True
+                if new_name in alias_map.get(old_name, set()):
+                    return True
+                return False
+
+            # Greedy 1-to-1 matching: Sort by multiple priorities
+            # Priority 1: Exact Name Match
+            # Priority 2: Known Alias Match
+            # Priority 3: Exact Level Match
+            # Priority 4: EXP diff (new_exp - old_exp) ascending
+            transfer_records.sort(key=lambda x: (
+                0 if x[1] == x[5] else 1,
+                0 if is_known_alias(x[1], x[5]) else 1,
+                0 if x[3] == x[7] else 1,
+                x[0] - x[9]
+            ))
 
             matched_old = set()
             matched_new = set()
