@@ -82,12 +82,18 @@ class PlayerSearch(commands.Cog):
             return [row[0] for row in await cursor.fetchall()]
 
     async def _find_seamless_candidates(self, profile, exp_margin, window_days=30, limit=8):
+        """無縫接軌候選。
+
+        重要：不可用 WHERE exp BETWEEN … GROUP BY 直接算 MIN/MAX(exp)/時間。
+        那樣會變成「經驗窗內切片」，把持續練等的路人誤判成轉服/前身。
+        正確做法：先用經驗窗粗篩 (name, server)，再對完整履歷聚合後過濾。
+        """
         t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub = profile
         unknown_cls = self._is_unknown_class(t_cls)
         candidates = []
 
-        class_filter = "" if unknown_cls else "AND class_name = ?"
-        base_params_class = [] if unknown_cls else [t_cls]
+        cls_filter = "" if unknown_cls else "AND cls = ?"
+        cls_params = [] if unknown_cls else [t_cls]
 
         def _gap_hours(anchor_str, point_str):
             try:
@@ -125,48 +131,82 @@ class PlayerSearch(commands.Cog):
                 return "high"
             return "medium"
 
+        def _score(exp_diff, gap_hours, c_cls, c_sub, c_lvl, same_server, forward=True):
+            score = exp_diff + gap_hours * 1e8
+            if not self._is_unknown_class(t_cls) and c_cls == t_cls:
+                score -= 5e11
+            if c_sub == t_sub:
+                score -= 1e11
+            elif (
+                c_sub is not None
+                and t_sub is not None
+                and abs(c_sub - t_sub) <= 1
+            ):
+                score -= 5e10
+            if forward:
+                if c_lvl == t_lvl:
+                    score -= 5e10
+                if same_server:
+                    score -= 2e10
+            else:
+                if c_lvl == t_lvl or c_lvl == t_lvl - 1:
+                    score -= 5e10
+            if exp_diff <= 1e8:
+                score -= 1e12
+            return score
+
+        # 完整履歷聚合：hit 只負責粗篩，prof 才是真實 first/last/min/max
         sql_fwd = f'''
-            SELECT player_name, server_name,
-                   MAX(level) AS lvl, MAX(class_name) AS cls,
-                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
-                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
-                   MAX(subjugation_grade) AS sub_grade
-            FROM exp_history
-            WHERE NOT (player_name = ? AND server_name = ?)
-              {class_filter}
-              AND exp BETWEEN ? AND ?
-            GROUP BY player_name, server_name
-            HAVING first_seen >= datetime(?, '-1 days')
-               AND first_seen <= datetime(?, '+{int(window_days)} days')
-               AND min_exp >= ? AND min_exp <= ?
-               AND lvl >= ?
-               AND (sub_grade >= ? OR sub_grade IS NULL OR ? IS NULL)
+            WITH hit AS (
+                SELECT DISTINCT player_name, server_name
+                FROM exp_history
+                WHERE NOT (player_name = ? AND server_name = ?)
+                  AND exp BETWEEN ? AND ?
+            ),
+            prof AS (
+                SELECT e.player_name, e.server_name,
+                       MAX(e.level) AS lvl,
+                       MIN(e.record_time) AS first_seen,
+                       MAX(e.record_time) AS last_seen,
+                       MIN(e.exp) AS min_exp,
+                       MAX(e.exp) AS max_exp,
+                       MAX(e.subjugation_grade) AS sub_grade,
+                       (SELECT e2.class_name FROM exp_history e2
+                        WHERE e2.player_name = e.player_name
+                          AND e2.server_name = e.server_name
+                        ORDER BY e2.record_time DESC LIMIT 1) AS cls
+                FROM exp_history e
+                INNER JOIN hit
+                  ON hit.player_name = e.player_name
+                 AND hit.server_name = e.server_name
+                GROUP BY e.player_name, e.server_name
+            )
+            SELECT player_name, server_name, lvl, cls,
+                   first_seen, last_seen, min_exp, max_exp, sub_grade
+            FROM prof
+            WHERE min_exp >= ? AND min_exp <= ?
+              AND first_seen >= datetime(?, '-1 days')
+              AND first_seen <= datetime(?, '+{int(window_days)} days')
+              AND lvl >= ?
+              AND (sub_grade >= ? OR sub_grade IS NULL OR ? IS NULL)
+              {cls_filter}
             ORDER BY (min_exp - ?) ASC
             LIMIT 40
         '''
         params_fwd = [
-            t_name, t_server, *base_params_class,
+            t_name, t_server, t_max_exp, t_max_exp + exp_margin,
             t_max_exp, t_max_exp + exp_margin,
-            t_last, t_last, t_max_exp, t_max_exp + exp_margin,
-            t_lvl, t_sub, t_sub, t_max_exp,
+            t_last, t_last, t_lvl, t_sub, t_sub,
+            *cls_params, t_max_exp,
         ]
         async with self.bot.db.execute(sql_fwd, tuple(params_fwd)) as cursor:
             for row in await cursor.fetchall():
                 c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
                 exp_diff = c_min - t_max_exp
+                if exp_diff < 0:
+                    continue
                 same_server = c_server == t_server
                 gap_hours = _gap_hours(t_last, c_first)
-                score = exp_diff + gap_hours * 1e8
-                if not self._is_unknown_class(t_cls) and c_cls == t_cls:
-                    score -= 5e11
-                if c_sub == t_sub:
-                    score -= 1e11
-                if c_lvl == t_lvl:
-                    score -= 5e10
-                if same_server:
-                    score -= 2e10
-                if exp_diff <= 1e8:
-                    score -= 1e12
                 label = "✏️ 疑似同服改名" if same_server else "✈️ 疑似轉服/改名後"
                 candidates.append({
                     "direction": "forward",
@@ -174,58 +214,81 @@ class PlayerSearch(commands.Cog):
                     "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
                     "match_type": label,
                     "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
-                    "score": score,
+                    "exp_diff": exp_diff,
+                    "score": _score(
+                        exp_diff, gap_hours, c_cls, c_sub, c_lvl, same_server, forward=True
+                    ),
                     "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
                 })
 
+        # 前身：允許 max_exp 略高於 t_min（榜單取樣誤差），用絕對差 <= margin
+        back_lo = max(0, t_min_exp - exp_margin)
+        back_hi = t_min_exp + exp_margin
         sql_back = f'''
-            SELECT player_name, server_name,
-                   MAX(level) AS lvl, MAX(class_name) AS cls,
-                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
-                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
-                   MAX(subjugation_grade) AS sub_grade
-            FROM exp_history
-            WHERE NOT (player_name = ? AND server_name = ?)
-              {class_filter}
-              AND exp BETWEEN ? AND ?
-            GROUP BY player_name, server_name
-            HAVING last_seen >= datetime(?, '-{int(window_days)} days')
-               AND last_seen <= datetime(?, '+1 days')
-               AND max_exp <= ? AND max_exp >= ?
-               AND lvl <= ?
-               AND (sub_grade <= ? OR sub_grade IS NULL OR ? IS NULL)
-            ORDER BY (? - max_exp) ASC
+            WITH hit AS (
+                SELECT DISTINCT player_name, server_name
+                FROM exp_history
+                WHERE NOT (player_name = ? AND server_name = ?)
+                  AND exp BETWEEN ? AND ?
+            ),
+            prof AS (
+                SELECT e.player_name, e.server_name,
+                       MAX(e.level) AS lvl,
+                       MIN(e.record_time) AS first_seen,
+                       MAX(e.record_time) AS last_seen,
+                       MIN(e.exp) AS min_exp,
+                       MAX(e.exp) AS max_exp,
+                       MAX(e.subjugation_grade) AS sub_grade,
+                       (SELECT e2.class_name FROM exp_history e2
+                        WHERE e2.player_name = e.player_name
+                          AND e2.server_name = e.server_name
+                        ORDER BY e2.record_time DESC LIMIT 1) AS cls
+                FROM exp_history e
+                INNER JOIN hit
+                  ON hit.player_name = e.player_name
+                 AND hit.server_name = e.server_name
+                GROUP BY e.player_name, e.server_name
+            )
+            SELECT player_name, server_name, lvl, cls,
+                   first_seen, last_seen, min_exp, max_exp, sub_grade
+            FROM prof
+            WHERE ABS(max_exp - ?) <= ?
+              AND last_seen >= datetime(?, '-{int(window_days)} days')
+              AND last_seen <= datetime(?, '+1 days')
+              AND lvl <= ?
+              AND (sub_grade <= ? OR sub_grade IS NULL OR ? IS NULL)
+              {cls_filter}
+            ORDER BY ABS(max_exp - ?) ASC
             LIMIT 40
         '''
         params_back = [
-            t_name, t_server, *base_params_class,
-            max(0, t_min_exp - exp_margin), t_min_exp,
-            t_first, t_first, t_min_exp, max(0, t_min_exp - exp_margin),
-            t_lvl, t_sub, t_sub, t_min_exp,
+            t_name, t_server, back_lo, back_hi,
+            t_min_exp, exp_margin,
+            t_first, t_first, t_lvl, t_sub, t_sub,
+            *cls_params, t_min_exp,
         ]
         async with self.bot.db.execute(sql_back, tuple(params_back)) as cursor:
             for row in await cursor.fetchall():
                 c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
-                exp_diff = t_min_exp - c_max
+                raw_diff = t_min_exp - c_max
+                exp_diff = abs(raw_diff)
                 same_server = c_server == t_server
                 gap_hours = _gap_hours(t_first, c_last)
-                score = exp_diff + gap_hours * 1e8
-                if not self._is_unknown_class(t_cls) and c_cls == t_cls:
-                    score -= 5e11
-                if c_sub == t_sub:
-                    score -= 1e11
-                if c_lvl == t_lvl or c_lvl == t_lvl - 1:
-                    score -= 5e10
-                if exp_diff <= 1e8:
-                    score -= 1e12
+                if raw_diff >= 0:
+                    diff_text = f"空窗偷練 +{raw_diff/100000000:,.0f} 億"
+                else:
+                    diff_text = f"特徵接近 (回差 {exp_diff/100000000:,.0f} 億)"
                 label = "✏️ 疑似同服改名前身" if same_server else "🔍 疑似前身"
                 candidates.append({
                     "direction": "backward",
                     "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
                     "first": c_first, "last": c_last, "exp_val": c_max, "sub_grade": c_sub,
                     "match_type": label,
-                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
-                    "score": score,
+                    "diff_text": diff_text,
+                    "exp_diff": exp_diff,
+                    "score": _score(
+                        exp_diff, gap_hours, c_cls, c_sub, c_lvl, same_server, forward=False
+                    ),
                     "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
                 })
 
@@ -233,18 +296,36 @@ class PlayerSearch(commands.Cog):
 
         near_margin = 1e8
         sql_near = '''
-            SELECT player_name, server_name,
-                   MAX(level) AS lvl, MAX(class_name) AS cls,
-                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
-                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
-                   MAX(subjugation_grade) AS sub_grade
-            FROM exp_history
-            WHERE NOT (player_name = ? AND server_name = ?)
-              AND exp BETWEEN ? AND ?
-            GROUP BY player_name, server_name
-            HAVING first_seen >= datetime(?, '-1 days')
-               AND first_seen <= datetime(?, '+7 days')
-               AND min_exp >= ? AND min_exp <= ?
+            WITH hit AS (
+                SELECT DISTINCT player_name, server_name
+                FROM exp_history
+                WHERE NOT (player_name = ? AND server_name = ?)
+                  AND exp BETWEEN ? AND ?
+            ),
+            prof AS (
+                SELECT e.player_name, e.server_name,
+                       MAX(e.level) AS lvl,
+                       MIN(e.record_time) AS first_seen,
+                       MAX(e.record_time) AS last_seen,
+                       MIN(e.exp) AS min_exp,
+                       MAX(e.exp) AS max_exp,
+                       MAX(e.subjugation_grade) AS sub_grade,
+                       (SELECT e2.class_name FROM exp_history e2
+                        WHERE e2.player_name = e.player_name
+                          AND e2.server_name = e.server_name
+                        ORDER BY e2.record_time DESC LIMIT 1) AS cls
+                FROM exp_history e
+                INNER JOIN hit
+                  ON hit.player_name = e.player_name
+                 AND hit.server_name = e.server_name
+                GROUP BY e.player_name, e.server_name
+            )
+            SELECT player_name, server_name, lvl, cls,
+                   first_seen, last_seen, min_exp, max_exp, sub_grade
+            FROM prof
+            WHERE min_exp >= ? AND min_exp <= ?
+              AND first_seen >= datetime(?, '-1 days')
+              AND first_seen <= datetime(?, '+7 days')
             ORDER BY (min_exp - ?) ASC
             LIMIT 15
         '''
@@ -252,7 +333,8 @@ class PlayerSearch(commands.Cog):
             sql_near,
             (
                 t_name, t_server, t_max_exp, t_max_exp + near_margin,
-                t_last, t_last, t_max_exp, t_max_exp + near_margin, t_max_exp,
+                t_max_exp, t_max_exp + near_margin,
+                t_last, t_last, t_max_exp,
             ),
         ) as cursor:
             existing = {(c["name"], c["server"]) for c in candidates}
@@ -261,6 +343,8 @@ class PlayerSearch(commands.Cog):
                 if (c_name, c_server) in existing:
                     continue
                 exp_diff = c_min - t_max_exp
+                if exp_diff < 0:
+                    continue
                 gap_hours = _gap_hours(t_last, c_first)
                 same_server = c_server == t_server
                 if _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server) != "high":
@@ -271,6 +355,7 @@ class PlayerSearch(commands.Cog):
                     "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
                     "match_type": "✈️ 疑似轉服/改名後",
                     "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
+                    "exp_diff": exp_diff,
                     "score": exp_diff + gap_hours * 1e8 - 1e12,
                     "confidence": "high",
                 })
@@ -497,24 +582,62 @@ class PlayerSearch(commands.Cog):
             target_last_exp = max(p[6] for p in target_profiles)
 
             if not has_linked:
+                # 每方向最多 2 名；同方向若經驗差遠大於最佳則淘汰（避免同窗路人）
                 soft_unique = []
                 soft_seen = set(seen)
-                for cand in sorted(soft_candidates, key=lambda x: x["score"]):
-                    key = (cand["name"], cand["server"])
-                    if key in soft_seen:
-                        continue
-                    soft_seen.add(key)
-                    soft_unique.append(cand)
-                    if len(soft_unique) >= 5:
-                        break
+                for direction in ("forward", "backward"):
+                    dir_cands = sorted(
+                        (c for c in soft_candidates if c.get("direction") == direction),
+                        key=lambda x: x["score"],
+                    )
+                    picked = []
+                    for cand in dir_cands:
+                        key = (cand["name"], cand["server"])
+                        if key in soft_seen:
+                            continue
+                        if picked:
+                            best_diff = picked[0].get("exp_diff", 0)
+                            cand_diff = cand.get("exp_diff", best_diff)
+                            if cand_diff > best_diff + 2e10:  # 最佳 +200 億以外淘汰
+                                continue
+                        soft_seen.add(key)
+                        picked.append(cand)
+                        if len(picked) >= 2:
+                            break
+                    soft_unique.extend(picked)
+                soft_unique.sort(key=lambda x: x["score"])
 
                 if soft_unique and only_self:
                     desc = (
-                        f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」"
-                        f"（最後 {target_last_exp/1000000000000:.2f} 兆）的**可疑候選**：\n\n```yaml\n"
+                        f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」的**可疑候選**：\n\n"
+                        f"```yaml\n"
                     )
                     embeds = []
-                    for idx, p in enumerate(soft_unique, 1):
+                    idx = 1
+                    # 先貼查詢目標本人資料
+                    for p in unique_entries:
+                        exp_zhao = p["exp_val"] / 1_000_000_000_000
+                        entry = (
+                            f"{idx}. {p['name']} [{p['server']}]\n"
+                            f"   ▶ {p['match_type']}\n"
+                            f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                            f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                            f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
+                        )
+                        idx += 1
+                        if len(desc) + len(entry) > 3800:
+                            desc += "```"
+                            embeds.append(
+                                discord.Embed(
+                                    title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                                    description=desc,
+                                    color=0xf39c12,
+                                )
+                            )
+                            desc = "```yaml\n" + entry
+                        else:
+                            desc += entry
+                    for p in soft_unique:
                         exp_zhao = p["exp_val"] / 1_000_000_000_000
                         entry = (
                             f"{idx}. {p['name']} [{p['server']}]\n"
@@ -523,6 +646,7 @@ class PlayerSearch(commands.Cog):
                             f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
                             f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
                         )
+                        idx += 1
                         if len(desc) + len(entry) > 3800:
                             desc += "```"
                             embeds.append(
