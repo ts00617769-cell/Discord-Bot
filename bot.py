@@ -158,21 +158,26 @@ class PrasiaBot(commands.Bot):
                 )
 
             cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
-            for filename in os.listdir(cogs_dir):
+            cog_files = sorted(
+                f for f in os.listdir(cogs_dir)
                 if (
-                    filename.endswith(".py")
-                    and not filename.startswith("__")
-                    and filename not in ("error_handler.py", "ranking_api.py")
-                ):
-                    ext_name = f"cogs.{filename[:-3]}"
-                    if ext_name in self.extensions:
-                        logger.warning(f"⚠️ 模組 {filename} 已掛載，略過重複載入")
-                        continue
-                    try:
-                        await self.load_extension(ext_name)
-                        logger.info(f"✅ 模組 {filename} 已成功掛載！")
-                    except Exception as e:
-                        logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
+                    f.endswith(".py")
+                    and not f.startswith("__")
+                    and f not in ("error_handler.py", "ranking_api.py")
+                )
+            )
+            for filename in cog_files:
+                ext_name = f"cogs.{filename[:-3]}"
+                if ext_name in self.extensions:
+                    logger.warning(f"⚠️ 模組 {filename} 已掛載，略過重複載入")
+                    continue
+                try:
+                    logger.info(f"⏳ 正在掛載模組 {filename}...")
+                    await self.load_extension(ext_name)
+                    logger.info(f"✅ 模組 {filename} 已成功掛載！")
+                except Exception as e:
+                    logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
+            logger.info(f"✅ setup_hook 完成，已掛載 {len(self.extensions)} 個模組")
         except Exception as e:
             logger.error(f"❌ 初始化失敗: {e}", exc_info=True)
             raise

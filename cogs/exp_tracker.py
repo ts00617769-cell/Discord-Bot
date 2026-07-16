@@ -75,26 +75,7 @@ class ExpTracker(commands.Cog):
                     "ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0"
                 )
 
-        await self.bot.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)"
-        )
-
-        # 去重後建立唯一索引，避免同一快照重複寫入
-        try:
-            await self.bot.db.execute('''
-                DELETE FROM exp_history
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) FROM exp_history
-                    GROUP BY record_time, server_name, player_name
-                )
-            ''')
-            await self.bot.db.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_history_unique
-                ON exp_history(record_time, server_name, player_name)
-            ''')
-        except sqlite3.DatabaseError as e:
-            logger.error(f"建立 exp_history 唯一索引失敗: {e}")
-
+        # 表結構同步建好即可；大型索引／去重改背景執行，避免卡住 on_ready。
         await self.bot.db.execute('''
             CREATE TABLE IF NOT EXISTS transfer_alerts_log (
                 old_name TEXT,
@@ -182,6 +163,32 @@ class ExpTracker(commands.Cog):
         except (asyncio.TimeoutError, OSError) as e:
             logger.warning(f"啟動伺服器探活略過: {e}")
 
+    async def _ensure_unique_exp_index(self):
+        """去重並建立唯一索引；僅在索引尚未存在時執行（可能很久）。"""
+        async with self.bot.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_exp_history_unique'"
+        ) as cursor:
+            if await cursor.fetchone():
+                return
+
+        logger.info("⏳ 背景去重 exp_history 並建立唯一索引（首次可能較久）...")
+        try:
+            await self.bot.db.execute('''
+                DELETE FROM exp_history
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM exp_history
+                    GROUP BY record_time, server_name, player_name
+                )
+            ''')
+            await self.bot.db.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_history_unique
+                ON exp_history(record_time, server_name, player_name)
+            ''')
+            await self.bot.db.commit()
+            logger.info("✅ exp_history 唯一索引建立完成")
+        except sqlite3.DatabaseError as e:
+            logger.error(f"❌ 建立 exp_history 唯一索引失敗: {e}")
+
     async def _ensure_search_indexes(self):
         try:
             for _ in range(120):
@@ -194,7 +201,12 @@ class ExpTracker(commands.Cog):
             if self.bot.is_closed():
                 return
 
+            await self._ensure_unique_exp_index()
+            if self.bot.is_closed():
+                return
+
             indexes = [
+                ("idx_time_server", "CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)"),
                 ("idx_player_server", "CREATE INDEX IF NOT EXISTS idx_player_server ON exp_history(player_name, server_name)"),
                 ("idx_exp", "CREATE INDEX IF NOT EXISTS idx_exp ON exp_history(exp)"),
                 ("idx_class_exp_time", "CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)"),
