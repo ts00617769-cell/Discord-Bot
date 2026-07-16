@@ -1,0 +1,760 @@
+"""天眼尋人 / 轉服掃描指令（自 exp_tracker 拆出）。"""
+import asyncio
+import datetime
+import logging
+import sqlite3
+import traceback
+
+import discord
+from discord.ext import commands
+
+from .error_handler import require_allowed_channel, parse_env_channel_ids
+
+logger = logging.getLogger(__name__)
+
+
+class PlayerSearch(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @property
+    def TRANSFER_ALERT_CHANNEL_IDS(self):
+        return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
+
+    def _is_unknown_class(self, cls_name):
+        return cls_name in (None, "", "None", "未知")
+
+    async def _fetch_name_profiles(self, player_name):
+        sql = '''
+            SELECT e.player_name, e.server_name,
+                   MAX(e.level), MIN(e.record_time), MAX(e.record_time),
+                   MIN(e.exp), MAX(e.exp),
+                   (SELECT e2.class_name FROM exp_history e2
+                    WHERE e2.player_name = e.player_name AND e2.server_name = e.server_name
+                    ORDER BY e2.record_time DESC LIMIT 1) AS class_name,
+                   MAX(e.subjugation_grade)
+            FROM exp_history e
+            WHERE e.player_name = ?
+            GROUP BY e.player_name, e.server_name
+        '''
+        async with self.bot.db.execute(sql, (player_name,)) as cursor:
+            return await cursor.fetchall()
+
+    async def _fetch_single_profile(self, player_name, server_name):
+        sql = '''
+            SELECT e.player_name, e.server_name,
+                   MAX(e.level), MIN(e.record_time), MAX(e.record_time),
+                   MIN(e.exp), MAX(e.exp),
+                   (SELECT e2.class_name FROM exp_history e2
+                    WHERE e2.player_name = e.player_name AND e2.server_name = e.server_name
+                    ORDER BY e2.record_time DESC LIMIT 1) AS class_name,
+                   MAX(e.subjugation_grade)
+            FROM exp_history e
+            WHERE e.player_name = ? AND e.server_name = ?
+            GROUP BY e.player_name, e.server_name
+        '''
+        async with self.bot.db.execute(sql, (player_name, server_name)) as cursor:
+            return await cursor.fetchone()
+
+    async def _get_related_names(self, target_name):
+        names = {target_name}
+        async with self.bot.db.execute(
+            "SELECT player_name, original_identity FROM member_registry"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for player_name, identity in rows:
+            aliases = [x.strip() for x in (identity or "").split(",") if x.strip()]
+            group = {player_name, *aliases}
+            if target_name in group:
+                names.update(group)
+        return names
+
+    async def _recent_exp_anchors(self, player_name, server_name, limit=8):
+        async with self.bot.db.execute(
+            '''
+            SELECT DISTINCT exp FROM exp_history
+            WHERE player_name = ? AND server_name = ?
+            ORDER BY record_time DESC
+            LIMIT ?
+            ''',
+            (player_name, server_name, limit),
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+    async def _find_seamless_candidates(self, profile, exp_margin, window_days=30, limit=8):
+        t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub = profile
+        unknown_cls = self._is_unknown_class(t_cls)
+        candidates = []
+
+        class_filter = "" if unknown_cls else "AND class_name = ?"
+        base_params_class = [] if unknown_cls else [t_cls]
+
+        def _gap_hours(anchor_str, point_str):
+            try:
+                fmt = "%Y-%m-%d %H:%M:%S"
+                return abs(
+                    (
+                        datetime.datetime.strptime(point_str, fmt)
+                        - datetime.datetime.strptime(anchor_str, fmt)
+                    ).total_seconds()
+                ) / 3600
+            except (TypeError, ValueError):
+                return 9999.0
+
+        def _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server):
+            sub_ok = c_sub is None or t_sub is None or c_sub == t_sub
+            if exp_diff <= 1e8 and gap_hours <= 72 and sub_ok:
+                return "high"
+            if same_server:
+                if (
+                    not unknown_cls
+                    and c_cls == t_cls
+                    and exp_diff < 1e9
+                    and gap_hours <= 24
+                    and sub_ok
+                ):
+                    return "high"
+                return "medium"
+            if (
+                not unknown_cls
+                and c_cls == t_cls
+                and exp_diff < 5e9
+                and gap_hours <= 48
+                and sub_ok
+            ):
+                return "high"
+            return "medium"
+
+        sql_fwd = f'''
+            SELECT player_name, server_name,
+                   MAX(level) AS lvl, MAX(class_name) AS cls,
+                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
+                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
+                   MAX(subjugation_grade) AS sub_grade
+            FROM exp_history
+            WHERE NOT (player_name = ? AND server_name = ?)
+              {class_filter}
+              AND exp BETWEEN ? AND ?
+            GROUP BY player_name, server_name
+            HAVING first_seen >= datetime(?, '-1 days')
+               AND first_seen <= datetime(?, '+{int(window_days)} days')
+               AND min_exp >= ? AND min_exp <= ?
+               AND lvl >= ?
+               AND (sub_grade >= ? OR sub_grade IS NULL OR ? IS NULL)
+            ORDER BY (min_exp - ?) ASC
+            LIMIT 40
+        '''
+        params_fwd = [
+            t_name, t_server, *base_params_class,
+            t_max_exp, t_max_exp + exp_margin,
+            t_last, t_last, t_max_exp, t_max_exp + exp_margin,
+            t_lvl, t_sub, t_sub, t_max_exp,
+        ]
+        async with self.bot.db.execute(sql_fwd, tuple(params_fwd)) as cursor:
+            for row in await cursor.fetchall():
+                c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
+                exp_diff = c_min - t_max_exp
+                same_server = c_server == t_server
+                gap_hours = _gap_hours(t_last, c_first)
+                score = exp_diff + gap_hours * 1e8
+                if not self._is_unknown_class(t_cls) and c_cls == t_cls:
+                    score -= 5e11
+                if c_sub == t_sub:
+                    score -= 1e11
+                if c_lvl == t_lvl:
+                    score -= 5e10
+                if same_server:
+                    score -= 2e10
+                if exp_diff <= 1e8:
+                    score -= 1e12
+                label = "✏️ 疑似同服改名" if same_server else "✈️ 疑似轉服/改名後"
+                candidates.append({
+                    "direction": "forward",
+                    "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
+                    "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
+                    "match_type": label,
+                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
+                    "score": score,
+                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
+                })
+
+        sql_back = f'''
+            SELECT player_name, server_name,
+                   MAX(level) AS lvl, MAX(class_name) AS cls,
+                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
+                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
+                   MAX(subjugation_grade) AS sub_grade
+            FROM exp_history
+            WHERE NOT (player_name = ? AND server_name = ?)
+              {class_filter}
+              AND exp BETWEEN ? AND ?
+            GROUP BY player_name, server_name
+            HAVING last_seen >= datetime(?, '-{int(window_days)} days')
+               AND last_seen <= datetime(?, '+1 days')
+               AND max_exp <= ? AND max_exp >= ?
+               AND lvl <= ?
+               AND (sub_grade <= ? OR sub_grade IS NULL OR ? IS NULL)
+            ORDER BY (? - max_exp) ASC
+            LIMIT 40
+        '''
+        params_back = [
+            t_name, t_server, *base_params_class,
+            max(0, t_min_exp - exp_margin), t_min_exp,
+            t_first, t_first, t_min_exp, max(0, t_min_exp - exp_margin),
+            t_lvl, t_sub, t_sub, t_min_exp,
+        ]
+        async with self.bot.db.execute(sql_back, tuple(params_back)) as cursor:
+            for row in await cursor.fetchall():
+                c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
+                exp_diff = t_min_exp - c_max
+                same_server = c_server == t_server
+                gap_hours = _gap_hours(t_first, c_last)
+                score = exp_diff + gap_hours * 1e8
+                if not self._is_unknown_class(t_cls) and c_cls == t_cls:
+                    score -= 5e11
+                if c_sub == t_sub:
+                    score -= 1e11
+                if c_lvl == t_lvl or c_lvl == t_lvl - 1:
+                    score -= 5e10
+                if exp_diff <= 1e8:
+                    score -= 1e12
+                label = "✏️ 疑似同服改名前身" if same_server else "🔍 疑似前身"
+                candidates.append({
+                    "direction": "backward",
+                    "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
+                    "first": c_first, "last": c_last, "exp_val": c_max, "sub_grade": c_sub,
+                    "match_type": label,
+                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
+                    "score": score,
+                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
+                })
+
+        candidates.sort(key=lambda x: x["score"])
+
+        near_margin = 1e8
+        sql_near = '''
+            SELECT player_name, server_name,
+                   MAX(level) AS lvl, MAX(class_name) AS cls,
+                   MIN(record_time) AS first_seen, MAX(record_time) AS last_seen,
+                   MIN(exp) AS min_exp, MAX(exp) AS max_exp,
+                   MAX(subjugation_grade) AS sub_grade
+            FROM exp_history
+            WHERE NOT (player_name = ? AND server_name = ?)
+              AND exp BETWEEN ? AND ?
+            GROUP BY player_name, server_name
+            HAVING first_seen >= datetime(?, '-1 days')
+               AND first_seen <= datetime(?, '+7 days')
+               AND min_exp >= ? AND min_exp <= ?
+            ORDER BY (min_exp - ?) ASC
+            LIMIT 15
+        '''
+        async with self.bot.db.execute(
+            sql_near,
+            (
+                t_name, t_server, t_max_exp, t_max_exp + near_margin,
+                t_last, t_last, t_max_exp, t_max_exp + near_margin, t_max_exp,
+            ),
+        ) as cursor:
+            existing = {(c["name"], c["server"]) for c in candidates}
+            for row in await cursor.fetchall():
+                c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
+                if (c_name, c_server) in existing:
+                    continue
+                exp_diff = c_min - t_max_exp
+                gap_hours = _gap_hours(t_last, c_first)
+                same_server = c_server == t_server
+                if _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server) != "high":
+                    continue
+                candidates.append({
+                    "direction": "forward",
+                    "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
+                    "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
+                    "match_type": "✈️ 疑似轉服/改名後",
+                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
+                    "score": exp_diff + gap_hours * 1e8 - 1e12,
+                    "confidence": "high",
+                })
+
+        candidates.sort(key=lambda x: x["score"])
+        forward = [c for c in candidates if c["direction"] == "forward"][:limit]
+        backward = [c for c in candidates if c["direction"] == "backward"][:limit]
+        return forward + backward
+
+    @commands.command(
+        name="尋人回報",
+        help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 艾雲o 或 !尋人回報 驕傲o 清除",
+    )
+    async def report_identity(self, ctx, *args):
+        if not await require_allowed_channel(ctx):
+            return
+        args_list = [arg for arg in args if arg.strip()]
+        if len(args_list) < 2:
+            return await ctx.send(
+                "❌ 參數不足！用法範例：`!尋人回報 驕傲o 某某某 艾雲o` 或 `!尋人回報 驕傲o 清除`"
+            )
+
+        current_name = args_list[0]
+        original_names = args_list[1:]
+
+        if len(original_names) == 1 and original_names[0] == "清除":
+            try:
+                await self.bot.db.execute(
+                    "DELETE FROM member_registry WHERE player_name = ?", (current_name,)
+                )
+                await self.bot.db.commit()
+                await ctx.send(f"✅ 已成功清除【{current_name}】的身分標記。")
+            except sqlite3.DatabaseError as e:
+                logger.error(f"Error clearing member info for '{current_name}': {e}")
+                await ctx.send("❌ 清除失敗（資料庫錯誤）")
+            return
+
+        try:
+            async with self.bot.db.execute(
+                "SELECT original_identity FROM member_registry WHERE player_name = ?",
+                (current_name,),
+            ) as cursor:
+                result = await cursor.fetchone()
+
+            existing_identities = []
+            if result and result[0]:
+                existing_identities = [x.strip() for x in result[0].split(",")]
+
+            added_names = []
+            for name in original_names:
+                if name not in existing_identities:
+                    existing_identities.append(name)
+                    added_names.append(name)
+
+            if not added_names:
+                return await ctx.send(
+                    f"⚠️ 你輸入的名字都已經標記過了。目前的標記為：({result[0]})"
+                )
+
+            new_identity_str = ", ".join(existing_identities)
+            await self.bot.db.execute(
+                '''
+                INSERT INTO member_registry (player_name, original_identity)
+                VALUES (?, ?)
+                ON CONFLICT(player_name) DO UPDATE SET original_identity=excluded.original_identity
+                ''',
+                (current_name, new_identity_str),
+            )
+            await self.bot.db.commit()
+            await ctx.send(
+                f"✅ 已成功為【{current_name}】新增身分標記！目前累計的身分：【{new_identity_str}】"
+            )
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Error updating member info for '{current_name}': {e}")
+            await ctx.send("❌ 標記失敗（資料庫錯誤）")
+
+    @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o")
+    @commands.cooldown(1, 20, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.default, wait=False)
+    async def track_player(self, ctx, target_name: str):
+        if not await require_allowed_channel(ctx):
+            return
+        processing_msg = await ctx.send(
+            "🔍 啟動天眼雙引擎，正在進行【絕對碰撞】與【無縫接軌】掃描..."
+        )
+
+        try:
+            related_names = await self._get_related_names(target_name)
+            target_profiles = []
+            for name in related_names:
+                target_profiles.extend(await self._fetch_name_profiles(name))
+
+            if not target_profiles:
+                return await processing_msg.edit(
+                    content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。"
+                )
+
+            EXP_MARGIN = 1.0 * 1000000000000
+            timeline_entries = []
+            soft_candidates = []
+            seen_profiles = set()
+            queue = []
+
+            async def add_to_queue(
+                p_name, p_server, m_type, d_text, e_val, profile=None, confidence="high"
+            ):
+                if (p_name, p_server) in seen_profiles:
+                    return
+                seen_profiles.add((p_name, p_server))
+                if profile is None:
+                    profile = await self._fetch_single_profile(p_name, p_server)
+                if not profile:
+                    return
+                queue.append({
+                    "profile": profile,
+                    "match_type": m_type,
+                    "diff_text": d_text,
+                    "exp_val": e_val,
+                    "confidence": confidence,
+                })
+
+            for tp in target_profiles:
+                label = "🎯 查詢目標" if tp[0] == target_name else "🏷️ 登錄別名"
+                await add_to_queue(tp[0], tp[1], label, "", tp[6], profile=tp)
+
+            bfs_limit = 30
+            hops = 0
+
+            while queue and hops < bfs_limit:
+                current = queue.pop(0)
+                profile = current["profile"]
+                t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = profile
+
+                timeline_entries.append({
+                    "name": t_name, "server": t_server, "lvl": t_lvl, "cls": t_cls,
+                    "first": t_first, "last": t_last,
+                    "match_type": current["match_type"],
+                    "diff_text": current["diff_text"],
+                    "exp_val": current["exp_val"] or t_max_exp,
+                    "sub_grade": t_sub_grade,
+                    "confidence": current.get("confidence", "high"),
+                })
+
+                anchors = await self._recent_exp_anchors(t_name, t_server, limit=8)
+                if t_min_exp not in anchors:
+                    anchors.append(t_min_exp)
+                if t_max_exp not in anchors:
+                    anchors.append(t_max_exp)
+
+                if anchors:
+                    placeholders = ",".join("?" for _ in anchors)
+                    sql_exact = f'''
+                        SELECT exp, player_name, server_name, MAX(level),
+                               (SELECT e2.class_name FROM exp_history e2
+                                WHERE e2.player_name = exp_history.player_name
+                                  AND e2.server_name = exp_history.server_name
+                                ORDER BY e2.record_time DESC LIMIT 1),
+                               MIN(record_time), MAX(record_time), MAX(subjugation_grade)
+                        FROM exp_history
+                        WHERE exp IN ({placeholders})
+                          AND NOT (player_name = ? AND server_name = ?)
+                        GROUP BY exp, player_name, server_name
+                        LIMIT 30
+                    '''
+                    async with self.bot.db.execute(
+                        sql_exact, tuple(anchors + [t_name, t_server])
+                    ) as cursor:
+                        exact_matches = await cursor.fetchall()
+
+                    for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
+                        if t_sub_grade is not None and sub_grade is not None:
+                            if first_seen >= t_last and sub_grade < t_sub_grade:
+                                continue
+                            if last_seen <= t_first and t_sub_grade < sub_grade:
+                                continue
+                        await add_to_queue(
+                            p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp, confidence="high"
+                        )
+
+                seamless = await self._find_seamless_candidates(
+                    profile, EXP_MARGIN, window_days=30, limit=5
+                )
+                for cand in seamless:
+                    soft_candidates.append(cand)
+                    if cand["confidence"] == "high":
+                        await add_to_queue(
+                            cand["name"], cand["server"], cand["match_type"],
+                            cand["diff_text"], cand["exp_val"], confidence="high",
+                        )
+                hops += 1
+
+            unique_entries = []
+            seen = set()
+            for entry in timeline_entries:
+                key = (entry["name"], entry["server"])
+                if key in seen:
+                    continue
+                is_seed = entry["match_type"] in ("🎯 查詢目標", "🏷️ 登錄別名")
+                if not is_seed and entry.get("confidence") != "high":
+                    continue
+                seen.add(key)
+                unique_entries.append(entry)
+            unique_entries.sort(key=lambda x: x["first"])
+
+            has_linked = any(
+                e["match_type"] not in ("🎯 查詢目標", "🏷️ 登錄別名") for e in unique_entries
+            )
+            only_self = len(unique_entries) <= 1 and all(
+                x["name"] == target_name for x in unique_entries
+            )
+            target_last_exp = max(p[6] for p in target_profiles)
+
+            if not has_linked:
+                soft_unique = []
+                soft_seen = set(seen)
+                for cand in sorted(soft_candidates, key=lambda x: x["score"]):
+                    key = (cand["name"], cand["server"])
+                    if key in soft_seen:
+                        continue
+                    soft_seen.add(key)
+                    soft_unique.append(cand)
+                    if len(soft_unique) >= 5:
+                        break
+
+                if soft_unique and only_self:
+                    desc = (
+                        f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」"
+                        f"（最後 {target_last_exp/1000000000000:.2f} 兆）的**可疑候選**：\n\n```yaml\n"
+                    )
+                    embeds = []
+                    for idx, p in enumerate(soft_unique, 1):
+                        exp_zhao = p["exp_val"] / 1_000_000_000_000
+                        entry = (
+                            f"{idx}. {p['name']} [{p['server']}]\n"
+                            f"   ▶ {p['match_type']} ({p['confidence']})\n"
+                            f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                            f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                            f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+                        )
+                        if len(desc) + len(entry) > 3800:
+                            desc += "```"
+                            embeds.append(
+                                discord.Embed(
+                                    title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                                    description=desc,
+                                    color=0xf39c12,
+                                )
+                            )
+                            desc = "```yaml\n" + entry
+                        else:
+                            desc += entry
+                    if desc != "```yaml\n":
+                        desc += "```"
+                        embeds.append(
+                            discord.Embed(
+                                title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                                description=desc,
+                                color=0xf39c12,
+                            )
+                        )
+                    embeds[-1].set_footer(text="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度")
+                    await processing_msg.delete()
+                    for embed in embeds:
+                        await ctx.send(embed=embed)
+                    return
+
+                if only_self:
+                    tip = ""
+                    if any(p[0] == target_name for p in target_profiles):
+                        tip = "\n（若目標仍持續出現在原服榜上，可能尚未轉服/改名。）"
+                    return await processing_msg.edit(
+                        content=(
+                            f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n"
+                            f"雙引擎未找到符合條件的轉服/改名軌跡。{tip}\n"
+                            f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
+                        )
+                    )
+
+            embeds = []
+            desc = f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n```yaml\n"
+            for idx, p in enumerate(unique_entries, 1):
+                exp_zhao = p["exp_val"] / 1_000_000_000_000
+                conf = p.get("confidence", "high")
+                conf_tag = "" if conf == "high" else f" ({conf})"
+                entry_text = f"{idx}. {p['name']} [{p['server']}]\n"
+                entry_text += f"   ▶ {p['match_type']}{conf_tag}\n"
+                entry_text += f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                entry_text += f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                if p["diff_text"]:
+                    entry_text += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+                else:
+                    entry_text += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
+
+                if len(desc) + len(entry_text) > 3800:
+                    desc += "```"
+                    embeds.append(
+                        discord.Embed(
+                            title=f"👁️ 天眼追蹤系統 (V5.1) - {target_name}",
+                            description=desc,
+                            color=0xff0000,
+                        )
+                    )
+                    desc = "```yaml\n" + entry_text
+                else:
+                    desc += entry_text
+
+            if desc != "```yaml\n":
+                desc += "```"
+                embeds.append(
+                    discord.Embed(
+                        title=f"👁️ 天眼追蹤系統 (V5.1) - {target_name}",
+                        description=desc,
+                        color=0xff0000,
+                    )
+                )
+            embeds[-1].set_footer(text="V5.1：主軌僅高信心・絕對碰撞可跨職業・medium 不混入")
+
+            await processing_msg.delete()
+            for embed in embeds:
+                await ctx.send(embed=embed)
+
+        except sqlite3.DatabaseError as e:
+            logger.error(f"DB error tracking '{target_name}': {e}\n{traceback.format_exc()}")
+            try:
+                await processing_msg.edit(content="❌ 天眼系統資料庫錯誤")
+            except discord.NotFound:
+                pass
+        except asyncio.TimeoutError:
+            try:
+                await processing_msg.edit(content="❌ 天眼系統查詢逾時，請重試")
+            except discord.NotFound:
+                pass
+        except KeyError as e:
+            logger.error(f"Missing field in player tracking: {e}")
+            try:
+                await processing_msg.edit(content="❌ 尋人系統資料欄位異常")
+            except discord.NotFound:
+                pass
+
+    @commands.command(
+        name="轉服掃描",
+        aliases=["移民清單", "抓包"],
+        help="全服掃描近期利用轉服空窗期改名或移動的玩家",
+    )
+    @commands.cooldown(1, 30, commands.BucketType.guild)
+    @commands.max_concurrency(1, commands.BucketType.default, wait=False)
+    async def global_transfer_scan(self, ctx):
+        if not await require_allowed_channel(ctx):
+            return
+        processing_msg = await ctx.send("📡 正在進行全資料庫特徵碰撞比對，這可能需要幾秒鐘...")
+
+        try:
+            async with self.bot.db.execute(
+                '''
+                SELECT exp
+                FROM exp_history
+                WHERE exp > 1000000000000
+                GROUP BY exp
+                HAVING COUNT(DISTINCT server_name) > 1
+                ORDER BY MAX(record_time) DESC
+                LIMIT 10
+                '''
+            ) as cursor:
+                shared_exps = await cursor.fetchall()
+
+            if not shared_exps:
+                return await processing_msg.edit(
+                    content="💤 目前資料庫中沒有偵測到任何轉服或改名的活動軌跡。"
+                )
+
+            exp_list = [row[0] for row in shared_exps]
+            placeholders = ",".join("?" for _ in exp_list)
+
+            async with self.bot.db.execute(
+                f'''
+                SELECT exp, player_name, server_name, MIN(record_time), MAX(record_time)
+                FROM exp_history
+                WHERE exp IN ({placeholders})
+                GROUP BY exp, player_name, server_name
+                ORDER BY exp DESC, MIN(record_time) ASC
+                ''',
+                tuple(exp_list),
+            ) as cursor:
+                records = await cursor.fetchall()
+
+            grouped_data = {}
+            for exp, p_name, s_name, first_seen, last_seen in records:
+                grouped_data.setdefault(exp, []).append(
+                    {"name": p_name, "server": s_name, "first": first_seen, "last": last_seen}
+                )
+
+            embeds = []
+            desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊：**\n\n"
+            for exp, players in grouped_data.items():
+                exp_zhao = exp / 1_000_000_000_000
+                desc += f"🔗 **特徵碼：{exp_zhao:.3f} 兆**\n```yaml\n"
+                for idx, p in enumerate(players, 1):
+                    desc += f"{idx}. {p['name']} [{p['server']}]\n"
+                    desc += f"   (觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]})\n"
+                desc += "```\n"
+                if len(desc) > 1500:
+                    embeds.append(
+                        discord.Embed(
+                            title="✈️ 全服轉服與改名掃描報告",
+                            description=desc,
+                            color=0xe67e22,
+                        )
+                    )
+                    desc = ""
+
+            if desc:
+                embeds.append(
+                    discord.Embed(
+                        title="✈️ 全服轉服與改名掃描報告",
+                        description=desc,
+                        color=0xe67e22,
+                    )
+                )
+
+            await processing_msg.delete()
+            for e in embeds:
+                e.set_footer(text="※ 原理：轉服期間經驗值會凍結，利用相同特徵追蹤移動軌跡。")
+                await ctx.send(embed=e)
+
+        except sqlite3.DatabaseError as e:
+            logger.error(f"DB error during transfer scan: {e}")
+            try:
+                await processing_msg.edit(content="❌ 掃描資料庫錯誤")
+            except discord.NotFound:
+                pass
+        except asyncio.TimeoutError:
+            try:
+                await processing_msg.edit(content="❌ 掃描查詢逾時，請重試")
+            except discord.NotFound:
+                pass
+
+    @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
+    async def test_transfer_alert(self, ctx):
+        if not await require_allowed_channel(ctx):
+            return
+        channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
+        if not channel_ids:
+            return await ctx.send(
+                "❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。"
+            )
+
+        channels = []
+        for cid in channel_ids:
+            ch = self.bot.get_channel(cid)
+            if ch:
+                channels.append(ch)
+            else:
+                await ctx.send(f"⚠️ 找不到頻道 ID：`{cid}`。")
+
+        if not channels:
+            return
+
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        embed = discord.Embed(
+            title="【波拉西亞戰記】轉移/旅團變動警報 (測試)",
+            description=(
+                f"時間：{now}\n{'-' * 30}\n"
+                f"✨ [即時轉移辨識] **測試玩家_舊** (測試伺服器_舊) ➔\n"
+                f"**測試玩家_新** (測試伺服器_新)\n"
+                f"[狀態]: 跨服轉移並改名 | [EXP變動]: +999 億 (轉移期間偷練)\n"
+                f"[屬性]: Lv.99 / 測試職業 / 討伐 99\n\n"
+                f"✅ **如果您看到此訊息，表示轉移警報頻道設定與權限皆正常運作中！**"
+            ),
+            color=0xf1c40f,
+        )
+
+        success_count = 0
+        for channel in channels:
+            try:
+                await channel.send(embed=embed)
+                success_count += 1
+            except discord.Forbidden:
+                await ctx.send(f"❌ 機器人沒有權限在頻道 `{channel.id}` 發送訊息。")
+            except discord.HTTPException as e:
+                await ctx.send(f"❌ 在頻道 `{channel.id}` 發送警報時發生錯誤：{e}")
+
+        if success_count > 0:
+            await ctx.send(f"✅ 測試轉移警報已成功發送到 {success_count} 個頻道！")
+
+
+async def setup(bot):
+    await bot.add_cog(PlayerSearch(bot))

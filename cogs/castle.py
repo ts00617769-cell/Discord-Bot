@@ -44,14 +44,14 @@ class CastleTracker(commands.Cog):
             logger.error(f"HTTP client error while fetching territory data: {e}")
         except ValueError as e:
             logger.error(f"JSON parsing error while fetching territory data: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error while fetching territory data: {e}")
+        except (KeyError, TypeError) as e:
+            logger.error(f"Territory data structure error for {server_name}: {e}")
         return []
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.max_concurrency(2, commands.BucketType.default, wait=False)
     async def get_castle_tax(self, ctx, *args):
-        # 🛡️ 頻道限制已移除，現在全頻道可用
-
         count = 15
         args_list = [arg for arg in args if arg.strip()]
         if len(args_list) > 0 and args_list[0].isdigit():
@@ -124,8 +124,20 @@ class CastleTracker(commands.Cog):
             await processing_msg.delete()
             await ctx.send(embed=embed)
 
-        except Exception as e:
-            await processing_msg.edit(content=f"❌ 雷達發生故障：{str(e)}")
+        except asyncio.TimeoutError:
+            await processing_msg.edit(content="❌ 連線逾時：據點掃描花時過久，請重試")
+        except aiohttp.ClientError as e:
+            logger.error(f"Castle tax client error: {e}")
+            await processing_msg.edit(content="❌ 網路連線失敗：無法連接到遊戲伺服器")
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error(f"Castle tax parse error: {e}")
+            await processing_msg.edit(content="❌ 資料解析錯誤：伺服器回傳格式異常")
+        except discord.HTTPException as e:
+            logger.error(f"Castle tax discord error: {e}")
+            try:
+                await processing_msg.edit(content="❌ 訊息發送失敗")
+            except discord.HTTPException:
+                pass
 
 async def setup(bot):
     await bot.add_cog(CastleTracker(bot))

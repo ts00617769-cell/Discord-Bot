@@ -4,14 +4,13 @@ import aiohttp
 import unicodedata
 import logging
 import asyncio
-from .error_handler import parse_env_channel_ids, is_allowed_command_channel
+from . import error_handler
 
 logger = logging.getLogger(__name__)
 
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
 
     # 📏 輔助函數：計算中英文等寬對齊
     def pad_text(self, text, target_width):
@@ -21,11 +20,9 @@ class LeagueTracker(commands.Cog):
 
     # ✨ 這裡加上了參數接收與預設值，解決變數未定義的問題！
     @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.max_concurrency(2, commands.BucketType.default, wait=False)
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
-        
-        if not is_allowed_command_channel(ctx.channel.id, self.allowed_channel_ids):
-            return
-        
         # ✅ 新增參數驗證
         try:
             season_int = int(season)
@@ -153,9 +150,9 @@ class LeagueTracker(commands.Cog):
             await error_handler.handle_api_error(ctx, "資料解析錯誤：伺服器回傳的資料格式異常", str(e))
         except KeyError as e:
             await error_handler.handle_api_error(ctx, "模組發生錯誤：資料欄位異常", str(e))
-        except Exception as e:
+        except discord.HTTPException as e:
             error_handler.log_command_error(ctx, "聯賽", e)
-            await error_handler.handle_api_error(ctx, f"模組發生錯誤：{type(e).__name__}", str(e))
+            await error_handler.handle_api_error(ctx, f"Discord 發送失敗：{type(e).__name__}", str(e))
         finally:
             try:
                 await processing_msg.delete()

@@ -1,11 +1,12 @@
 """
-例外处理和日志工具模块
-用于统一处理异常和日志输出
+例外處理、頻道權限與共用工具。
 """
 import logging
 import os
 import traceback
+
 import discord
+from game_data import SERVER_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,42 @@ def parse_env_channel_id(env_name: str, default: int = 0) -> int:
     return ids[0] if ids else default
 
 
-def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list) -> bool:
-    """allowlist 空白時不限制（尚未設定）；有設定時僅允許列表內頻道。"""
+def get_allowed_command_channels() -> list:
+    """每次從環境變數熱讀白名單（改 .env 後不必重載 cog）。"""
+    return parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
+
+
+def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list = None) -> bool:
+    """fail-closed：未設定白名單時拒絕機密指令；有設定時僅允許列表內頻道。"""
+    if allowed_channel_ids is None:
+        allowed_channel_ids = get_allowed_command_channels()
     if not allowed_channel_ids:
-        return True
+        return False
     return channel_id in allowed_channel_ids
+
+
+async def require_allowed_channel(ctx) -> bool:
+    """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。"""
+    allowed = get_allowed_command_channels()
+    if is_allowed_command_channel(ctx.channel.id, allowed):
+        return True
+    try:
+        if not allowed:
+            await ctx.send(
+                "🔒 此為戰情室機密指令，但尚未設定 `ALLOWED_COMMAND_CHANNELS`。"
+                "請管理員在 `.env` 填入頻道 ID 後重啟機器人。"
+            )
+        else:
+            await ctx.send("🔒 此指令僅限戰情室指定頻道使用。請改到允許的頻道再試。")
+    except discord.HTTPException as e:
+        logger.warning(f"Failed to send channel-deny message: {e}")
+    return False
+
+
+def min_complete_snapshot_servers() -> int:
+    """判定「全服快照已完成」所需的最少伺服器數（與 SERVER_MAP 連動）。"""
+    n = len(SERVER_MAP)
+    return max(2, n - 1)
 
 
 def parse_env_float(env_name: str, default: float) -> float:
@@ -40,43 +72,41 @@ def parse_env_float(env_name: str, default: float) -> float:
         logger.warning(f"Invalid {env_name}={raw!r}, using default {default}")
         return default
 
+
 async def handle_api_error(ctx, error_msg: str, detail: str = ""):
-    """处理 API 调用错误"""
+    """處理 API 呼叫錯誤"""
     try:
-        await ctx.send(f"❌ {error_msg}\n若问题持续，请联系机器人维护者。")
+        await ctx.send(f"❌ {error_msg}\n若問題持續，請聯絡機器人維護者。")
         logger.error(f"API Error: {error_msg} | Detail: {detail}")
-    except Exception as e:
+    except discord.HTTPException as e:
         logger.error(f"Failed to send error message: {e}")
 
+
 async def handle_db_error(ctx, error_msg: str, exception: Exception):
-    """处理数据库错误"""
+    """處理資料庫錯誤"""
     try:
-        await ctx.send(f"❌ 数据库错误: {error_msg}")
-        logger.error(f"DB Error: {error_msg} | Exception: {str(exception)}")
-    except Exception as e:
+        await ctx.send(f"❌ 資料庫錯誤: {error_msg}")
+        logger.error(f"DB Error: {error_msg} | Exception: {exception}")
+    except discord.HTTPException as e:
         logger.error(f"Failed to handle DB error: {e}")
 
+
 def log_command_error(ctx, command_name: str, exception: Exception):
-    """记录命令执行错误"""
+    """記錄指令執行錯誤"""
     logger.error(
         f"Command '{command_name}' failed for user {ctx.author.id}: "
-        f"{type(exception).__name__}: {str(exception)}\n"
+        f"{type(exception).__name__}: {exception}\n"
         f"Traceback:\n{traceback.format_exc()}"
     )
 
+
 async def safe_database_operation(operation_name: str, operation_func, *args, **kwargs):
-    """安全的数据库操作包装器
-    
-    Args:
-        operation_name: 操作名称（用于日志）
-        operation_func: 异步函数
-        *args, **kwargs: 传递给函数的参数
-        
-    Returns:
-        操作结果，失败返回 None
-    """
+    """安全的資料庫操作包裝器；失敗回傳 None。"""
     try:
         return await operation_func(*args, **kwargs)
     except Exception as e:
-        logger.error(f"Database operation '{operation_name}' failed: {type(e).__name__}: {str(e)}")
+        logger.error(
+            f"Database operation '{operation_name}' failed: "
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
         return None

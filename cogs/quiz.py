@@ -7,6 +7,7 @@ import pytz
 import os
 import logging
 import asyncio
+import sqlite3
 from .error_handler import parse_env_channel_id
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,29 @@ active_poll = {
     "data": None,
     "votes": {}
 }
+
+
+def _parse_quiz_schedule():
+    """只解析一次環境變數，供排程與顯示共用。"""
+    tz = pytz.timezone("Asia/Taipei")
+    post_raw = os.getenv("QUIZ_POST_TIME", "12:00")
+    reveal_raw = os.getenv("QUIZ_REVEAL_TIME", "18:00")
+    try:
+        post_h, post_m = map(int, post_raw.split(":"))
+        reveal_h, reveal_m = map(int, reveal_raw.split(":"))
+    except (ValueError, IndexError):
+        logger.warning(
+            f"Invalid quiz time format, using defaults. POST={post_raw!r} REVEAL={reveal_raw!r}"
+        )
+        post_h, post_m, reveal_h, reveal_m = 12, 0, 18, 0
+    return (
+        datetime.time(hour=post_h, minute=post_m, tzinfo=tz),
+        datetime.time(hour=reveal_h, minute=reveal_m, tzinfo=tz),
+        tz,
+    )
+
+
+POST_TIME, REVEAL_TIME, TZ_TAIPEI = _parse_quiz_schedule()
 
 # ================= UI 互動按鈕 =================
 
@@ -73,10 +97,10 @@ class SecretQuizButton(discord.ui.Button):
             await db.commit()
         except asyncio.TimeoutError as e:
             logger.error(f"Database timeout while saving quiz vote for user {user_id}: {e}")
-        except Exception as e:
+        except sqlite3.DatabaseError as e:
             logger.error(f"Failed to save quiz vote to database for user {user_id}: {e}")
 
-        reveal_label = os.getenv("QUIZ_REVEAL_TIME", "18:00")
+        reveal_label = REVEAL_TIME.strftime("%H:%M")
         await interaction.response.send_message(
             f"✅ 投票成功！你選擇了「{self.label}」。結果將於 {reveal_label} 公布。",
             ephemeral=True
@@ -92,58 +116,32 @@ class SecretQuizView(discord.ui.View):
 
 # ================= 測驗模組 (Cog) 核心 =================
 
-
-tz_taipei = pytz.timezone('Asia/Taipei')
-post_time_str = os.getenv("QUIZ_POST_TIME", "12:00")
-reveal_time_str = os.getenv("QUIZ_REVEAL_TIME", "18:00")
-try:
-    post_h, post_m = map(int, post_time_str.split(':'))
-    reveal_h, reveal_m = map(int, reveal_time_str.split(':'))
-except (ValueError, IndexError):
-    post_h, post_m, reveal_h, reveal_m = 12, 0, 18, 0
-
-POST_TIME = datetime.time(hour=post_h, minute=post_m, tzinfo=tz_taipei)
-REVEAL_TIME = datetime.time(hour=reveal_h, minute=reveal_m, tzinfo=tz_taipei)
-
 class QuizSystem(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.quiz_data = [] # 👈 1. 建立一個屬性來存題庫
-        self.load_quiz_data() # 👈 2. 啟動時呼叫下方的讀取函數
-        # ⚠️ 不要在這裡啟動排程，移到 cog_load 等資料庫準備好再啟動
-        
-        # 從環境變數讀取時間設定
-        post_time_str = os.getenv("QUIZ_POST_TIME", "12:00")
-        reveal_time_str = os.getenv("QUIZ_REVEAL_TIME", "18:00")
-        
-        try:
-            post_h, post_m = map(int, post_time_str.split(':'))
-            reveal_h, reveal_m = map(int, reveal_time_str.split(':'))
-        except (ValueError, IndexError):
-            logger.warning(f"Invalid time format, using defaults. POST: {post_time_str}, REVEAL: {reveal_time_str}")
-            post_h, post_m, reveal_h, reveal_m = 12, 0, 18, 0
-        
-        self.tz_taipei = pytz.timezone('Asia/Taipei')
-        self.post_time = datetime.time(hour=post_h, minute=post_m, tzinfo=self.tz_taipei)
-        self.reveal_time = datetime.time(hour=reveal_h, minute=reveal_m, tzinfo=self.tz_taipei)
+        self.quiz_data = []
+        self.load_quiz_data()
+        # 與 @tasks.loop 使用同一組時間，避免 import / __init__ 重複解析不一致
+        self.tz_taipei = TZ_TAIPEI
+        self.post_time = POST_TIME
+        self.reveal_time = REVEAL_TIME
         logger.info(f"Quiz times configured - Post: {self.post_time}, Reveal: {self.reveal_time}")
 
     def load_quiz_data(self):
         """讀取心理測驗題庫 JSON 檔案"""
         try:
-            # 使用絕對路徑定位，抓取專案根目錄的 quiz.json
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            file_path = os.path.join(base_dir, 'quiz.json')
+            file_path = os.path.join(base_dir, "quiz.json")
 
             if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     self.quiz_data = json.load(f)
                 logger.info(f"[測驗系統] 成功載入 {len(self.quiz_data)} 題測驗！")
             else:
                 logger.error(f"[測驗系統] 找不到檔案！預期路徑為：{file_path}")
-                self.quiz_data = [] # 找不到時給予空陣列防呆
-        except Exception as e:
+                self.quiz_data = []
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(f"[測驗系統] 讀取題庫失敗: {e}")
             self.quiz_data = []
 
@@ -303,7 +301,7 @@ class QuizSystem(commands.Cog):
             await channel.send(embed=embed, view=view)
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
-        except Exception as e:
+        except (discord.HTTPException, sqlite3.DatabaseError, OSError) as e:
             logger.error(f"Failed to auto-post quiz at {current_date}: {e}")
 
     @auto_post_quiz.before_loop
@@ -341,7 +339,7 @@ class QuizSystem(commands.Cog):
             logger.error(f"Missing required field in active poll data: {e}")
         except AttributeError as e:
             logger.error(f"Quiz data structure error during reveal: {e}")
-        except Exception as e:
+        except (discord.HTTPException, sqlite3.DatabaseError) as e:
             logger.error(f"Failed to auto-reveal quiz: {e}")
 
     @auto_reveal_quiz.before_loop

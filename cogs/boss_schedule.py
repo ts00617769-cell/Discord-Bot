@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 class BossSchedule(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.REMINDER_CHANNEL_ID = parse_env_channel_id("BOSS_REMINDER_CHANNEL_ID", 0)
+
+    @property
+    def REMINDER_CHANNEL_ID(self) -> int:
+        return parse_env_channel_id("BOSS_REMINDER_CHANNEL_ID", 0)
 
     async def cog_load(self):
         self.auto_boss_reminder.start()
@@ -44,7 +47,7 @@ class BossSchedule(commands.Cog):
                     color=discord.Color.red()
                 )
                 await channel.send(content="@everyone", embed=embed)
-            except Exception as e:
+            except discord.HTTPException as e:
                 logger.error(f"Failed to send boss reminder: {e}")
 
     @auto_boss_reminder.before_loop

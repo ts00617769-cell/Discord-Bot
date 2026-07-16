@@ -27,7 +27,7 @@ class Temple(commands.Cog):
                 logger.info(f"[線上廟宇] 成功載入 {len(self.fortunes)} 首籤詩！")
             else:
                 logger.error(f"[線上廟宇] 找不到檔案！預期路徑為：{file_path}")
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(f"[線上廟宇] 讀取籤詩失敗: {e}")
 
     @commands.command(name="求籤", help="向菩薩請示。用法: !求籤 [你的問題]")

@@ -3,6 +3,8 @@ from discord.ext import commands
 import random
 import datetime
 import pytz
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 import logging
 # ✨ 移除了 import sqlite3，全面改用 bot.db
@@ -82,7 +84,7 @@ class Entertainment(commands.Cog):
             "⚔️ 7. 戰車 (The Chariot)": "正位：勇往直前！據點戰大殺四方，氣勢如虹，抽卡也適合大保底硬抽。\n逆位：衝動是魔鬼，方向錯誤的堅持只會讓素材全部化為烏有。",
             "🦁 8. 力量 (Strength)": "正位：以柔克剛，面對 12.96% 的鍊成機率也能穩住心態，最終迎來金光。\n逆位：耐心見底，容易因為連續出綠光而崩潰，建議遠離抽卡介面。",
             "🏮 9. 隱者 (The Hermit)": "正位：低調發大財，深夜獨自一人在冷門頻道單抽，出紫機率高。\n逆位：太過孤立無援，有問題多在頻道問問大家，別自己瞎摸索。",
-            "🎡 10. 命運之輪 (Wheel of Fortune)": "正位：迎來轉機！適合直接挑戰 !抽卡 1000，紫光與金光即將降臨。\n逆位：運勢陷入泥沼，今天非酋體質發揮到極致，請安分守己。",
+            "🎡 10. 命運之輪 (Wheel of Fortune)": "正位：迎來轉機！適合挑戰保底池，紫光與金光即將降臨。\n逆位：運勢陷入泥沼，今天非酋體質發揮到極致，請安分守己。",
             "⚖️ 11. 正義 (Justice)": "正位：一分耕耘一分收穫，適合去解每日任務，抽卡機率完全照官方走。\n逆位：覺得系統特別坑？沒錯，今天不適合跟機率拼搏。",
             "⏳ 12. 倒吊人 (The Hanged Man)": "正位：以退為進，現在不是抽卡的好時機，把資源留給下一個卡池。\n逆位：無謂的犧牲，為了衝戰力硬點裝備只會換來一場空。",
             "💀 13. 死神 (Death)": "正位：置之死地而後生！雖然可能先爆幾件裝備，隨後必迎來大突破。\n逆位：泥足深陷，拒絕接受失敗只會越賠越多，該停損了。",
@@ -162,32 +164,65 @@ class Entertainment(commands.Cog):
                     html = html_bytes.decode('utf-8', errors='ignore')
 
                 soup = BeautifulSoup(html, 'html.parser')
-                today_content = soup.find('div', class_='TODAY_CONTENT')
-                
+                today_content = (
+                    soup.find('div', class_='TODAY_CONTENT')
+                    or soup.find('div', id='TODAY_CONTENT')
+                    or soup.select_one('.TODAY_CONTENT, #dailyStar, .daily_content, .fortune')
+                )
+
+                if not today_content:
+                    # 備援：抓取含「整體運勢」的最大文字區塊
+                    for tag in soup.find_all(['div', 'section', 'article']):
+                        txt = tag.get_text(" ", strip=True)
+                        if "整體運勢" in txt and len(txt) > 40:
+                            today_content = tag
+                            break
+
                 if today_content:
-                    raw_text = today_content.text.strip()
-                    fortune_text = raw_text.replace("整體運勢", "**整體運勢**").replace("愛情運勢", "\n\n**愛情運勢**").replace("事業運勢", "\n\n**事業運勢**").replace("財運運勢", "\n\n**財運運勢**")
+                    raw_text = today_content.get_text("\n", strip=True)
+                    fortune_text = (
+                        raw_text.replace("整體運勢", "**整體運勢**")
+                        .replace("愛情運勢", "\n\n**愛情運勢**")
+                        .replace("事業運勢", "\n\n**事業運勢**")
+                        .replace("財運運勢", "\n\n**財運運勢**")
+                    )
                     footer_text = "※ 資料來源：科技紫微網即時連線"
 
-                    # 寫入資料庫快取
-                    await self.bot.db.execute("INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)", (today_str, sign, fortune_text))
+                    await self.bot.db.execute(
+                        "INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)",
+                        (today_str, sign, fortune_text),
+                    )
                     await self.bot.db.commit()
                 else:
-                    fortune_text = "⚠️ 星象儀受干擾，無法解析今日運勢。"
-                    footer_text = "※ 抓取失敗，請稍後重試。"
+                    fortune_text = (
+                        "⚠️ 星象儀受干擾：外部網站版面可能已改版，無法解析今日運勢。\n"
+                        "請稍後再試，或改用其他來源。"
+                    )
+                    footer_text = "※ 抓取失敗（HTML 結構未命中）"
+                    logger.warning(f"Horoscope parse miss for {sign}; url={url}")
 
                 if loading_msg:
                     await loading_msg.delete()
 
-            except Exception as e:
+            except asyncio.TimeoutError as e:
+                logger.error(f"爬蟲逾時: {e}")
+                if loading_msg:
+                    try:
+                        await loading_msg.edit(content="❌ 連線外部星象資料庫逾時，請稍後再試。")
+                    except discord.HTTPException:
+                        await ctx.send("❌ 連線外部星象資料庫逾時，請稍後再試。")
+                else:
+                    await ctx.send("❌ 連線外部星象資料庫逾時，請稍後再試。")
+                return
+            except (aiohttp.ClientError, OSError, ValueError) as e:
                 logger.error(f"爬蟲報錯: {e}")
                 if loading_msg:
                     try:
-                        await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                        await loading_msg.edit(content="❌ 連線外部星象資料庫失敗，請確認網路狀態。")
                     except discord.HTTPException:
-                        await ctx.send(f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                        await ctx.send("❌ 連線外部星象資料庫失敗，請確認網路狀態。")
                 else:
-                    await ctx.send(f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                    await ctx.send("❌ 連線外部星象資料庫失敗，請確認網路狀態。")
                 return
 
         # 4. 發送最終報表

@@ -1,5 +1,7 @@
 import discord
 from discord.ext import commands
+import asyncio
+import aiohttp
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,6 +11,7 @@ class TimeCrevice(commands.Cog):
         self.bot = bot
 
     @commands.command(name="時空王", aliases=["交叉王", "時間隙縫", "時空隙縫", "隙縫戰報", "crevice戰報"])
+    @commands.cooldown(1, 15, commands.BucketType.user)
     async def time_crevice(self, ctx, server_name: str = None):
         """
         查詢時間隙縫首領擊殺戰報
@@ -35,7 +38,7 @@ class TimeCrevice(commands.Cog):
                     await status_msg.edit(content="⚠️ 取得資料失敗 (Init API 回應異常)")
                     return
                 init_data = await resp.json()
-        except Exception as e:
+        except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as e:
             logger.error(f"TimeCrevice Init Error: {e}")
             await status_msg.edit(content="⚠️ 網路連線異常，請稍後再試")
             return
@@ -93,7 +96,7 @@ class TimeCrevice(commands.Cog):
                     await status_msg.edit(content="⚠️ 取得資料失敗 (Info API 回應異常)")
                     return
                 info_data = await resp.json()
-        except Exception as e:
+        except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as e:
             logger.error(f"TimeCrevice Info Error: {e}")
             await status_msg.edit(content="⚠️ 網路連線異常，請稍後再試")
             return
