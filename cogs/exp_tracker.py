@@ -22,6 +22,8 @@ class ExpTracker(commands.Cog):
         self.alerts_enabled = False 
         self.alert_count = 30
         self.alert_server = "全服"
+        # 超速警報發送間隔（分鐘）；資料掃描仍維持 10 分鐘一次
+        self.alert_interval_minutes = 30
         self.allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
         # 注意：__init__ 是同步的，不能在這裡執行 await，所以資料庫初始化移到 cog_load
 
@@ -223,93 +225,112 @@ class ExpTracker(commands.Cog):
 
     async def check_for_alerts(self, current_time):
         # 確保挑選出的時間是「已完成全服抓取」的時間 (避免抓取空隙導致誤判)
+        # 多取幾個時間點，超速警報可對齊半小時區間；轉服偵測仍用最近兩次掃描
         sql_times = '''
             SELECT record_time
             FROM exp_history
             GROUP BY record_time
             HAVING COUNT(DISTINCT server_name) >= 4
-            ORDER BY record_time DESC LIMIT 2
+            ORDER BY record_time DESC LIMIT 10
         '''
         async with self.bot.db.execute(sql_times) as cursor:
             times = await cursor.fetchall()
             
         if len(times) < 2: return
-        time_now, time_prev = times[0][0], times[1][0]
+        time_now, time_prev_scan = times[0][0], times[1][0]
         
         fmt = '%Y-%m-%d %H:%M:%S'
         t1 = datetime.datetime.strptime(time_now, fmt)
-        t2 = datetime.datetime.strptime(time_prev, fmt)
-        minutes_diff = (t1 - t2).total_seconds() / 60
-        if minutes_diff <= 0: return
 
-        if self.alerts_enabled:
-            if self.alert_server == "全服":
-                sql = '''
-                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                    FROM exp_history t1
-                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                    WHERE t1.record_time = ? AND t2.record_time = ?
-                '''
-                params = (time_now, time_prev)
-            else:
-                sql = '''
-                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                    FROM exp_history t1
-                    JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                    WHERE t1.record_time = ? AND t2.record_time = ? AND t1.server_name = ?
-                '''
-                params = (time_now, time_prev, self.alert_server)
+        # 超速警報：僅在整點 / 半點發送（每 30 分鐘一次）
+        should_alert = self.alerts_enabled
+        if should_alert and isinstance(current_time, datetime.datetime):
+            should_alert = (current_time.minute % self.alert_interval_minutes) == 0
 
-            async with self.bot.db.execute(sql, params) as cursor:
-                records = await cursor.fetchall()
+        if should_alert:
+            # 優先取約半小時前的快照；資料不足時退回最近一次掃描
+            time_prev = time_prev_scan
+            minutes_diff = (t1 - datetime.datetime.strptime(time_prev_scan, fmt)).total_seconds() / 60
+            best_gap = abs(minutes_diff - self.alert_interval_minutes)
+            for (rt,) in times[1:]:
+                t2 = datetime.datetime.strptime(rt, fmt)
+                gap = (t1 - t2).total_seconds() / 60
+                if gap <= 0:
+                    continue
+                score = abs(gap - self.alert_interval_minutes)
+                if score < best_gap:
+                    best_gap = score
+                    time_prev = rt
+                    minutes_diff = gap
 
-            # 超速警報：先過濾達門檻者，再取 Top-N
-            alert_list = []
-            for name, server, level, exp_now, exp_prev in records:
-                diff = exp_now - exp_prev
-                if diff > 0:
-                    hourly_speed = (diff / minutes_diff) * 60
-                    speed_yi = hourly_speed / 100_000_000
-                    if speed_yi >= self.SPEED_LIMIT:
-                        alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
+            if minutes_diff > 0:
+                if self.alert_server == "全服":
+                    sql = '''
+                        SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                        FROM exp_history t1
+                        JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                        WHERE t1.record_time = ? AND t2.record_time = ?
+                    '''
+                    params = (time_now, time_prev)
+                else:
+                    sql = '''
+                        SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                        FROM exp_history t1
+                        JOIN exp_history t2 ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                        WHERE t1.record_time = ? AND t2.record_time = ? AND t1.server_name = ?
+                    '''
+                    params = (time_now, time_prev, self.alert_server)
 
-            if alert_list:
-                alert_list.sort(key=lambda x: x['speed'], reverse=True)
-                alert_list = alert_list[:self.alert_count]
+                async with self.bot.db.execute(sql, params) as cursor:
+                    records = await cursor.fetchall()
 
-                chunk_size = 50
-                for i in range(0, len(alert_list), chunk_size):
-                    chunk = alert_list[i:i+chunk_size]
-                    embed = discord.Embed(
-                        title=f"🚨 超速警報 ({self.alert_server} ≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})",
-                        color=0xff0000
-                    )
+                # 超速警報：先過濾達門檻者，再取 Top-N
+                alert_list = []
+                for name, server, level, exp_now, exp_prev in records:
+                    diff = exp_now - exp_prev
+                    if diff > 0:
+                        hourly_speed = (diff / minutes_diff) * 60
+                        speed_yi = hourly_speed / 100_000_000
+                        if speed_yi >= self.SPEED_LIMIT:
+                            alert_list.append({"name": name, "server": server, "level": level, "speed": speed_yi})
 
-                    desc = ""
-                    if i == 0:
-                        desc += f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** 的前 {len(alert_list)} 名玩家：\n"
-                    desc += "```yaml\n"
+                if alert_list:
+                    alert_list.sort(key=lambda x: x['speed'], reverse=True)
+                    alert_list = alert_list[:self.alert_count]
 
-                    for p in chunk:
-                        name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
-                        name_padded = p['name'] + " " * max(0, 14 - name_width)
-                        desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                    desc += "```"
+                    chunk_size = 50
+                    for i in range(0, len(alert_list), chunk_size):
+                        chunk = alert_list[i:i+chunk_size]
+                        embed = discord.Embed(
+                            title=f"🚨 超速警報 ({self.alert_server} ≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})",
+                            color=0xff0000
+                        )
 
-                    embed.description = desc
-                    if i + chunk_size >= len(alert_list):
-                        embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+                        desc = ""
+                        if i == 0:
+                            desc += f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** 的前 {len(alert_list)} 名玩家：\n"
+                        desc += "```yaml\n"
 
-                    for channel_id in self.ALERT_CHANNEL_IDS:
-                        channel = self.bot.get_channel(channel_id)
-                        if channel:
-                            try:
-                                await channel.send(embed=embed)
-                            except Exception as e:
-                                logger.error(f"Failed to send alert to channel {channel_id}: {e}")
+                        for p in chunk:
+                            name_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in p['name'])
+                            name_padded = p['name'] + " " * max(0, 14 - name_width)
+                            desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
+                        desc += "```"
 
-        # ✨ 新增：自動轉服/改名偵測
-        await self.check_for_transfers(time_now, time_prev)
+                        embed.description = desc
+                        if i + chunk_size >= len(alert_list):
+                            embed.set_footer(text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)")
+
+                        for channel_id in self.ALERT_CHANNEL_IDS:
+                            channel = self.bot.get_channel(channel_id)
+                            if channel:
+                                try:
+                                    await channel.send(embed=embed)
+                                except Exception as e:
+                                    logger.error(f"Failed to send alert to channel {channel_id}: {e}")
+
+        # ✨ 新增：自動轉服/改名偵測（仍用最近兩次 10 分鐘掃描）
+        await self.check_for_transfers(time_now, time_prev_scan)
 
     async def _get_potential_transfers(self, time_now, time_prev, exp_margin):
         """取出所有可能為轉服或改名的紀錄。
@@ -531,7 +552,7 @@ class ExpTracker(commands.Cog):
 
             return await ctx.send(
                 f"🚨 **【自動測速警報】已開啟！** "
-                f"(設定: {self.alert_server}、門檻 ≥{self.SPEED_LIMIT:,.0f}億、前 {self.alert_count} 名)"
+                f"(設定: {self.alert_server}、門檻 ≥{self.SPEED_LIMIT:,.0f}億、前 {self.alert_count} 名、每 {self.alert_interval_minutes} 分鐘)"
             )
 
         current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"

@@ -34,13 +34,22 @@ async def test_check_for_alerts():
     tracker.alerts_enabled = True
     tracker.alert_count = 2
     tracker.alert_server = "全服"
+    tracker.ALERT_CHANNEL_IDS = [1]
+    tracker.check_for_transfers = AsyncMock()
 
-    times = [("2023-10-01 12:10:00",), ("2023-10-01 12:00:00",)]
+    # 半小時監控區間：12:00 -> 12:30
+    times = [
+        ("2023-10-01 12:30:00",),
+        ("2023-10-01 12:20:00",),
+        ("2023-10-01 12:10:00",),
+        ("2023-10-01 12:00:00",),
+    ]
 
+    # 30 分鐘區間的經驗差，換算時速分別約 6000 / 3000 / 12000 億
     records = [
-        ("PlayerA", "ServerA", 50, 200_000_000_000, 100_000_000_000), # 100 billion diff -> hourly 600b
-        ("PlayerB", "ServerB", 50, 150_000_000_000, 100_000_000_000), # 50 billion diff -> hourly 300b
-        ("PlayerC", "ServerC", 50, 300_000_000_000, 100_000_000_000), # 200 billion diff -> hourly 1200b
+        ("PlayerA", "ServerA", 50, 400_000_000_000, 100_000_000_000),
+        ("PlayerB", "ServerB", 50, 250_000_000_000, 100_000_000_000),
+        ("PlayerC", "ServerC", 50, 700_000_000_000, 100_000_000_000),
     ]
 
     def mock_execute(sql, params=None):
@@ -61,6 +70,7 @@ async def test_check_for_alerts():
     assert "PlayerA" in desc
     assert "PlayerB" not in desc # because alert_count = 2 and C > A > B
     assert "Top 2" in embed.title
+    assert "30min" in embed.footer.text
     print("test_check_for_alerts passed!")
 
 asyncio.run(test_check_for_alerts())
