@@ -36,7 +36,12 @@ class WarRoom(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
-        if isinstance(error, commands.CommandNotFound):
+        if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
+            return
+        if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
+            return
+        # CheckFailure / MissingRequiredArgument 等一般使用錯誤不進戰情室洗版
+        if isinstance(error, (commands.UserInputError, commands.CheckFailure, commands.CommandOnCooldown)):
             return
 
         if not self.log_channel_id:
@@ -45,7 +50,6 @@ class WarRoom(commands.Cog):
         channel = self.bot.get_channel(self.log_channel_id)
         if channel:
             error_msg = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-            # 不完整轉發原始訊息內容，降低機密指令內容外洩風險
             cmd_name = getattr(ctx.command, "qualified_name", "unknown")
             await channel.send(
                 f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`!{cmd_name}`\n"

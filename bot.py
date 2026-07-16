@@ -3,6 +3,8 @@ from discord.ext import commands
 import os
 import sys
 import atexit
+import socket
+import sqlite3
 from collections import Counter
 from dotenv import load_dotenv
 import aiohttp
@@ -24,6 +26,20 @@ _lock_fp = None
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    # Windows：用 OpenProcess 較可靠
+    if os.name == 'nt':
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -31,43 +47,73 @@ def _pid_is_running(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        # Windows：行程不存在時常拋 OSError
         return False
     return True
 
 
 def acquire_singleton_lock():
-    """防止同一台機器開兩個 bot 實例（會造成指令回覆兩次）。"""
+    """以作業系統檔案鎖阻擋同一台機器的第二個實例。"""
     global _lock_fp
-    if os.path.exists(LOCK_PATH):
+    os.makedirs(os.path.dirname(LOCK_PATH) or '.', exist_ok=True)
+    _lock_fp = open(LOCK_PATH, 'a+', encoding='utf-8')
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            _lock_fp.seek(0)
+            # 鎖住檔案開頭 1 byte；已被鎖則代表另一實例仍在跑
+            try:
+                msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                print("❌ 偵測到本機已有機器人實例正在執行（檔案鎖）。")
+                print("   請先結束舊的 python 程序，否則指令會回覆兩次。")
+                print("   可執行: taskkill /IM python.exe /F")
+                sys.exit(1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(_lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print("❌ 偵測到本機已有機器人實例正在執行（檔案鎖）。")
+                print("   請先結束舊程序，否則指令會回覆兩次。")
+                sys.exit(1)
+    except Exception as e:
+        # 退回 PID 檔檢查
+        logger.warning(f"檔案鎖失敗，改用 PID 檢查: {e}")
+        _lock_fp.seek(0)
+        raw = (_lock_fp.read() or '').strip()
         try:
-            with open(LOCK_PATH, 'r', encoding='utf-8') as f:
-                old_pid = int((f.read() or '0').strip() or '0')
-        except (ValueError, OSError):
+            old_pid = int(raw) if raw else 0
+        except ValueError:
             old_pid = 0
         if old_pid and old_pid != os.getpid() and _pid_is_running(old_pid):
             print(f"❌ 偵測到機器人已在執行中 (PID {old_pid})。")
-            print("   請先關閉舊程序再啟動，否則指令會回覆兩次。")
             print(f"   Windows 可執行: taskkill /PID {old_pid} /F")
             sys.exit(1)
-        try:
-            os.remove(LOCK_PATH)
-        except OSError:
-            pass
 
-    _lock_fp = open(LOCK_PATH, 'w', encoding='utf-8')
+    _lock_fp.seek(0)
+    _lock_fp.truncate()
     _lock_fp.write(str(os.getpid()))
     _lock_fp.flush()
 
     def _release():
+        global _lock_fp
         try:
             if _lock_fp:
+                if os.name == 'nt':
+                    try:
+                        import msvcrt
+                        _lock_fp.seek(0)
+                        msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        import fcntl
+                        fcntl.flock(_lock_fp.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
                 _lock_fp.close()
-            if os.path.exists(LOCK_PATH):
-                with open(LOCK_PATH, 'r', encoding='utf-8') as f:
-                    locked_pid = int((f.read() or '0').strip() or '0')
-                if locked_pid == os.getpid():
-                    os.remove(LOCK_PATH)
+                _lock_fp = None
         except OSError:
             pass
 
@@ -85,13 +131,22 @@ class PrasiaBot(commands.Bot):
         try:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
             self.session = aiohttp.ClientSession(headers=headers)
-            # ✨ 建立全域的非同步資料庫連線
             db_path = os.path.join(os.path.dirname(__file__), 'prasia_data.db')
             self.db = await aiosqlite.connect(db_path)
-            # 減少並行讀寫時 database is locked 的機率
             await self.db.execute("PRAGMA journal_mode=WAL")
             await self.db.execute("PRAGMA busy_timeout=5000")
             logger.info(f"✅ 資料庫已連接: {db_path}")
+
+            # 跨實例去重：同一個 message_id 只能被執行一次（需共用同一資料庫才有效）
+            await self.db.execute('''
+                CREATE TABLE IF NOT EXISTS cmd_dedupe (
+                    message_id INTEGER PRIMARY KEY,
+                    claimed_at TEXT NOT NULL,
+                    pid INTEGER,
+                    host TEXT
+                )
+            ''')
+            await self.db.commit()
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.warning("⚠️ ALLOWED_COMMAND_CHANNELS 未設定：機密指令目前可在所有頻道使用")
@@ -115,7 +170,6 @@ class PrasiaBot(commands.Bot):
     async def close(self):
         if hasattr(self, 'session'):
             await self.session.close()
-        # ✨ 安全關閉資料庫
         if hasattr(self, 'db'):
             await self.db.close()
             logger.info("✅ 資料庫已安全關閉")
@@ -123,9 +177,45 @@ class PrasiaBot(commands.Bot):
 
 bot = PrasiaBot()
 
+
+@bot.before_invoke
+async def claim_command_once(ctx: commands.Context):
+    """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
+    if not hasattr(ctx.bot, 'db') or ctx.message is None:
+        return
+    host = socket.gethostname()
+    try:
+        await ctx.bot.db.execute(
+            'INSERT INTO cmd_dedupe (message_id, claimed_at, pid, host) VALUES (?, datetime("now"), ?, ?)',
+            (ctx.message.id, os.getpid(), host)
+        )
+        await ctx.bot.db.commit()
+    except sqlite3.IntegrityError:
+        logger.warning(
+            f"⚠️ 略過重複指令: msg={ctx.message.id} cmd={getattr(ctx.command, 'name', '?')} "
+            f"pid={os.getpid()} host={host}"
+        )
+        raise commands.CheckFailure("duplicate_invoke")
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    # 去重失敗不需打擾使用者 / 戰情室
+    if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
+        return
+    if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
+        return
+    # 其餘交給 WarRoom 或其他 handler；這裡只記 log 避免未處理
+    if hasattr(error, 'original'):
+        logger.error(f"Command error in {ctx.command}: {error.original}")
+    else:
+        logger.error(f"Command error in {ctx.command}: {error}")
+
+
 @bot.event
 async def on_ready():
-    print(f'🤖 {bot.user} 已成功登入 Discord 並準備就緒！ (PID {os.getpid()})')
+    host = socket.gethostname()
+    print(f'🤖 {bot.user} 已成功登入 Discord 並準備就緒！ (PID {os.getpid()} @ {host})')
     name_counts = Counter(cmd.name for cmd in bot.commands)
     dupes = [name for name, count in name_counts.items() if count > 1]
     if dupes:
@@ -133,24 +223,38 @@ async def on_ready():
     else:
         logger.info(f"✅ 指令註冊正常，共 {len(bot.commands)} 個指令")
 
-# ==========================================
-# 👇 推薦新功能：開發者熱重載指令
-# ==========================================
+    # 狀態列顯示主機與 PID，方便辨認是否開了兩個實例
+    try:
+        await bot.change_presence(
+            activity=discord.Game(name=f"戰情雷達 | {host[:12]}#{os.getpid()}")
+        )
+    except Exception as e:
+        logger.warning(f"無法更新 presence: {e}")
+
+    # 清理過期去重紀錄
+    try:
+        await bot.db.execute("DELETE FROM cmd_dedupe WHERE claimed_at < datetime('now', '-2 days')")
+        await bot.db.commit()
+    except Exception as e:
+        logger.warning(f"清理 cmd_dedupe 失敗: {e}")
+
+
 @bot.command(name="reload", hidden=True)
-@commands.is_owner() # 🛡️ 資安防護：只允許機器人的「擁有者」執行這個指令
+@commands.is_owner()
 async def reload_cog(ctx, extension: str):
     """(開發者專用) 重新載入特定的模組，不用重開機器人！"""
     try:
-        # discord.py 內建的重新載入功能
         await bot.reload_extension(f"cogs.{extension}")
         await ctx.send(f"✅ 模組 `cogs.{extension}` 重新載入成功！")
     except Exception as e:
         await ctx.send(f"❌ 重新載入失敗：\n```py\n{e}\n```")
 
-# 4. 啟動機器人
+
 if __name__ == '__main__':
     if not TOKEN:
         print("❌ 未設定 DISCORD_TOKEN！請檢查 .env 檔案。")
     else:
         acquire_singleton_lock()
+        print(f"🔒 單例鎖已取得 (PID {os.getpid()} @ {socket.gethostname()})")
+        print("⚠️ 若指令仍回兩次：代表另一台機器/雲端也在跑同一個 Token，請關閉其中一邊，或到 Discord Developer Portal 重設 Token。")
         bot.run(TOKEN)

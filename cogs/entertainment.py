@@ -152,8 +152,9 @@ class Entertainment(commands.Cog):
             footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
         else:
             # 🔴 【沒有快取】啟動爬蟲
-            loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
+            loading_msg = None
             try:
+                loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
                 url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
                 async with self.bot.session.get(url, timeout=10) as response:
                     response.raise_for_status() 
@@ -175,11 +176,18 @@ class Entertainment(commands.Cog):
                     fortune_text = "⚠️ 星象儀受干擾，無法解析今日運勢。"
                     footer_text = "※ 抓取失敗，請稍後重試。"
 
-                await loading_msg.delete()
+                if loading_msg:
+                    await loading_msg.delete()
 
             except Exception as e:
                 logger.error(f"爬蟲報錯: {e}")
-                await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                if loading_msg:
+                    try:
+                        await loading_msg.edit(content=f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                    except discord.HTTPException:
+                        await ctx.send(f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
+                else:
+                    await ctx.send(f"❌ 連線外部星象資料庫失敗，請確認網路狀態。({e})")
                 return
 
         # 4. 發送最終報表
