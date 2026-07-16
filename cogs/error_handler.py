@@ -28,6 +28,22 @@ def get_allowed_command_channels() -> list:
     return parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
 
 
+def resolve_command_channel_ids(channel) -> list:
+    """回傳要檢查的頻道 ID（含討論串 / 論壇貼文的 parent）。"""
+    ids = [getattr(channel, "id", None)]
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id:
+        ids.append(parent_id)
+    # 少數情況：thread 的 parent 仍是 forum，再往上一層
+    parent = getattr(channel, "parent", None)
+    if parent is not None:
+        ids.append(getattr(parent, "id", None))
+        grand = getattr(parent, "parent_id", None)
+        if grand:
+            ids.append(grand)
+    return [i for i in ids if isinstance(i, int)]
+
+
 def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list = None) -> bool:
     """fail-closed：未設定白名單時拒絕機密指令；有設定時僅允許列表內頻道。"""
     if allowed_channel_ids is None:
@@ -40,7 +56,8 @@ def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list = None
 async def require_allowed_channel(ctx) -> bool:
     """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。"""
     allowed = get_allowed_command_channels()
-    if is_allowed_command_channel(ctx.channel.id, allowed):
+    candidates = resolve_command_channel_ids(ctx.channel)
+    if any(is_allowed_command_channel(cid, allowed) for cid in candidates):
         return True
     try:
         if not allowed:
@@ -49,7 +66,16 @@ async def require_allowed_channel(ctx) -> bool:
                 "請管理員在 `.env` 填入頻道 ID 後重啟機器人。"
             )
         else:
-            await ctx.send("🔒 此指令僅限戰情室指定頻道使用。請改到允許的頻道再試。")
+            await ctx.send(
+                "🔒 此指令僅限戰情室指定頻道使用。\n"
+                f"（目前頻道 ID：`{ctx.channel.id}`"
+                + (
+                    f"，父頻道：`{getattr(ctx.channel, 'parent_id', None)}`"
+                    if getattr(ctx.channel, "parent_id", None)
+                    else ""
+                )
+                + "）"
+            )
     except discord.HTTPException as e:
         logger.warning(f"Failed to send channel-deny message: {e}")
     return False

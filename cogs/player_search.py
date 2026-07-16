@@ -348,14 +348,27 @@ class PlayerSearch(commands.Cog):
             await ctx.send("❌ 標記失敗（資料庫錯誤）")
 
     @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o")
-    @commands.cooldown(1, 20, commands.BucketType.user)
-    @commands.max_concurrency(1, commands.BucketType.default, wait=False)
-    async def track_player(self, ctx, target_name: str):
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.max_concurrency(2, commands.BucketType.user, wait=False)
+    async def track_player(self, ctx, *, target_name: str):
+        target_name = (target_name or "").strip()
+        if not target_name:
+            await ctx.send("❌ 請輸入玩家名稱。用法：`!尋人 小碎冰`")
+            return
         if not await require_allowed_channel(ctx):
             return
-        processing_msg = await ctx.send(
-            "🔍 啟動天眼雙引擎，正在進行【絕對碰撞】與【無縫接軌】掃描..."
+
+        logger.info(
+            f"!尋人 start user={ctx.author.id} channel={ctx.channel.id} "
+            f"parent={getattr(ctx.channel, 'parent_id', None)} name={target_name!r}"
         )
+        try:
+            processing_msg = await ctx.send(
+                f"🔍 啟動天眼雙引擎，正在掃描「{target_name}」..."
+            )
+        except discord.HTTPException as e:
+            logger.error(f"!尋人 無法在頻道 {ctx.channel.id} 發送訊息: {e}")
+            return
 
         try:
             related_names = await self._get_related_names(target_name)
@@ -607,6 +620,14 @@ class PlayerSearch(commands.Cog):
             logger.error(f"Missing field in player tracking: {e}")
             try:
                 await processing_msg.edit(content="❌ 尋人系統資料欄位異常")
+            except discord.NotFound:
+                pass
+        except discord.HTTPException as e:
+            logger.error(f"!尋人 Discord 錯誤 '{target_name}': {e}")
+        except (ValueError, TypeError) as e:
+            logger.error(f"!尋人 資料錯誤 '{target_name}': {e}\n{traceback.format_exc()}")
+            try:
+                await processing_msg.edit(content=f"❌ 尋人系統資料異常: {type(e).__name__}")
             except discord.NotFound:
                 pass
 

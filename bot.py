@@ -231,6 +231,12 @@ async def on_command_error(ctx, error):
         except discord.HTTPException:
             pass
         return
+    if isinstance(error, commands.MissingRequiredArgument):
+        try:
+            await ctx.send(f"❌ 參數不足：`{error.param.name}` 必填。請檢查指令用法。", delete_after=12)
+        except discord.HTTPException:
+            pass
+        return
     # 其餘錯誤由 WarRoom.on_command_error 統一上報，此處不再重複 log
 
 
