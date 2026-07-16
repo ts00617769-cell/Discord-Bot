@@ -4,22 +4,15 @@ import aiohttp
 import asyncio
 import unicodedata
 from game_data import SERVER_MAP
-import os
 import logging
-from . import error_handler
+from .error_handler import parse_env_channel_ids, is_allowed_command_channel
 
 logger = logging.getLogger(__name__)
 
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-        # ==========================================
-        # 👇 新增這段：開機時就把頻道清單讀好，存進 self 裡面
-        # ==========================================
-        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
-        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
-        # ==========================================
+        self.allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
 
         # 連線到資料庫以抓取成員名牌備註
     async def get_member_info(self, name):
@@ -74,7 +67,7 @@ class RankTracker(commands.Cog):
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     async def get_ranking(self, ctx, *args):
   
-        if ctx.channel.id not in self.allowed_channel_ids:
+        if not is_allowed_command_channel(ctx.channel.id, self.allowed_channel_ids):
             return
 
         count = 10

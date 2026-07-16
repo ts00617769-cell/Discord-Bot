@@ -7,6 +7,7 @@ import pytz
 import os
 import logging
 import asyncio
+from .error_handler import parse_env_channel_id
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,11 @@ class SecretQuizButton(discord.ui.Button):
         except Exception as e:
             logger.error(f"Failed to save quiz vote to database for user {user_id}: {e}")
 
-        await interaction.response.send_message(f"✅ 投票成功！你選擇了「{self.label}」。結果將於晚上 18:00 公布。", ephemeral=True)
+        reveal_label = os.getenv("QUIZ_REVEAL_TIME", "18:00")
+        await interaction.response.send_message(
+            f"✅ 投票成功！你選擇了「{self.label}」。結果將於 {reveal_label} 公布。",
+            ephemeral=True
+        )
 
 class SecretQuizView(discord.ui.View):
     def __init__(self, question_data):
@@ -222,14 +227,18 @@ class QuizSystem(commands.Cog):
             await self.bot.db.commit()
             available = self.quiz_data # 👇 這裡加上 self.
 
+        if not available:
+            logger.error("Quiz bank is empty; cannot pick a question")
+            return None
+
         question = random.choice(available)
-        
+
         # 標記為已出過
         tz = pytz.timezone('Asia/Taipei')
         today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
         await self.bot.db.execute("INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)", (question['title'], today_str))
         await self.bot.db.commit()
-        
+
         return question
 
     async def save_active_status(self, channel_id, date_str, question):
@@ -250,52 +259,59 @@ class QuizSystem(commands.Cog):
     # =======================================================
     # 2. ✨ 修改排程：中午 12 點自動發布
     # =======================================================
-    @tasks.loop(time=POST_TIME) # 👈 這裡原本是 (minutes=1)，改成指定我們設定好的 post_time
+    @tasks.loop(time=POST_TIME)
     async def auto_post_quiz(self):
         tz = pytz.timezone('Asia/Taipei')
         now = datetime.datetime.now(tz)
         current_date = now.strftime("%Y-%m-%d")
 
-        # ✂️ 刪除了原本的 [if now.hour == 12 and now.minute == 0:] 這一行！
-        # 👇 下方的程式碼因為少了一層 if 包裹，全部都要「往左推 4 個空格」對齊喔！
         if active_poll["is_active"] and active_poll["date"] == current_date:
             return
 
         try:
-            channel_id = int(os.getenv("QUIZ_CHANNEL_ID", 0))
-            channel = self.bot.get_channel(channel_id) 
-            if channel:
-                # ✨ 使用新的不重複抽題功能
-                question = await self.get_unrepeated_quiz()
+            channel_id = parse_env_channel_id("QUIZ_CHANNEL_ID", 0)
+            if not channel_id:
+                logger.warning("QUIZ_CHANNEL_ID unset; skip auto-post quiz")
+                return
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Quiz channel {channel_id} not found")
+                return
 
-                active_poll["is_active"] = True
-                active_poll["date"] = current_date
-                active_poll["channel_id"] = channel.id
-                active_poll["data"] = question
-                active_poll["votes"].clear()
+            question = await self.get_unrepeated_quiz()
+            if not question:
+                logger.error("Skip auto-post quiz: empty quiz bank")
+                return
 
-                # 保存狀態至資料庫
-                await self.save_active_status(channel.id, current_date, question)
+            active_poll["is_active"] = True
+            active_poll["date"] = current_date
+            active_poll["channel_id"] = channel.id
+            active_poll["data"] = question
+            active_poll["votes"].clear()
 
-                embed = discord.Embed(title="🕛 中午 12 點了！每日深層心理測驗來囉", description=question['title'], color=0x3498db)
-                embed.set_footer(text="請點擊下方按鈕進行盲投，結果將於晚上 18:00 準時公開！")
+            await self.save_active_status(channel.id, current_date, question)
 
-                view = SecretQuizView(question)
-                await channel.send(embed=embed, view=view)
-        except ValueError as e:
-            logger.error(f"Invalid QUIZ_CHANNEL_ID environment variable: {e}")
+            reveal_label = self.reveal_time.strftime('%H:%M')
+            embed = discord.Embed(
+                title=f"🕛 {self.post_time.strftime('%H:%M')} 每日深層心理測驗來囉",
+                description=question['title'],
+                color=0x3498db
+            )
+            embed.set_footer(text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 準時公開！")
+
+            view = SecretQuizView(question)
+            await channel.send(embed=embed, view=view)
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
         except Exception as e:
             logger.error(f"Failed to auto-post quiz at {current_date}: {e}")
 
-    # =======================================================
-    # 3. ✨ 修改排程：晚上 18 點自動開獎
-    # =======================================================
-    @tasks.loop(time=REVEAL_TIME) # 👈 這裡也改成指定 reveal_time
+    @auto_post_quiz.before_loop
+    async def before_auto_post_quiz(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(time=REVEAL_TIME)
     async def auto_reveal_quiz(self):
-        # ✂️ 刪除了原本的 [if now.hour == 18 and now.minute == 0:] 這一行！
-        # 👇 下方的程式碼同樣全部「往左推 4 個空格」對齊！
         if not active_poll["is_active"] or not active_poll["data"]:
             return
 
@@ -318,9 +334,9 @@ class QuizSystem(commands.Cog):
                     )
 
                 await channel.send(embed=embed)
-                
+
                 active_poll["is_active"] = False
-                await self.clear_active_status() # 清空資料庫狀態
+                await self.clear_active_status()
         except KeyError as e:
             logger.error(f"Missing required field in active poll data: {e}")
         except AttributeError as e:
@@ -328,15 +344,23 @@ class QuizSystem(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to auto-reveal quiz: {e}")
 
+    @auto_reveal_quiz.before_loop
+    async def before_auto_reveal_quiz(self):
+        await self.bot.wait_until_ready()
+
     # --- 一般指令 ---
     @commands.command(name="測驗")
     async def normal_quiz(self, ctx):
-        question = random.choice(self.quiz_data) # 👇 這裡加上 self. (單次娛樂不受重複限制)
+        if not self.quiz_data:
+            await ctx.send("❌ 題庫尚未載入或為空，請檢查 `quiz.json`。")
+            return
+        question = random.choice(self.quiz_data)
         embed = discord.Embed(title="✨ 隨機深層心理測驗", description=question['title'], color=0x9b59b6)
         view = QuizView(question)
         await ctx.send(embed=embed, view=view)
 
     @commands.command(name="定時測驗")
+    @commands.is_owner()
     async def force_post(self, ctx):
         tz = pytz.timezone('Asia/Taipei')
         now = datetime.datetime.now(tz)
@@ -346,7 +370,14 @@ class QuizSystem(commands.Cog):
             await ctx.send("⚠️ 今天的測驗已經發布過了！請在發布頻道參與投票。")
             return
 
+        if not self.quiz_data:
+            await ctx.send("❌ 題庫尚未載入或為空，請檢查 `quiz.json`。")
+            return
+
         question = await self.get_unrepeated_quiz()
+        if not question:
+            await ctx.send("❌ 無法抽出題目，請檢查題庫。")
+            return
 
         active_poll["is_active"] = True
         active_poll["date"] = current_date
@@ -356,12 +387,14 @@ class QuizSystem(commands.Cog):
 
         await self.save_active_status(ctx.channel.id, current_date, question)
 
+        reveal_label = self.reveal_time.strftime('%H:%M')
         embed = discord.Embed(title="🎲 手動觸發今日測驗", description=question['title'], color=0x3498db)
-        embed.set_footer(text="請點擊下方按鈕進行盲投，你可以使用 !測試開獎 來提早結算。")
+        embed.set_footer(text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 公開（可用 !測試開獎 提早結算）。")
         view = SecretQuizView(question)
         await ctx.send(embed=embed, view=view)
 
     @commands.command(name="測試開獎")
+    @commands.is_owner()
     async def force_reveal(self, ctx):
         if not active_poll["is_active"] or not active_poll["data"]:
             await ctx.send("❌ 目前沒有正在進行中的盲投測驗！")
@@ -383,7 +416,7 @@ class QuizSystem(commands.Cog):
             )
 
         await ctx.send(embed=embed)
-        
+
         active_poll["is_active"] = False
         await self.clear_active_status()
 

@@ -2,19 +2,16 @@ import discord
 from discord.ext import commands
 import aiohttp
 import unicodedata
-import os
 import logging
 import asyncio
-from . import error_handler
+from .error_handler import parse_env_channel_ids, is_allowed_command_channel
 
 logger = logging.getLogger(__name__)
 
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # ✨ 在啟動時就把頻道清單算好，存進 self 裡面 (最高效能寫法)
-        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
-        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
+        self.allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
 
     # 📏 輔助函數：計算中英文等寬對齊
     def pad_text(self, text, target_width):
@@ -26,9 +23,8 @@ class LeagueTracker(commands.Cog):
     @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
         
-        # 🛡️ 資安防護網：如果不是在戰情室頻道，機器人就裝死
-        if ctx.channel.id not in self.allowed_channel_ids:
-            return 
+        if not is_allowed_command_channel(ctx.channel.id, self.allowed_channel_ids):
+            return
         
         # ✅ 新增參數驗證
         try:

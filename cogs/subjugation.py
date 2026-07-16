@@ -3,12 +3,8 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import unicodedata
-import os
-from dotenv import load_dotenv
 from game_data import SERVER_MAP
 import logging
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +39,10 @@ class SubjugationCog(commands.Cog):
 
     @commands.command(name="討伐排名", aliases=["討伐"], help="查詢全服前 100 名討伐等級排行")
     async def get_subjugation_ranking(self, ctx):
-        # 🛡️ 【資安防護網】頻道權限檢查
-        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
-        if allowed_channels_str:
-            allowed_channel_ids = [int(ch_id.strip()) for ch_id in allowed_channels_str.split(",") if ch_id.strip()]
-            if allowed_channel_ids and ctx.channel.id not in allowed_channel_ids:
-                await ctx.send("❌ 此指令只能在指定的戰情室使用")
-                return
+        from .error_handler import parse_env_channel_ids, is_allowed_command_channel
+        allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
+        if not is_allowed_command_channel(ctx.channel.id, allowed_channel_ids):
+            return
 
         processing_msg = await ctx.send("📡 啟動全服討伐雷達掃描中，請稍候...")
 

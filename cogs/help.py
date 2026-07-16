@@ -1,20 +1,16 @@
 import discord
 from discord.ext import commands
-import os
+from .error_handler import parse_env_channel_ids, is_allowed_command_channel
 
 class HelpCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        
-        # ✨ 在啟動時就把頻道清單算好，存進 self 裡面 (最高效能寫法)
-        allowed_channels_str = os.getenv("ALLOWED_COMMAND_CHANNELS", "")
-        self.allowed_channel_ids = [int(cid.strip()) for cid in allowed_channels_str.split(",") if cid.strip()]
+        self.allowed_channel_ids = parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
         
     @commands.command(name="機密指令", help="戰情室專屬的進階指令手冊")
     async def secret_help(self, ctx):
-        # 🛡️ 【資安防護網】如果不是在指定的頻道輸入，機器人就裝死（完全不回應）
-        if ctx.channel.id not in self.allowed_channel_ids:
-            return 
+        if not is_allowed_command_channel(ctx.channel.id, self.allowed_channel_ids):
+            return
 
         # 只有在指定頻道才會發送這張機密卡片
         embed = discord.Embed(

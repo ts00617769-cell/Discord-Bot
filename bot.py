@@ -28,9 +28,16 @@ class PrasiaBot(commands.Bot):
             # ✨ 建立全域的非同步資料庫連線
             db_path = os.path.join(os.path.dirname(__file__), 'prasia_data.db')
             self.db = await aiosqlite.connect(db_path)
+            # 減少並行讀寫時 database is locked 的機率
+            await self.db.execute("PRAGMA journal_mode=WAL")
+            await self.db.execute("PRAGMA busy_timeout=5000")
             logger.info(f"✅ 資料庫已連接: {db_path}")
-            
-            for filename in os.listdir('./cogs'):
+
+            if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
+                logger.warning("⚠️ ALLOWED_COMMAND_CHANNELS 未設定：機密指令目前可在所有頻道使用")
+
+            cogs_dir = os.path.join(os.path.dirname(__file__), 'cogs')
+            for filename in os.listdir(cogs_dir):
                 if filename.endswith('.py') and not filename.startswith('__') and filename != 'error_handler.py':
                     try:
                         await self.load_extension(f'cogs.{filename[:-3]}')

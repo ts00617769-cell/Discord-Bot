@@ -30,13 +30,13 @@ class CastleTracker(commands.Cog):
         }
         try:
             async with session.post(api_url, json=payload, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    json_data = await response.json()
-                    territories = json_data.get("data", {}).get("territory") or []
-                    
+                if response.status != 200:
+                    logger.warning(f"Territory API non-200 for {server_name}: {response.status}")
+                    return []
+                json_data = await response.json()
+                territories = json_data.get("data", {}).get("territory") or []
                 for t in territories:
                     t['real_server_name'] = server_name
-                        
                 return territories
         except asyncio.TimeoutError as e:
             logger.error(f"API timeout while fetching territory data for {server_name}: {e}")

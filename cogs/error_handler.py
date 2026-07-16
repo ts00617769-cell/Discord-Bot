@@ -3,10 +3,42 @@
 用于统一处理异常和日志输出
 """
 import logging
+import os
 import traceback
 import discord
 
 logger = logging.getLogger(__name__)
+
+
+def parse_env_channel_ids(env_name: str = None, env_value: str = None) -> list:
+    """解析逗號分隔的頻道 ID；空白或非數字一律略過，避免 int('') 崩潰。"""
+    raw = env_value if env_value is not None else os.getenv(env_name or "", "")
+    return [int(x.strip()) for x in (raw or "").split(",") if x.strip().isdigit()]
+
+
+def parse_env_channel_id(env_name: str, default: int = 0) -> int:
+    """讀取單一頻道 ID；未設定或無效時回傳 default。"""
+    ids = parse_env_channel_ids(env_name=env_name)
+    return ids[0] if ids else default
+
+
+def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list) -> bool:
+    """allowlist 空白時不限制（尚未設定）；有設定時僅允許列表內頻道。"""
+    if not allowed_channel_ids:
+        return True
+    return channel_id in allowed_channel_ids
+
+
+def parse_env_float(env_name: str, default: float) -> float:
+    """安全讀取浮點環境變數。"""
+    raw = (os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Invalid {env_name}={raw!r}, using default {default}")
+        return default
 
 async def handle_api_error(ctx, error_msg: str, detail: str = ""):
     """处理 API 调用错误"""

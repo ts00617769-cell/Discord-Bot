@@ -91,15 +91,16 @@ class Temple(commands.Cog):
         await processing_msg.edit(content=f"🎉 **【聖筊】！** 菩薩同意賜籤：", embed=embed)
 
     @commands.command(name="檢查廟宇")
+    @commands.is_owner()
     async def check_temple_path(self, ctx):
         """專門用來除錯路徑的指令"""
-        current_dir = os.getcwd()
-        file_path = os.path.join(current_dir, 'omikuji.json')
-        
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        file_path = os.path.join(base_dir, 'omikuji.json')
+
         if os.path.exists(file_path):
-            await ctx.send(f"✅ 報告！檔案找到了，位置在：\n`{file_path}`")
+            await ctx.send(f"✅ 報告！檔案找到了，位置在：\n`{file_path}`\n已載入籤詩：{len(self.fortunes)} 首")
         else:
-            await ctx.send(f"❌ 找不到檔案！機器人目前預設的搜尋路徑是：\n`{file_path}`\n\n👉 請檢查檔案有沒有確實上傳到這個路徑。")
+            await ctx.send(f"❌ 找不到檔案！預期路徑：\n`{file_path}`")
 
 async def setup(bot):
     await bot.add_cog(Temple(bot))
