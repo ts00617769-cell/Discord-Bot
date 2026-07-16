@@ -164,22 +164,30 @@ class ExpTracker(commands.Cog):
             logger.warning(f"啟動伺服器探活略過: {e}")
 
     async def _ensure_unique_exp_index(self):
-        """去重並建立唯一索引；僅在索引尚未存在時執行（可能很久）。"""
+        """嘗試建立唯一索引；絕不在啟動路徑做全表 DELETE（會鎖庫並讓指令全面卡住）。"""
         async with self.bot.db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_exp_history_unique'"
         ) as cursor:
             if await cursor.fetchone():
                 return
 
-        logger.info("⏳ 背景去重 exp_history 並建立唯一索引（首次可能較久）...")
         try:
-            await self.bot.db.execute('''
-                DELETE FROM exp_history
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) FROM exp_history
-                    GROUP BY record_time, server_name, player_name
-                )
-            ''')
+            async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+                row_count = (await cursor.fetchone())[0]
+        except sqlite3.DatabaseError as e:
+            logger.warning(f"無法讀取 exp_history 筆數，略過唯一索引: {e}")
+            return
+
+        # 大表建唯一索引仍可能長時間鎖寫入；啟動時直接跳過，避免平台判定失敗
+        if row_count > 50_000:
+            logger.warning(
+                f"⚠️ exp_history 約 {row_count} 筆，略過啟動時唯一索引以免鎖庫。"
+                " 機器人可正常運作；重複列會由 INSERT OR IGNORE 在有索引後再生效。"
+            )
+            return
+
+        logger.info("⏳ 背景建立 exp_history 唯一索引...")
+        try:
             await self.bot.db.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_history_unique
                 ON exp_history(record_time, server_name, player_name)
@@ -187,7 +195,9 @@ class ExpTracker(commands.Cog):
             await self.bot.db.commit()
             logger.info("✅ exp_history 唯一索引建立完成")
         except sqlite3.DatabaseError as e:
-            logger.error(f"❌ 建立 exp_history 唯一索引失敗: {e}")
+            logger.warning(
+                f"⚠️ 無法建立唯一索引（多半仍有重複列），已跳過以免影響運作: {e}"
+            )
 
     async def _ensure_search_indexes(self):
         try:
@@ -205,6 +215,12 @@ class ExpTracker(commands.Cog):
             if self.bot.is_closed():
                 return
 
+            try:
+                async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+                    row_count = (await cursor.fetchone())[0]
+            except sqlite3.DatabaseError:
+                row_count = 0
+
             indexes = [
                 ("idx_time_server", "CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)"),
                 ("idx_player_server", "CREATE INDEX IF NOT EXISTS idx_player_server ON exp_history(player_name, server_name)"),
@@ -215,6 +231,14 @@ class ExpTracker(commands.Cog):
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ) as cursor:
                 existing = {row[0] for row in await cursor.fetchall()}
+
+            missing = [item for item in indexes if item[0] not in existing]
+            if missing and row_count > 50_000:
+                names = ", ".join(name for name, _ in missing)
+                logger.warning(
+                    f"⚠️ exp_history 約 {row_count} 筆，略過啟動時建立索引: {names}"
+                )
+                return
 
             for name, ddl in indexes:
                 if self.bot.is_closed():

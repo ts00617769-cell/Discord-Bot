@@ -248,7 +248,9 @@ async def on_command_error(ctx, error):
 @bot.event
 async def on_ready():
     host = socket.gethostname()
-    print(f"🤖 {bot.user} 已成功登入 Discord 並準備就緒！ (PID {os.getpid()} @ {host})")
+    logger.info(
+        f"🤖 {bot.user} 已成功登入 Discord 並準備就緒！ (PID {os.getpid()} @ {host})"
+    )
     name_counts = Counter(cmd.name for cmd in bot.commands)
     dupes = [name for name, count in name_counts.items() if count > 1]
     if dupes:
