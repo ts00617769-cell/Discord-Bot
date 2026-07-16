@@ -1,0 +1,217 @@
+"""
+離線清理 prasia_data.db：刪除過期 exp_history / transfer_alerts_log，並 VACUUM 回收磁碟空間。
+
+使用前請先停止 bot（VACUUM 需要獨占存取）。
+
+範例：
+  python cleanup_db.py
+  python cleanup_db.py --days 60
+  python cleanup_db.py --days 30 --dry-run
+  python cleanup_db.py --wipe-history
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_DB = ROOT / "prasia_data.db"
+LOCK_PATH = ROOT / ".bot.lock"
+DEFAULT_DAYS = 60
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _bot_appears_running() -> bool:
+    """Best-effort：.bot.lock 存在且內容是數字 PID 時視為可能仍在跑。"""
+    if not LOCK_PATH.exists():
+        return False
+    try:
+        raw = LOCK_PATH.read_text(encoding="utf-8").strip()
+        if not raw.isdigit():
+            return False
+        pid = int(raw)
+        if sys.platform == "win32":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, PermissionError):
+        return False
+
+
+def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
+    row = conn.execute(sql, params).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="離線清理 prasia_data.db")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB,
+        help=f"資料庫路徑（預設：{DEFAULT_DB.name}）",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_DAYS,
+        help=f"保留天數（預設 {DEFAULT_DAYS}）",
+    )
+    parser.add_argument(
+        "--wipe-history",
+        action="store_true",
+        help="清空整張 exp_history 與 transfer_alerts_log（忽略 --days）",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只統計將刪除的筆數，不寫入、不 VACUUM",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="即使偵測到 bot 可能仍在執行也繼續",
+    )
+    parser.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="刪除後不做 VACUUM（檔案不會立刻變小）",
+    )
+    args = parser.parse_args()
+
+    if args.days < 1 and not args.wipe_history:
+        print("錯誤：--days 必須 >= 1（或改用 --wipe-history）", file=sys.stderr)
+        return 2
+
+    db_path: Path = args.db
+    if not db_path.is_file():
+        print(f"錯誤：找不到資料庫 {db_path}", file=sys.stderr)
+        return 1
+
+    if _bot_appears_running() and not args.force:
+        print(
+            f"錯誤：偵測到 bot 可能仍在執行（{LOCK_PATH.name}）。\n"
+            "請先停止 bot，或確認已停後加 --force。",
+            file=sys.stderr,
+        )
+        return 1
+
+    before = _file_size(db_path)
+    wal = Path(str(db_path) + "-wal")
+    shm = Path(str(db_path) + "-shm")
+    before_total = before + _file_size(wal) + _file_size(shm)
+
+    print(f"資料庫：{db_path}")
+    print(f"清理前大小：{_fmt_bytes(before)}（含 WAL/SHM 約 {_fmt_bytes(before_total)}）")
+
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history")
+        transfer_total = _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log")
+
+        if args.wipe_history:
+            exp_stale = exp_total
+            transfer_stale = transfer_total
+            mode = "清空全部歷史"
+        else:
+            exp_stale = _count(
+                conn,
+                """
+                SELECT COUNT(*) FROM exp_history
+                WHERE record_time < datetime('now', 'localtime', ?)
+                """,
+                (f"-{args.days} days",),
+            )
+            transfer_stale = _count(
+                conn,
+                """
+                SELECT COUNT(*) FROM transfer_alerts_log
+                WHERE alert_time < datetime('now', 'localtime', ?)
+                """,
+                (f"-{args.days} days",),
+            )
+            mode = f"保留最近 {args.days} 天"
+
+        print(f"模式：{mode}")
+        print(f"exp_history：共 {exp_total:,} 筆，將刪 {exp_stale:,} 筆")
+        print(f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆")
+
+        if args.dry_run:
+            print("dry-run：未修改資料庫。")
+            return 0
+
+        if exp_stale == 0 and transfer_stale == 0 and args.no_vacuum:
+            print("沒有可刪資料，略過。")
+            return 0
+
+        if args.wipe_history:
+            deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
+            deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
+        else:
+            deleted_exp = conn.execute(
+                """
+                DELETE FROM exp_history
+                WHERE record_time < datetime('now', 'localtime', ?)
+                """,
+                (f"-{args.days} days",),
+            ).rowcount
+            deleted_transfer = conn.execute(
+                """
+                DELETE FROM transfer_alerts_log
+                WHERE alert_time < datetime('now', 'localtime', ?)
+                """,
+                (f"-{args.days} days",),
+            ).rowcount
+
+        conn.commit()
+        print(f"已刪除：exp_history {deleted_exp:,}、transfer_alerts_log {deleted_transfer:,}")
+
+        if not args.no_vacuum:
+            print("正在 checkpoint + VACUUM（大庫可能需數分鐘）…")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+            print("VACUUM 完成。")
+        else:
+            print("已跳過 VACUUM（檔案大小可能尚未縮小）。")
+    finally:
+        conn.close()
+
+    after = _file_size(db_path)
+    after_total = after + _file_size(wal) + _file_size(shm)
+    print(f"清理後大小：{_fmt_bytes(after)}（含 WAL/SHM 約 {_fmt_bytes(after_total)}）")
+    if after < before:
+        print(f"回收約 {_fmt_bytes(before - after)}。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

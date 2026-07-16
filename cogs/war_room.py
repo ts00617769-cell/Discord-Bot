@@ -83,12 +83,12 @@ class WarRoom(commands.Cog):
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點清理過期資料並 VACUUM。"""
+        """每天凌晨 4 點清理超過 60 天的資料並 VACUUM。"""
         try:
             async with self.bot.db.execute(
                 """
                 DELETE FROM exp_history
-                WHERE record_time < datetime('now', 'localtime', '-180 days')
+                WHERE record_time < datetime('now', 'localtime', '-60 days')
                 """
             ) as cursor:
                 deleted_exp = cursor.rowcount or 0
@@ -96,7 +96,7 @@ class WarRoom(commands.Cog):
             async with self.bot.db.execute(
                 """
                 DELETE FROM transfer_alerts_log
-                WHERE alert_time < datetime('now', 'localtime', '-180 days')
+                WHERE alert_time < datetime('now', 'localtime', '-60 days')
                 """
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
