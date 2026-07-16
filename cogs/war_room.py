@@ -12,7 +12,14 @@ class WarRoom(commands.Cog):
         self.bot = bot
         self.log_channel_id = parse_env_channel_id("WAR_ROOM_CHANNEL_ID", 0)
         self._ready_announced = False
-        self.db_cleanup_task.start()
+
+    async def cog_load(self):
+        if not self.db_cleanup_task.is_running():
+            self.db_cleanup_task.start()
+
+    def cog_unload(self):
+        if self.db_cleanup_task.is_running():
+            self.db_cleanup_task.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):

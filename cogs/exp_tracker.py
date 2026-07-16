@@ -28,10 +28,14 @@ class ExpTracker(commands.Cog):
     # ✨ discord.py 提供的非同步初始化入口
     async def cog_load(self):
         await self.setup_database()
+        # 大型索引改背景建立，避免卡住 Discord 登入
+        self._index_task = asyncio.create_task(self._ensure_search_indexes())
         self.auto_fetch_exp.start()
 
     def cog_unload(self):
         self.auto_fetch_exp.cancel()
+        if getattr(self, '_index_task', None) and not self._index_task.done():
+            self._index_task.cancel()
         # 不需要再關閉 db_conn，因為 bot.py 關閉時會統一處理
 
     async def setup_database(self):
@@ -55,9 +59,6 @@ class ExpTracker(commands.Cog):
                 await self.bot.db.execute("ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0")
                 
         await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)')
-        await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_player_server ON exp_history(player_name, server_name)')
-        await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_exp ON exp_history(exp)')
-        await self.bot.db.execute('CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)')
 
         # ✨ 新增：用於記錄已發送過轉移警報的資料表，防止無限洗頻
         await self.bot.db.execute('''
@@ -80,6 +81,46 @@ class ExpTracker(commands.Cog):
         ''')
 
         await self.bot.db.commit()
+
+    async def _ensure_search_indexes(self):
+        """在背景建立尋人用索引，避免阻塞 setup_hook 導致 Discord 連線逾時崩潰。"""
+        try:
+            for _ in range(120):
+                if self.bot.is_closed():
+                    return
+                if self.bot.is_ready():
+                    break
+                await asyncio.sleep(1)
+
+            if self.bot.is_closed():
+                return
+
+            indexes = [
+                ('idx_player_server', 'CREATE INDEX IF NOT EXISTS idx_player_server ON exp_history(player_name, server_name)'),
+                ('idx_exp', 'CREATE INDEX IF NOT EXISTS idx_exp ON exp_history(exp)'),
+                ('idx_class_exp_time', 'CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)'),
+            ]
+            async with self.bot.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ) as cursor:
+                existing = {row[0] for row in await cursor.fetchall()}
+
+            for name, ddl in indexes:
+                if self.bot.is_closed():
+                    return
+                if name in existing:
+                    continue
+                logger.info(f"⏳ 背景建立資料庫索引 {name}（首次可能較久，不影響機器人上線）...")
+                try:
+                    await self.bot.db.execute(ddl)
+                    await self.bot.db.commit()
+                    logger.info(f"✅ 索引 {name} 建立完成")
+                except Exception as e:
+                    logger.error(f"❌ 建立索引 {name} 失敗（可稍後重試）: {e}")
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"❌ 檢查/建立尋人索引時發生錯誤: {e}")
 
     async def get_member_info(self, name):
         """改為非同步的讀取標記函數"""
