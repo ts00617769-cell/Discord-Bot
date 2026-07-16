@@ -934,13 +934,28 @@ class ExpTracker(commands.Cog):
             except (TypeError, ValueError):
                 return 9999.0
 
-        def _confidence(c_cls, exp_diff, c_sub, gap_hours):
-            # 高信心：同職 + 偷練 < 100億 + 討伐不矛盾 + 72 小時內銜接
+        def _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server):
+            """高信心門檻加嚴，避免同職+經驗接近的路人被當成轉服。"""
+            sub_ok = (c_sub is None or t_sub is None or c_sub == t_sub)
+            # 近乎絕對碰撞：偷練極小 + 72h 內（允許轉職導致職業不同）
+            if exp_diff <= 1e8 and gap_hours <= 72 and sub_ok:
+                return "high"
+            # 同服改名：必須更嚴（24h / 10億內 / 同職）
+            if same_server:
+                if (
+                    not unknown_cls and c_cls == t_cls
+                    and exp_diff < 1e9
+                    and gap_hours <= 24
+                    and sub_ok
+                ):
+                    return "high"
+                return "medium"
+            # 跨服無縫：同職 + 48h 內 + 偷練 < 50億 + 討伐一致
             if (
                 not unknown_cls and c_cls == t_cls
-                and exp_diff < 1e10
-                and (c_sub is None or t_sub is None or c_sub == t_sub)
-                and gap_hours <= 72
+                and exp_diff < 5e9
+                and gap_hours <= 48
+                and sub_ok
             ):
                 return "high"
             return "medium"
@@ -960,6 +975,8 @@ class ExpTracker(commands.Cog):
                     score -= 5e10
                 if same_server:
                     score -= 2e10  # 同服改名略加分
+                if exp_diff <= 1e8:
+                    score -= 1e12  # 近乎絕對碰撞權重最高
                 label = "✏️ 疑似同服改名" if same_server else "✈️ 疑似轉服/改名後"
                 candidates.append({
                     "direction": "forward",
@@ -968,7 +985,7 @@ class ExpTracker(commands.Cog):
                     "match_type": label,
                     "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
                     "score": score,
-                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours),
+                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
                 })
 
         sql_back = f'''
@@ -1012,6 +1029,8 @@ class ExpTracker(commands.Cog):
                     score -= 1e11
                 if c_lvl == t_lvl or c_lvl == t_lvl - 1:
                     score -= 5e10
+                if exp_diff <= 1e8:
+                    score -= 1e12
                 label = "✏️ 疑似同服改名前身" if same_server else "🔍 疑似前身"
                 candidates.append({
                     "direction": "backward",
@@ -1020,7 +1039,54 @@ class ExpTracker(commands.Cog):
                     "match_type": label,
                     "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
                     "score": score,
-                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours),
+                    "confidence": _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server),
+                })
+
+        candidates.sort(key=lambda x: x["score"])
+
+        # 額外：近乎絕對碰撞（≤1億）不限職業，避免轉職後漏抓
+        near_margin = 1e8
+        sql_near = '''
+            SELECT player_name, server_name,
+                   MAX(level) AS lvl,
+                   MAX(class_name) AS cls,
+                   MIN(record_time) AS first_seen,
+                   MAX(record_time) AS last_seen,
+                   MIN(exp) AS min_exp,
+                   MAX(exp) AS max_exp,
+                   MAX(subjugation_grade) AS sub_grade
+            FROM exp_history
+            WHERE NOT (player_name = ? AND server_name = ?)
+              AND exp BETWEEN ? AND ?
+            GROUP BY player_name, server_name
+            HAVING first_seen >= datetime(?, '-1 days')
+               AND first_seen <= datetime(?, '+7 days')
+               AND min_exp >= ? AND min_exp <= ?
+            ORDER BY (min_exp - ?) ASC
+            LIMIT 15
+        '''
+        async with self.bot.db.execute(sql_near, (
+            t_name, t_server, t_max_exp, t_max_exp + near_margin,
+            t_last, t_last, t_max_exp, t_max_exp + near_margin, t_max_exp
+        )) as cursor:
+            existing = {(c["name"], c["server"]) for c in candidates}
+            for row in await cursor.fetchall():
+                c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
+                if (c_name, c_server) in existing:
+                    continue
+                exp_diff = c_min - t_max_exp
+                gap_hours = _gap_hours(t_last, c_first)
+                same_server = c_server == t_server
+                if _confidence(c_cls, exp_diff, c_sub, gap_hours, same_server) != "high":
+                    continue
+                candidates.append({
+                    "direction": "forward",
+                    "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
+                    "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
+                    "match_type": "✈️ 疑似轉服/改名後",
+                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
+                    "score": exp_diff + gap_hours * 1e8 - 1e12,
+                    "confidence": "high",
                 })
 
         candidates.sort(key=lambda x: x["score"])
@@ -1114,9 +1180,7 @@ class ExpTracker(commands.Cog):
                         exact_matches = await cursor.fetchall()
 
                     for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
-                        known = (not self._is_unknown_class(t_cls) and not self._is_unknown_class(cls_name))
-                        if known and cls_name != t_cls:
-                            continue
+                        # 絕對經驗碰撞：EXP 完全一致已是最強訊號，允許轉職（職業不同）
                         if t_sub_grade is not None and sub_grade is not None:
                             if first_seen >= t_last and sub_grade < t_sub_grade:
                                 continue
@@ -1126,65 +1190,92 @@ class ExpTracker(commands.Cog):
                             p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp, confidence="high"
                         )
 
-                # 2) 無縫接軌：30 天窗、每方向保留多名候選
+                # 2) 無縫接軌：只把高信心納入主軌；medium 不混入成功軌跡
                 seamless = await self._find_seamless_candidates(
                     profile, EXP_MARGIN, window_days=30, limit=5
                 )
                 for cand in seamless:
                     soft_candidates.append(cand)
-                    # 高信心才繼續 BFS 展開，避免圖譜爆炸
                     if cand["confidence"] == "high":
                         await add_to_queue(
                             cand["name"], cand["server"], cand["match_type"],
                             cand["diff_text"], cand["exp_val"], confidence="high"
                         )
-                    elif cand["confidence"] == "medium" and hops == 0:
-                        # 第一層中信心候選也納入軌跡顯示，但不繼續向外擴張
-                        if (cand["name"], cand["server"]) not in seen_profiles:
-                            seen_profiles.add((cand["name"], cand["server"]))
-                            timeline_entries.append({
-                                "name": cand["name"], "server": cand["server"],
-                                "lvl": cand["lvl"], "cls": cand["cls"],
-                                "first": cand["first"], "last": cand["last"],
-                                "match_type": cand["match_type"],
-                                "diff_text": cand["diff_text"],
-                                "exp_val": cand["exp_val"],
-                                "sub_grade": cand["sub_grade"],
-                                "confidence": "medium",
-                            })
 
                 hops += 1
 
+            # 主軌只保留：查詢目標 / 登錄別名 / 高信心配對
             unique_entries = []
             seen = set()
             for entry in timeline_entries:
                 key = (entry["name"], entry["server"])
-                if key not in seen:
-                    seen.add(key)
-                    unique_entries.append(entry)
+                if key in seen:
+                    continue
+                is_seed = entry["match_type"] in ("🎯 查詢目標", "🏷️ 登錄別名")
+                if not is_seed and entry.get("confidence") != "high":
+                    continue
+                seen.add(key)
+                unique_entries.append(entry)
             unique_entries.sort(key=lambda x: x["first"])
 
+            has_linked = any(
+                e["match_type"] not in ("🎯 查詢目標", "🏷️ 登錄別名") for e in unique_entries
+            )
             only_self = len(unique_entries) <= 1 and all(x["name"] == target_name for x in unique_entries)
             target_last_exp = max(p[6] for p in target_profiles)
 
-            if only_self:
-                # 沒有高信心軌跡時，改顯示可疑候選（依分數）
+            # 沒有高信心轉服/改名連結時，才顯示可疑候選（與主軌分離）
+            if not has_linked:
                 soft_unique = []
-                soft_seen = set()
+                soft_seen = set(seen)
                 for cand in sorted(soft_candidates, key=lambda x: x["score"]):
                     key = (cand["name"], cand["server"])
-                    if key in soft_seen or key in seen:
+                    if key in soft_seen:
                         continue
                     soft_seen.add(key)
                     soft_unique.append(cand)
-                    if len(soft_unique) >= 8:
+                    if len(soft_unique) >= 5:
                         break
 
-                if not soft_unique:
-                    # 仍在榜上且經驗凍結時給更明確說明
-                    still_active = any(p[0] == target_name for p in target_profiles)
+                if soft_unique and only_self:
+                    desc = (
+                        f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」"
+                        f"（最後 {target_last_exp/1000000000000:.2f} 兆）的**可疑候選**：\n\n```yaml\n"
+                    )
+                    embeds = []
+                    for idx, p in enumerate(soft_unique, 1):
+                        exp_zhao = p["exp_val"] / 1_000_000_000_000
+                        entry = (
+                            f"{idx}. {p['name']} [{p['server']}]\n"
+                            f"   ▶ {p['match_type']} ({p['confidence']})\n"
+                            f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+                            f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+                            f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+                        )
+                        if len(desc) + len(entry) > 3800:
+                            desc += "```"
+                            embeds.append(discord.Embed(
+                                title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                                description=desc, color=0xf39c12
+                            ))
+                            desc = "```yaml\n" + entry
+                        else:
+                            desc += entry
+                    if desc != "```yaml\n":
+                        desc += "```"
+                        embeds.append(discord.Embed(
+                            title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                            description=desc, color=0xf39c12
+                        ))
+                    embeds[-1].set_footer(text="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度")
+                    await processing_msg.delete()
+                    for embed in embeds:
+                        await ctx.send(embed=embed)
+                    return
+
+                if only_self:
                     tip = ""
-                    if still_active:
+                    if any(p[0] == target_name for p in target_profiles):
                         tip = "\n（若目標仍持續出現在原服榜上，可能尚未轉服/改名。）"
                     return await processing_msg.edit(
                         content=(
@@ -1193,41 +1284,6 @@ class ExpTracker(commands.Cog):
                             f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
                         )
                     )
-
-                desc = (
-                    f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」"
-                    f"（最後 {target_last_exp/1000000000000:.2f} 兆）的**可疑候選**：\n\n```yaml\n"
-                )
-                embeds = []
-                for idx, p in enumerate(soft_unique, 1):
-                    exp_zhao = p["exp_val"] / 1_000_000_000_000
-                    entry = (
-                        f"{idx}. {p['name']} [{p['server']}]\n"
-                        f"   ▶ {p['match_type']} ({p['confidence']})\n"
-                        f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
-                        f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
-                        f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
-                    )
-                    if len(desc) + len(entry) > 3800:
-                        desc += "```"
-                        embeds.append(discord.Embed(
-                            title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
-                            description=desc, color=0xf39c12
-                        ))
-                        desc = "```yaml\n" + entry
-                    else:
-                        desc += entry
-                if desc != "```yaml\n":
-                    desc += "```"
-                    embeds.append(discord.Embed(
-                        title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
-                        description=desc, color=0xf39c12
-                    ))
-                embeds[-1].set_footer(text="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度")
-                await processing_msg.delete()
-                for embed in embeds:
-                    await ctx.send(embed=embed)
-                return
 
             embeds = []
             desc = f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n```yaml\n"
@@ -1247,7 +1303,7 @@ class ExpTracker(commands.Cog):
                 if len(desc) + len(entry_text) > 3800:
                     desc += "```"
                     embeds.append(discord.Embed(
-                        title=f"👁️ 天眼追蹤系統 (V5) - {target_name}",
+                        title=f"👁️ 天眼追蹤系統 (V5.1) - {target_name}",
                         description=desc, color=0xff0000
                     ))
                     desc = "```yaml\n" + entry_text
@@ -1257,10 +1313,10 @@ class ExpTracker(commands.Cog):
             if desc != "```yaml\n":
                 desc += "```"
                 embeds.append(discord.Embed(
-                    title=f"👁️ 天眼追蹤系統 (V5) - {target_name}",
+                    title=f"👁️ 天眼追蹤系統 (V5.1) - {target_name}",
                     description=desc, color=0xff0000
                 ))
-            embeds[-1].set_footer(text="V5：30天窗・多候選・同服改名・別名聯查・可疑候選回退")
+            embeds[-1].set_footer(text="V5.1：主軌僅高信心・絕對碰撞可跨職業・medium 不混入")
 
             await processing_msg.delete()
             for embed in embeds:
