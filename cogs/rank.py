@@ -78,7 +78,8 @@ class RankTracker(commands.Cog):
             if is_global:
                 all_players = await client.fetch_all_servers(SERVER_MAP)
             else:
-                all_players = await client.fetch_server(target_group_id, target_world_id)
+                result = await client.fetch_server(target_group_id, target_world_id)
+                all_players = result.players if result.ok else []
 
             if not all_players:
                 return await processing_msg.edit(content="❌ 撈取失敗，找不到資料。")

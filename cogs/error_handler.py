@@ -82,9 +82,15 @@ async def require_allowed_channel(ctx) -> bool:
 
 
 def min_complete_snapshot_servers() -> int:
-    """判定「全服快照已完成」所需的最少伺服器數（與 SERVER_MAP 連動）。"""
+    """判定「全服快照已完成」所需的最少伺服器數（預設全部 SERVER_MAP）。
+
+    可用環境變數 SNAPSHOT_MIN_SERVERS 覆寫；未設或無效時要求全服到齊。
+    """
     n = len(SERVER_MAP)
-    return max(2, n - 1)
+    raw = (os.getenv("SNAPSHOT_MIN_SERVERS", "") or "").strip()
+    if raw.isdigit():
+        return max(2, min(int(raw), n))
+    return max(2, n)
 
 
 def parse_env_float(env_name: str, default: float) -> float:

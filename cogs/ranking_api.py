@@ -1,6 +1,9 @@
 """共用官方排名 API 客戶端（含併發限制）。"""
+from __future__ import annotations
+
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import aiohttp
@@ -27,6 +30,15 @@ ALL_CLASSES = [
 _API_SEMAPHORE = asyncio.Semaphore(5)
 
 
+@dataclass
+class FetchResult:
+    """區分 API 失敗與真的空榜。"""
+
+    ok: bool
+    players: list = field(default_factory=list)
+    error: Optional[str] = None
+
+
 class RankingClient:
     """透過 bot.session 請求排名資料，並以 semaphore 限制併發。"""
 
@@ -34,32 +46,53 @@ class RankingClient:
         self.session = session
         self._sem = _API_SEMAPHORE if concurrency == 5 else asyncio.Semaphore(concurrency)
 
-    async def _post(self, payload: dict, timeout: float = 10) -> Optional[dict]:
+    async def _post_raw(self, payload: dict, timeout: float = 10) -> FetchResult:
+        """回傳 ok + 原始 dict（放在 players[0]）或錯誤。"""
         async with self._sem:
             try:
                 async with self.session.post(
                     RANKING_API_URL, json=payload, headers=RANKING_HEADERS, timeout=timeout
                 ) as response:
                     if response.status != 200:
-                        logger.warning(f"Ranking API HTTP {response.status} payload={payload}")
-                        return None
-                    return await response.json()
+                        msg = f"HTTP {response.status}"
+                        logger.warning(f"Ranking API {msg} payload={payload}")
+                        return FetchResult(ok=False, error=msg)
+                    data = await response.json()
+                    if not isinstance(data, dict):
+                        msg = f"non-dict JSON type={type(data).__name__}"
+                        logger.error(f"Ranking API {msg} payload={payload}")
+                        return FetchResult(ok=False, error=msg)
+                    return FetchResult(ok=True, players=[data])
             except asyncio.TimeoutError:
                 logger.error(f"Ranking API timeout payload={payload}")
+                return FetchResult(ok=False, error="timeout")
             except aiohttp.ClientError as e:
                 logger.error(f"Ranking API client error: {e}")
+                return FetchResult(ok=False, error=str(e))
             except (ValueError, TypeError) as e:
                 logger.error(f"Ranking API JSON parse error: {e}")
-            return None
+                return FetchResult(ok=False, error=str(e))
 
     async def fetch_class(
         self, group_id: str, world_id: str, class_key: Optional[str], limit: int = 100
-    ) -> list:
+    ) -> FetchResult:
         payload = {"world_group_id": group_id, "world_id": world_id, "class": class_key}
-        data = await self._post(payload)
-        if not data:
-            return []
-        return (data.get("data") or {}).get("gc", [])[:limit]
+        raw = await self._post_raw(payload)
+        if not raw.ok:
+            return FetchResult(ok=False, error=raw.error)
+        data = raw.players[0] if raw.players else {}
+        body = data.get("data")
+        if body is None:
+            gc = []
+        elif isinstance(body, dict):
+            gc = body.get("gc") or []
+        else:
+            logger.error(f"Ranking API data field not dict: {type(body).__name__}")
+            return FetchResult(ok=False, error="data_not_dict")
+        if not isinstance(gc, list):
+            logger.error(f"Ranking API gc not list: {type(gc).__name__}")
+            return FetchResult(ok=False, error="gc_not_list")
+        return FetchResult(ok=True, players=gc[:limit])
 
     async def fetch_server(
         self,
@@ -69,7 +102,7 @@ class RankingClient:
         classes: Optional[list] = None,
         limit: int = 100,
         overall_only: bool = False,
-    ) -> list:
+    ) -> FetchResult:
         """抓取單一伺服器玩家；overall_only 只打總榜（討伐排名用）。"""
         if overall_only:
             return await self.fetch_class(group_id, world_id, None, limit=limit)
@@ -78,13 +111,24 @@ class RankingClient:
         results = await asyncio.gather(
             *[self.fetch_class(group_id, world_id, c, limit=limit) for c in class_list]
         )
+        failed = [r for r in results if not r.ok]
+        if failed:
+            err = failed[0].error or "class_fetch_failed"
+            logger.warning(
+                f"fetch_server incomplete group={group_id} world={world_id}: "
+                f"{len(failed)}/{len(results)} class endpoints failed ({err})"
+            )
+            return FetchResult(ok=False, error=err)
+
         unique_players: dict[str, Any] = {}
         for res in results:
-            for p in res:
+            for p in res.players:
+                if not isinstance(p, dict):
+                    continue
                 name = p.get("gc_name")
                 if name and name not in unique_players:
                     unique_players[name] = p
-        return list(unique_players.values())
+        return FetchResult(ok=True, players=list(unique_players.values()))
 
     async def fetch_all_servers(self, server_map: dict, **kwargs) -> list:
         tasks = [
@@ -94,22 +138,25 @@ class RankingClient:
         results = await asyncio.gather(*tasks)
         all_players = []
         for r in results:
-            all_players.extend(r)
+            if r.ok:
+                all_players.extend(r.players)
         return all_players
 
     async def probe_server(self, group_id: str, world_id: str) -> dict:
-        """對單一伺服器打總榜探活（與官網 Ranking 同一支 API）。"""
-        players = await self.fetch_class(group_id, world_id, None, limit=3)
+        """對單一伺服器打總榜探活（與官網 Ranking API）。"""
+        result = await self.fetch_class(group_id, world_id, None, limit=3)
+        players = result.players if result.ok else []
         sample_name = ""
         world_name = ""
         if players:
             sample_name = str(players[0].get("gc_name") or "")
             world_name = str(players[0].get("world_name") or "")
         return {
-            "ok": bool(players),
+            "ok": bool(result.ok and players),
             "count": len(players),
             "sample_name": sample_name,
             "world_name": world_name,
+            "error": result.error,
         }
 
     async def validate_server_map(self, server_map: dict) -> dict:

@@ -274,12 +274,25 @@ class ExpTracker(commands.Cog):
             now_time = datetime.datetime.now().replace(second=0, microsecond=0)
             logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前100名...")
             client = get_ranking_client(self.bot)
-            
+
+            servers_ok = []
+            servers_failed = []
+
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
-                    players = await client.fetch_server(g_id, w_id)
+                    result = await client.fetch_server(g_id, w_id)
+                    if not result.ok:
+                        servers_failed.append(server_name)
+                        logger.warning(
+                            f"⚠️ 伺服器 {server_name} 抓取失敗，略過寫入: {result.error}"
+                        )
+                        continue
+
                     insert_batch = []
-                    for p in players:
+                    for p in result.players:
+                        name = p.get("gc_name")
+                        if not name:
+                            continue
                         grade_val = (p.get("string_map") or {}).get("grade", "0")
                         try:
                             grade = int(grade_val)
@@ -288,7 +301,7 @@ class ExpTracker(commands.Cog):
                         insert_batch.append((
                             now_time,
                             server_name,
-                            p.get("gc_name"),
+                            name,
                             p.get("gc_level"),
                             p.get("gc_exp", 0),
                             p.get("class_name", "未知"),
@@ -302,15 +315,27 @@ class ExpTracker(commands.Cog):
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                         ''', insert_batch)
                         await self.bot.db.commit()
+                    servers_ok.append(server_name)
                 except sqlite3.DatabaseError as e:
+                    servers_failed.append(server_name)
                     logger.error(f"DB error processing server {server_name}: {e}")
                     continue
                 except (asyncio.TimeoutError, OSError) as e:
+                    servers_failed.append(server_name)
                     logger.error(f"Network/IO error processing server {server_name}: {e}")
                     continue
                 await asyncio.sleep(0.5)
-            
-            await self.check_for_alerts(now_time)
+
+            snapshot_complete = (
+                len(servers_failed) == 0
+                and len(servers_ok) >= len(SERVER_MAP)
+            )
+            if not snapshot_complete:
+                logger.warning(
+                    f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/{len(SERVER_MAP)} "
+                    f"failed={servers_failed}；跳過轉服偵測"
+                )
+            await self.check_for_alerts(now_time, run_transfers=snapshot_complete)
         except sqlite3.DatabaseError as e:
             logger.error(f"🚨 [經驗值雷達] 資料庫錯誤：{e}\n{traceback.format_exc()}")
         except (asyncio.TimeoutError, OSError) as e:
@@ -320,7 +345,7 @@ class ExpTracker(commands.Cog):
         except discord.HTTPException as e:
             logger.error(f"🚨 [經驗值雷達] Discord 發送失敗：{e}")
 
-    async def check_for_alerts(self, current_time):
+    async def check_for_alerts(self, current_time, *, run_transfers: bool = True):
         min_servers = min_complete_snapshot_servers()
         sql_times = f'''
             SELECT record_time
@@ -331,11 +356,11 @@ class ExpTracker(commands.Cog):
         '''
         async with self.bot.db.execute(sql_times) as cursor:
             times = await cursor.fetchall()
-            
+
         if len(times) < 2:
             return
         time_now, time_prev_scan = times[0][0], times[1][0]
-        
+
         fmt = "%Y-%m-%d %H:%M:%S"
         t1 = datetime.datetime.strptime(time_now, fmt)
 
@@ -426,7 +451,10 @@ class ExpTracker(commands.Cog):
                                 except discord.HTTPException as e:
                                     logger.error(f"Failed to send alert to {channel_id}: {e}")
 
-        await self.check_for_transfers(time_now, time_prev_scan)
+        if run_transfers:
+            await self.check_for_transfers(time_now, time_prev_scan, complete_times=times)
+        else:
+            logger.info("本輪略過轉服偵測（快照不完整）")
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
         """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""
@@ -481,7 +509,8 @@ class ExpTracker(commands.Cog):
     async def _send_transfer_alert(
         self, time_now, new_name, new_server, old_name, old_server,
         new_lvl, new_cls, new_sub_grade, status_str, exp_diff,
-    ):
+    ) -> int:
+        """發送轉服警報；回傳成功送達的頻道數。"""
         if exp_diff == 0:
             diff_str = "+0.00% (完美吻合)"
         else:
@@ -491,31 +520,46 @@ class ExpTracker(commands.Cog):
             title="【波拉西亞戰記】轉移/旅團變動警報",
             description=(
                 f"時間：{time_now}\n{'-' * 30}\n"
-                        f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
-                        f"**{new_name}** ({new_server})\n"
-                        f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
+                f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
+                f"**{new_name}** ({new_server})\n"
+                f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
                 f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}"
             ),
             color=0xf1c40f,
         )
+        success = 0
         for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
             channel = self.bot.get_channel(channel_id)
             if channel:
                 try:
                     await channel.send(embed=embed)
+                    success += 1
                 except discord.HTTPException as e:
                     logger.error(f"Failed to send transfer alert to {channel_id}: {e}")
+        return success
 
-    async def check_for_transfers(self, time_now, time_prev):
+    async def _player_present_at(self, record_time, player_name, server_name) -> bool:
+        async with self.bot.db.execute(
+            "SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?",
+            (record_time, player_name, server_name),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def check_for_transfers(self, time_now, time_prev, complete_times=None):
         try:
-            # 同名允許較大 margin；異名（僅同職）收緊到 100 億，降低假陽性
-            NAME_MARGIN = 1.0 * 1000000000000
+            # 同名 margin 收緊到 1000 億；異名（僅同職）100 億
+            NAME_MARGIN = 1000 * 100000000
             CLASS_MARGIN = 100 * 100000000
             transfer_records = await self._get_potential_transfers(
                 time_now, time_prev, NAME_MARGIN, CLASS_MARGIN
             )
             if not transfer_records:
                 return
+
+            # 連續缺席確認：需在最近兩個完整快照都找不到舊角
+            miss_times = [time_now]
+            if complete_times and len(complete_times) >= 2:
+                miss_times = [complete_times[0][0], complete_times[1][0]]
 
             async with self.bot.db.execute(
                 "SELECT player_name, original_identity FROM member_registry"
@@ -536,9 +580,9 @@ class ExpTracker(commands.Cog):
 
             transfer_records.sort(
                 key=lambda x: (
-                0 if x[1] == x[5] else 1,
-                0 if is_known_alias(x[1], x[5]) else 1,
-                0 if x[3] == x[7] else 1,
+                    0 if x[1] == x[5] else 1,
+                    0 if is_known_alias(x[1], x[5]) else 1,
+                    0 if x[3] == x[7] else 1,
                     0 if (x[10] is not None and x[11] is not None and x[10] == x[11]) else 1,
                     x[0] - x[9],
                 )
@@ -580,17 +624,25 @@ class ExpTracker(commands.Cog):
                 if already_alerted:
                     continue
 
-                async with self.bot.db.execute(
-                    "SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?",
-                    (time_now, old_name, old_server),
-                ) as check_cursor:
-                    is_old_still_active = await check_cursor.fetchone()
+                # 需連續兩個完整快照都缺席，降低掉出前100的假警報
+                old_missing_all = True
+                for miss_t in miss_times:
+                    if await self._player_present_at(miss_t, old_name, old_server):
+                        old_missing_all = False
+                        break
+                if not old_missing_all:
+                    continue
 
-                if not is_old_still_active:
-                    reported_pairs.add(pair_key)
-                    matched_old.add(old_key)
-                    matched_new.add(new_key)
+                reported_pairs.add(pair_key)
+                matched_old.add(old_key)
+                matched_new.add(new_key)
 
+                status_str = "跨服轉移並改名" if new_name != old_name else "跨服轉移"
+                sent = await self._send_transfer_alert(
+                    time_now, new_name, new_server, old_name, old_server,
+                    new_lvl, new_cls, new_sub_grade, status_str, new_exp - old_exp,
+                )
+                if sent > 0:
                     await self.bot.db.execute(
                         '''
                         INSERT INTO transfer_alerts_log
@@ -600,12 +652,15 @@ class ExpTracker(commands.Cog):
                         (old_name, old_server, new_name, new_server, time_now),
                     )
                     await self.bot.db.commit()
-
-                    status_str = "跨服轉移並改名" if new_name != old_name else "跨服轉移"
-                    await self._send_transfer_alert(
-                        time_now, new_name, new_server, old_name, old_server,
-                        new_lvl, new_cls, new_sub_grade, status_str, new_exp - old_exp,
+                else:
+                    logger.warning(
+                        f"轉服警報送出失敗，未寫入 dedupe："
+                        f"{old_name}@{old_server} -> {new_name}@{new_server}"
                     )
+                    # 送失敗時放開配對鎖，下輪可重試
+                    reported_pairs.discard(pair_key)
+                    matched_old.discard(old_key)
+                    matched_new.discard(new_key)
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error in transfer check: {e}\n{traceback.format_exc()}")
         except (ValueError, TypeError, KeyError) as e:

@@ -138,7 +138,7 @@ class PrasiaBot(commands.Bot):
             db_path = os.path.join(os.path.dirname(__file__), "prasia_data.db")
             self.db = await aiosqlite.connect(db_path)
             await self.db.execute("PRAGMA journal_mode=WAL")
-            await self.db.execute("PRAGMA busy_timeout=5000")
+            await self.db.execute("PRAGMA busy_timeout=30000")
             logger.info(f"✅ 資料庫已連接: {db_path}")
 
             await self.db.execute('''
@@ -221,26 +221,15 @@ async def on_command_error(ctx, error):
         return
     if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
         return
-    if isinstance(error, commands.CommandOnCooldown):
-        try:
-            await ctx.send(
-                f"⏳ 指令冷卻中，請再等 {error.retry_after:.0f} 秒。",
-                delete_after=8,
-            )
-        except discord.HTTPException:
-            pass
-        return
-    if isinstance(error, commands.MaxConcurrencyReached):
-        try:
-            await ctx.send("⏳ 相同指令正在執行中，請稍後再試。", delete_after=8)
-        except discord.HTTPException:
-            pass
-        return
-    if isinstance(error, commands.MissingRequiredArgument):
-        try:
-            await ctx.send(f"❌ 參數不足：`{error.param.name}` 必填。請檢查指令用法。", delete_after=12)
-        except discord.HTTPException:
-            pass
+    # 冷卻／併發／參數錯誤由 WarRoom.on_command_error 統一回覆，避免雙重訊息
+    if isinstance(
+        error,
+        (
+            commands.CommandOnCooldown,
+            commands.MaxConcurrencyReached,
+            commands.UserInputError,
+        ),
+    ):
         return
     # 其餘錯誤由 WarRoom.on_command_error 統一上報，此處不再重複 log
 

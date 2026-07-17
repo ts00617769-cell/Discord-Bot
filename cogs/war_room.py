@@ -43,14 +43,36 @@ class WarRoom(commands.Cog):
     async def on_command_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
             return
+
+        # 冷卻／併發／參數錯誤：回覆使用者，避免「下指令沒反應」
+        if isinstance(error, commands.CommandOnCooldown):
+            try:
+                await ctx.send(
+                    f"⏳ 指令冷卻中，請再等 **{error.retry_after:.0f}** 秒。",
+                    delete_after=10,
+                )
+            except discord.HTTPException:
+                pass
+            return
+        if isinstance(error, commands.MaxConcurrencyReached):
+            try:
+                await ctx.send("⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10)
+            except discord.HTTPException:
+                pass
+            return
+        if isinstance(error, commands.UserInputError):
+            try:
+                usage = getattr(ctx.command, "help", None) or "請檢查指令參數。"
+                await ctx.send(f"❌ 參數錯誤。{usage}", delete_after=15)
+            except discord.HTTPException:
+                pass
+            return
+
         if isinstance(
             error,
             (
                 commands.CommandNotFound,
                 commands.NotOwner,
-                commands.CommandOnCooldown,
-                commands.MaxConcurrencyReached,
-                commands.UserInputError,
                 commands.CheckFailure,
             ),
         ):
@@ -83,7 +105,7 @@ class WarRoom(commands.Cog):
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點清理超過 60 天的資料並 VACUUM。"""
+        """每天凌晨 4 點清理超過 60 天的資料（不在線上 VACUUM，避免鎖庫）。"""
         try:
             async with self.bot.db.execute(
                 """
@@ -103,20 +125,12 @@ class WarRoom(commands.Cog):
 
             await self.bot.db.commit()
 
-            vacuumed = False
-            if deleted_exp > 0 or deleted_transfer > 0:
-                try:
-                    await self.bot.db.execute("VACUUM")
-                    vacuumed = True
-                except sqlite3.DatabaseError as e:
-                    logger.warning(f"VACUUM 失敗（可忽略）: {e}")
-
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel and (deleted_exp > 0 or deleted_transfer > 0):
-                vacuum_note = "，並已 VACUUM" if vacuumed else ""
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 清理 `exp_history` {deleted_exp} 筆、"
-                    f"`transfer_alerts_log` {deleted_transfer} 筆{vacuum_note}。"
+                    f"`transfer_alerts_log` {deleted_transfer} 筆。"
+                    f"（VACUUM 請離線執行 `cleanup_db.py`）"
                 )
 
         except sqlite3.DatabaseError as e:

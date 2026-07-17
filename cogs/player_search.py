@@ -67,6 +67,16 @@ class PlayerSearch(commands.Cog):
     def _is_unknown_class(self, cls_name):
         return cls_name in (None, "", "None", "未知")
 
+    def _class_compatible(self, t_cls, c_cls):
+        """high 信心要求職業相符，或雙方皆未知。"""
+        t_unknown = self._is_unknown_class(t_cls)
+        c_unknown = self._is_unknown_class(c_cls)
+        if t_unknown and c_unknown:
+            return True
+        if t_unknown or c_unknown:
+            return False
+        return t_cls == c_cls
+
     @staticmethod
     def _gap_hours(anchor_str, point_str):
         try:
@@ -177,14 +187,15 @@ class PlayerSearch(commands.Cog):
         return embeds
 
     def _confidence(self, t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server):
-        unknown_cls = self._is_unknown_class(t_cls)
+        class_ok = self._class_compatible(t_cls, c_cls)
         sub_ok = c_sub is None or t_sub is None or c_sub == t_sub
-        if exp_diff <= 1e8 and gap_hours <= 72 and sub_ok:
+        # high 一律要求職業相容（雙方未知可視為相容）
+        if class_ok and exp_diff <= 1e8 and gap_hours <= 72 and sub_ok:
             return "high"
         if same_server:
             if (
-                not unknown_cls
-                and c_cls == t_cls
+                class_ok
+                and not self._is_unknown_class(t_cls)
                 and exp_diff < 1e9
                 and gap_hours <= 24
                 and sub_ok
@@ -192,8 +203,8 @@ class PlayerSearch(commands.Cog):
                 return "high"
             return "medium"
         if (
-            not unknown_cls
-            and c_cls == t_cls
+            class_ok
+            and not self._is_unknown_class(t_cls)
             and exp_diff < 5e9
             and gap_hours <= 48
             and sub_ok
@@ -289,14 +300,28 @@ class PlayerSearch(commands.Cog):
     async def _recent_exp_anchors(self, player_name, server_name, limit=8):
         async with self.bot.db.execute(
             '''
-            SELECT DISTINCT exp FROM exp_history
+            SELECT exp FROM exp_history
             WHERE player_name = ? AND server_name = ?
-            ORDER BY record_time DESC
+            GROUP BY exp
+            ORDER BY MAX(record_time) DESC
             LIMIT ?
             ''',
             (player_name, server_name, limit),
         ) as cursor:
             return [row[0] for row in await cursor.fetchall()]
+
+    async def _early_window_min_exp(self, player_name, server_name, first_seen, days=7):
+        """觀測前 N 天內的最小 EXP（避免終生 MIN 撞早期路人）。"""
+        async with self.bot.db.execute(
+            '''
+            SELECT MIN(exp) FROM exp_history
+            WHERE player_name = ? AND server_name = ?
+              AND record_time <= datetime(?, ?)
+            ''',
+            (player_name, server_name, first_seen, f'+{int(days)} days'),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
 
     async def _find_seamless_candidates(self, profile, exp_margin, window_days=30, limit=8):
         """無縫接軌候選。
@@ -308,6 +333,10 @@ class PlayerSearch(commands.Cog):
         t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub = profile
         unknown_cls = self._is_unknown_class(t_cls)
         candidates = []
+
+        early_min = await self._early_window_min_exp(t_name, t_server, t_first, days=7)
+        if early_min is not None:
+            t_min_exp = early_min
 
         cls_filter = "" if unknown_cls else "AND cls = ?"
         cls_params = [] if unknown_cls else [t_cls]
@@ -549,198 +578,239 @@ class PlayerSearch(commands.Cog):
             f"!尋人 start user={ctx.author.id} channel={ctx.channel.id} "
             f"parent={getattr(ctx.channel, 'parent_id', None)} name={target_name!r}"
         )
+
+        # 立刻給可見回饋（表情 + 回覆），避免長查詢看起來像沒反應
         try:
-            processing_msg = await ctx.send(
-                f"🔍 啟動天眼雙引擎，正在掃描「{target_name}」..."
+            await ctx.message.add_reaction("🔍")
+        except discord.HTTPException:
+            pass
+
+        try:
+            processing_msg = await ctx.reply(
+                f"🔍 **天眼啟動**，正在掃描「**{target_name}**」…\n"
+                f"⏳ 比對經驗特徵中，請稍候（通常數秒～數十秒）。",
+                mention_author=False,
             )
         except discord.HTTPException as e:
             logger.error(f"!尋人 無法在頻道 {ctx.channel.id} 發送訊息: {e}")
             return
 
         try:
-            related_names = await self._get_related_names(target_name)
-            target_profiles = await self._fetch_profiles_by_names(related_names)
+            async with ctx.typing():
+                related_names = await self._get_related_names(target_name)
+                target_profiles = await self._fetch_profiles_by_names(related_names)
 
-            if not target_profiles:
-                return await processing_msg.edit(
-                    content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。"
-                )
-
-            EXP_MARGIN = 1.0 * 1000000000000
-            timeline_entries = []
-            soft_candidates = []
-            seen_profiles = set()
-            queue = deque()
-
-            async def add_to_queue(
-                p_name, p_server, m_type, d_text, e_val, profile=None, confidence="high"
-            ):
-                if (p_name, p_server) in seen_profiles:
-                    return
-                seen_profiles.add((p_name, p_server))
-                if profile is None:
-                    profile = await self._fetch_single_profile(p_name, p_server)
-                if not profile:
-                    return
-                queue.append({
-                    "profile": profile,
-                    "match_type": m_type,
-                    "diff_text": d_text,
-                    "exp_val": e_val,
-                    "confidence": confidence,
-                })
-
-            for tp in target_profiles:
-                label = "🎯 查詢目標" if tp[0] == target_name else "🏷️ 登錄別名"
-                await add_to_queue(tp[0], tp[1], label, "", tp[6], profile=tp)
-
-            bfs_limit = 30
-            hops = 0
-
-            while queue and hops < bfs_limit:
-                current = queue.popleft()
-                profile = current["profile"]
-                t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = profile
-
-                timeline_entries.append({
-                    "name": t_name, "server": t_server, "lvl": t_lvl, "cls": t_cls,
-                    "first": t_first, "last": t_last,
-                    "match_type": current["match_type"],
-                    "diff_text": current["diff_text"],
-                    "exp_val": current["exp_val"] or t_max_exp,
-                    "sub_grade": t_sub_grade,
-                    "confidence": current.get("confidence", "high"),
-                })
-
-                anchors = await self._recent_exp_anchors(t_name, t_server, limit=8)
-                if t_min_exp not in anchors:
-                    anchors.append(t_min_exp)
-                if t_max_exp not in anchors:
-                    anchors.append(t_max_exp)
-
-                if anchors:
-                    placeholders = ",".join("?" for _ in anchors)
-                    sql_exact = f'''
-                        SELECT exp, player_name, server_name, MAX(level),
-                               (SELECT e2.class_name FROM exp_history e2
-                                WHERE e2.player_name = exp_history.player_name
-                                  AND e2.server_name = exp_history.server_name
-                                ORDER BY e2.record_time DESC LIMIT 1),
-                               MIN(record_time), MAX(record_time), MAX(subjugation_grade)
-                        FROM exp_history
-                        WHERE exp IN ({placeholders})
-                          AND NOT (player_name = ? AND server_name = ?)
-                        GROUP BY exp, player_name, server_name
-                        LIMIT 30
-                    '''
-                    async with self.bot.db.execute(
-                        sql_exact, tuple(anchors + [t_name, t_server])
-                    ) as cursor:
-                        exact_matches = await cursor.fetchall()
-
-                    for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
-                        if t_sub_grade is not None and sub_grade is not None:
-                            if first_seen >= t_last and sub_grade < t_sub_grade:
-                                continue
-                            if last_seen <= t_first and t_sub_grade < sub_grade:
-                                continue
-                        # 觀測區間完全無重疊且間隔 > 30 天：不進主軌 BFS，改列 soft
-                        obs_gap = self._observation_gap_hours(
-                            t_first, t_last, first_seen, last_seen,
-                        )
-                        if obs_gap > 30 * 24:
-                            soft_candidates.append({
-                                "direction": "forward" if first_seen >= t_last else "backward",
-                                "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name,
-                                "first": first_seen, "last": last_seen, "exp_val": exp,
-                                "sub_grade": sub_grade,
-                                "match_type": "🔗 絕對經驗值碰撞（時間過遠）",
-                                "diff_text": f"EXP 完全一致（觀測間隔 {obs_gap/24:.0f} 天）",
-                                "exp_diff": 0,
-                                "score": obs_gap * 1e8,
-                                "confidence": "medium",
-                            })
-                            continue
-                        await add_to_queue(
-                            p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp, confidence="high"
-                        )
-
-                seamless = await self._find_seamless_candidates(
-                    profile, EXP_MARGIN, window_days=30, limit=5
-                )
-                for cand in seamless:
-                    soft_candidates.append(cand)
-                    if cand["confidence"] == "high":
-                        await add_to_queue(
-                            cand["name"], cand["server"], cand["match_type"],
-                            cand["diff_text"], cand["exp_val"], confidence="high",
-                        )
-                hops += 1
-
-            unique_entries = []
-            seen = set()
-            for entry in timeline_entries:
-                key = (entry["name"], entry["server"])
-                if key in seen:
-                    continue
-                is_seed = entry["match_type"] in ("🎯 查詢目標", "🏷️ 登錄別名")
-                if not is_seed and entry.get("confidence") != "high":
-                    continue
-                seen.add(key)
-                unique_entries.append(entry)
-            unique_entries.sort(key=lambda x: x["first"])
-
-            has_linked = any(
-                e["match_type"] not in ("🎯 查詢目標", "🏷️ 登錄別名") for e in unique_entries
-            )
-            only_self = len(unique_entries) <= 1 and all(
-                x["name"] == target_name for x in unique_entries
-            )
-            target_last_exp = max(p[6] for p in target_profiles)
-
-            if not has_linked:
-                soft_unique = self._pick_soft_candidates(soft_candidates, seen)
-
-                if soft_unique and only_self:
-                    embeds = self._build_track_embeds(
-                        target_name,
-                        list(unique_entries) + list(soft_unique),
-                        header=(
-                            f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」的**可疑候選**：\n\n"
-                        ),
-                        title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
-                        color=0xf39c12,
-                        footer="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度",
-                        show_confidence=True,
-                    )
-                    await processing_msg.delete()
-                    for embed in embeds:
-                        await ctx.send(embed=embed)
-                    return
-
-                if only_self:
-                    tip = ""
-                    if any(p[0] == target_name for p in target_profiles):
-                        tip = "\n（若目標仍持續出現在原服榜上，可能尚未轉服/改名。）"
+                if not target_profiles:
                     return await processing_msg.edit(
-                        content=(
-                            f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n"
-                            f"雙引擎未找到符合條件的轉服/改名軌跡。{tip}\n"
-                            f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
-                        )
+                        content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。"
                     )
 
-            embeds = self._build_track_embeds(
-                target_name,
-                unique_entries,
-                header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
-                title=f"👁️ 天眼追蹤系統 (V5.1) - {target_name}",
-                color=0xff0000,
-                footer="V5.1：主軌僅高信心・絕對碰撞可跨職業・medium 不混入",
-            )
-            await processing_msg.delete()
-            for embed in embeds:
-                await ctx.send(embed=embed)
+                EXP_MARGIN = 1.0 * 1000000000000
+                timeline_entries = []
+                soft_candidates = []
+                seen_profiles = set()
+                queue = deque()
+
+                async def add_to_queue(
+                    p_name, p_server, m_type, d_text, e_val, profile=None, confidence="high"
+                ):
+                    if (p_name, p_server) in seen_profiles:
+                        return
+                    seen_profiles.add((p_name, p_server))
+                    if profile is None:
+                        profile = await self._fetch_single_profile(p_name, p_server)
+                    if not profile:
+                        return
+                    queue.append({
+                        "profile": profile,
+                        "match_type": m_type,
+                        "diff_text": d_text,
+                        "exp_val": e_val,
+                        "confidence": confidence,
+                    })
+
+                for tp in target_profiles:
+                    label = "🎯 查詢目標" if tp[0] == target_name else "🏷️ 登錄別名"
+                    await add_to_queue(tp[0], tp[1], label, "", tp[6], profile=tp)
+
+                bfs_limit = 30
+                hops = 0
+
+                while queue and hops < bfs_limit:
+                    current = queue.popleft()
+                    profile = current["profile"]
+                    t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = profile
+
+                    timeline_entries.append({
+                        "name": t_name, "server": t_server, "lvl": t_lvl, "cls": t_cls,
+                        "first": t_first, "last": t_last,
+                        "match_type": current["match_type"],
+                        "diff_text": current["diff_text"],
+                        "exp_val": current["exp_val"] or t_max_exp,
+                        "sub_grade": t_sub_grade,
+                        "confidence": current.get("confidence", "high"),
+                    })
+
+                    if hops == 0 or hops % 5 == 0:
+                        try:
+                            await processing_msg.edit(
+                                content=(
+                                    f"🔍 **天眼掃描中**「**{target_name}**」…\n"
+                                    f"⏳ 進度：第 {hops + 1}/{bfs_limit} 步"
+                                    f"（已鎖定 {len(timeline_entries)} 筆軌跡）"
+                                )
+                            )
+                        except discord.HTTPException:
+                            pass
+
+                    anchors = await self._recent_exp_anchors(t_name, t_server, limit=8)
+                    if t_min_exp not in anchors:
+                        anchors.append(t_min_exp)
+                    if t_max_exp not in anchors:
+                        anchors.append(t_max_exp)
+
+                    if anchors:
+                        placeholders = ",".join("?" for _ in anchors)
+                        sql_exact = f'''
+                            SELECT exp, player_name, server_name, MAX(level),
+                                   (SELECT e2.class_name FROM exp_history e2
+                                    WHERE e2.player_name = exp_history.player_name
+                                      AND e2.server_name = exp_history.server_name
+                                    ORDER BY e2.record_time DESC LIMIT 1),
+                                   MIN(record_time), MAX(record_time), MAX(subjugation_grade)
+                            FROM exp_history
+                            WHERE exp IN ({placeholders})
+                              AND NOT (player_name = ? AND server_name = ?)
+                            GROUP BY exp, player_name, server_name
+                            LIMIT 30
+                        '''
+                        async with self.bot.db.execute(
+                            sql_exact, tuple(anchors + [t_name, t_server])
+                        ) as cursor:
+                            exact_matches = await cursor.fetchall()
+
+                        for exp, p_name, s_name, lvl, cls_name, first_seen, last_seen, sub_grade in exact_matches:
+                            if t_sub_grade is not None and sub_grade is not None:
+                                if first_seen >= t_last and sub_grade < t_sub_grade:
+                                    continue
+                                if last_seen <= t_first and t_sub_grade < sub_grade:
+                                    continue
+                            # 觀測區間完全無重疊且間隔 > 30 天：不進主軌 BFS，改列 soft
+                            obs_gap = self._observation_gap_hours(
+                                t_first, t_last, first_seen, last_seen,
+                            )
+                            class_ok = self._class_compatible(t_cls, cls_name)
+                            if obs_gap > 30 * 24 or not class_ok:
+                                soft_candidates.append({
+                                    "direction": "forward" if first_seen >= t_last else "backward",
+                                    "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name,
+                                    "first": first_seen, "last": last_seen, "exp_val": exp,
+                                    "sub_grade": sub_grade,
+                                    "match_type": (
+                                        "🔗 絕對經驗值碰撞（職業不符）"
+                                        if not class_ok
+                                        else "🔗 絕對經驗值碰撞（時間過遠）"
+                                    ),
+                                    "diff_text": (
+                                        f"EXP 完全一致"
+                                        + (f"（觀測間隔 {obs_gap/24:.0f} 天）" if obs_gap > 0 else "")
+                                    ),
+                                    "exp_diff": 0,
+                                    "score": obs_gap * 1e8 + (0 if class_ok else 1e12),
+                                    "confidence": "medium",
+                                })
+                                continue
+                            # 觀測窗需銜接（重疊或間隔 ≤ 72h）才進 high 主軌
+                            if obs_gap > 72:
+                                soft_candidates.append({
+                                    "direction": "forward" if first_seen >= t_last else "backward",
+                                    "name": p_name, "server": s_name, "lvl": lvl, "cls": cls_name,
+                                    "first": first_seen, "last": last_seen, "exp_val": exp,
+                                    "sub_grade": sub_grade,
+                                    "match_type": "🔗 絕對經驗值碰撞（銜接偏遠）",
+                                    "diff_text": f"EXP 完全一致（觀測間隔 {obs_gap/24:.1f} 天）",
+                                    "exp_diff": 0,
+                                    "score": obs_gap * 1e8,
+                                    "confidence": "medium",
+                                })
+                                continue
+                            await add_to_queue(
+                                p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp,
+                                confidence="high",
+                            )
+
+                    seamless = await self._find_seamless_candidates(
+                        profile, EXP_MARGIN, window_days=30, limit=5
+                    )
+                    for cand in seamless:
+                        soft_candidates.append(cand)
+                        if cand["confidence"] == "high":
+                            await add_to_queue(
+                                cand["name"], cand["server"], cand["match_type"],
+                                cand["diff_text"], cand["exp_val"], confidence="high",
+                            )
+                    hops += 1
+
+                unique_entries = []
+                seen = set()
+                for entry in timeline_entries:
+                    key = (entry["name"], entry["server"])
+                    if key in seen:
+                        continue
+                    is_seed = entry["match_type"] in ("🎯 查詢目標", "🏷️ 登錄別名")
+                    if not is_seed and entry.get("confidence") != "high":
+                        continue
+                    seen.add(key)
+                    unique_entries.append(entry)
+                unique_entries.sort(key=lambda x: x["first"])
+
+                has_linked = any(
+                    e["match_type"] not in ("🎯 查詢目標", "🏷️ 登錄別名") for e in unique_entries
+                )
+                only_self = len(unique_entries) <= 1 and all(
+                    x["name"] == target_name for x in unique_entries
+                )
+                target_last_exp = max(p[6] for p in target_profiles)
+
+                if not has_linked:
+                    soft_unique = self._pick_soft_candidates(soft_candidates, seen)
+
+                    if soft_unique and only_self:
+                        embeds = self._build_track_embeds(
+                            target_name,
+                            list(unique_entries) + list(soft_unique),
+                            header=(
+                                f"⚠️ **未找到高信心軌跡**，以下是「{target_name}」的**可疑候選**：\n\n"
+                            ),
+                            title=f"👁️ 天眼追蹤（可疑候選）- {target_name}",
+                            color=0xf39c12,
+                            footer="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度",
+                            show_confidence=True,
+                        )
+                        await self._deliver_embeds(ctx, processing_msg, embeds)
+                        return
+
+                    if only_self:
+                        tip = ""
+                        if any(p[0] == target_name for p in target_profiles):
+                            tip = "\n（若目標仍持續出現在原服榜上，可能尚未轉服/改名。）"
+                        return await processing_msg.edit(
+                            content=(
+                                f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n"
+                                f"雙引擎未找到符合條件的轉服/改名軌跡。{tip}\n"
+                                f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
+                            )
+                        )
+
+                embeds = self._build_track_embeds(
+                    target_name,
+                    unique_entries,
+                    header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
+                    title=f"👁️ 天眼追蹤系統 (V5.2) - {target_name}",
+                    color=0xff0000,
+                    footer="V5.2：主軌需職業相容・絕對碰撞需銜接・medium 不混入",
+                )
+                await self._deliver_embeds(ctx, processing_msg, embeds)
 
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error tracking '{target_name}': {e}\n{traceback.format_exc()}")
@@ -768,6 +838,39 @@ class PlayerSearch(commands.Cog):
             except discord.NotFound:
                 pass
 
+    async def _deliver_embeds(self, ctx, processing_msg, embeds):
+        """先 edit 第一則，其餘再 send；避免 delete 後失敗變成無回應。"""
+        if not embeds:
+            try:
+                await processing_msg.edit(content="❌ 無結果可顯示。")
+            except discord.HTTPException:
+                pass
+            return
+        try:
+            await processing_msg.edit(content=None, embed=embeds[0])
+        except discord.HTTPException as e:
+            logger.error(f"edit processing_msg failed: {e}")
+            try:
+                await ctx.send(embed=embeds[0])
+            except discord.HTTPException:
+                return
+        for embed in embeds[1:]:
+            try:
+                await ctx.send(embed=embed)
+            except discord.HTTPException as e:
+                logger.error(f"send embed failed: {e}")
+                break
+
+    @track_player.error
+    async def track_player_error(self, ctx, error):
+        """參數錯誤給專屬提示；冷卻／併發交由 WarRoom 統一處理。"""
+        if isinstance(error, commands.MissingRequiredArgument):
+            try:
+                await ctx.send("❌ 請輸入玩家名稱。用法：`!尋人 小碎冰`")
+            except discord.HTTPException:
+                pass
+            return
+
     @commands.command(
         name="轉服掃描",
         aliases=["移民清單", "抓包"],
@@ -789,7 +892,7 @@ class PlayerSearch(commands.Cog):
                 GROUP BY exp
                 HAVING COUNT(DISTINCT server_name) > 1
                 ORDER BY MAX(record_time) DESC
-                LIMIT 10
+                LIMIT 30
                 '''
             ) as cursor:
                 shared_exps = await cursor.fetchall()
@@ -804,7 +907,14 @@ class PlayerSearch(commands.Cog):
 
             async with self.bot.db.execute(
                 f'''
-                SELECT exp, player_name, server_name, MIN(record_time), MAX(record_time)
+                SELECT exp, player_name, server_name,
+                       MIN(record_time), MAX(record_time),
+                       MAX(level),
+                       (SELECT e2.class_name FROM exp_history e2
+                        WHERE e2.player_name = exp_history.player_name
+                          AND e2.server_name = exp_history.server_name
+                        ORDER BY e2.record_time DESC LIMIT 1),
+                       MAX(subjugation_grade)
                 FROM exp_history
                 WHERE exp IN ({placeholders})
                 GROUP BY exp, player_name, server_name
@@ -815,20 +925,57 @@ class PlayerSearch(commands.Cog):
                 records = await cursor.fetchall()
 
             grouped_data = {}
-            for exp, p_name, s_name, first_seen, last_seen in records:
-                grouped_data.setdefault(exp, []).append(
-                    {"name": p_name, "server": s_name, "first": first_seen, "last": last_seen}
-                )
+            for exp, p_name, s_name, first_seen, last_seen, lvl, cls, sub in records:
+                grouped_data.setdefault(exp, []).append({
+                    "name": p_name, "server": s_name,
+                    "first": first_seen, "last": last_seen,
+                    "lvl": lvl, "cls": cls, "sub": sub,
+                })
+
+            def _causal_pairs(players):
+                """A 結束後 B 開始、不可雙活躍、同職或未知。"""
+                pairs = []
+                for i, a in enumerate(players):
+                    for b in players[i + 1:]:
+                        if a["server"] == b["server"]:
+                            continue
+                        # 不可觀測區間重疊（雙活躍）
+                        if not (
+                            a["last"] < b["first"] or b["last"] < a["first"]
+                        ):
+                            continue
+                        earlier, later = (a, b) if a["last"] <= b["first"] else (b, a)
+                        gap = self._observation_gap_hours(
+                            earlier["first"], earlier["last"],
+                            later["first"], later["last"],
+                        )
+                        if gap > 30 * 24:
+                            continue
+                        a_cls, b_cls = a.get("cls"), b.get("cls")
+                        if not self._class_compatible(a_cls, b_cls):
+                            continue
+                        pairs.append((earlier, later, gap))
+                return pairs
 
             embeds = []
-            desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊：**\n\n"
+            desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊（含因果時間窗）：**\n\n"
+            shown = 0
             for exp, players in grouped_data.items():
+                causal = _causal_pairs(players)
+                if not causal:
+                    continue
                 exp_zhao = exp / 1_000_000_000_000
                 desc += f"🔗 **特徵碼：{exp_zhao:.3f} 兆**\n```yaml\n"
-                for idx, p in enumerate(players, 1):
-                    desc += f"{idx}. {p['name']} [{p['server']}]\n"
-                    desc += f"   (觀測區間: {p['first'][5:16]} ~ {p['last'][5:16]})\n"
+                for earlier, later, gap in causal[:3]:
+                    desc += (
+                        f"• {earlier['name']} [{earlier['server']}] "
+                        f"({earlier['first'][5:16]}~{earlier['last'][5:16]})\n"
+                        f"  → {later['name']} [{later['server']}] "
+                        f"({later['first'][5:16]}~{later['last'][5:16]})"
+                        f" 空窗 {gap/24:.1f} 天\n"
+                    )
                 desc += "```\n"
+                shown += 1
                 if len(desc) > 1500:
                     embeds.append(
                         discord.Embed(
@@ -838,6 +985,13 @@ class PlayerSearch(commands.Cog):
                         )
                     )
                     desc = ""
+                if shown >= 10:
+                    break
+
+            if shown == 0:
+                return await processing_msg.edit(
+                    content="💤 有共用 EXP，但沒有符合「先結束再開始、非雙活躍」的因果配對。"
+                )
 
             if desc:
                 embeds.append(
@@ -848,10 +1002,9 @@ class PlayerSearch(commands.Cog):
                     )
                 )
 
-            await processing_msg.delete()
             for e in embeds:
-                e.set_footer(text="※ 原理：轉服期間經驗值會凍結，利用相同特徵追蹤移動軌跡。")
-                await ctx.send(embed=e)
+                e.set_footer(text="※ 僅列出觀測窗不重疊且職業相容的配對。")
+            await self._deliver_embeds(ctx, processing_msg, embeds)
 
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error during transfer scan: {e}")
