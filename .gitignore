@@ -5,6 +5,12 @@ __pycache__/
 .bot.lock
 prasia_data.db-shm
 prasia_data.db-wal
+.pytest_cache/
+.venv/
+venv/
+*.pyc
+_boot_out.txt
+_q_out2.txt
 
 # Google Sheets API 服務帳號金鑰
 service_account.json

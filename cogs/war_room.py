@@ -124,6 +124,11 @@ class WarRoom(commands.Cog):
                 deleted_transfer = cursor.rowcount or 0
 
             await self.bot.db.commit()
+            # 協助查詢規劃器更新統計（不鎖表、不做 VACUUM）
+            try:
+                await self.bot.db.execute("PRAGMA optimize")
+            except sqlite3.DatabaseError as e:
+                logger.warning(f"PRAGMA optimize 略過: {e}")
 
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel and (deleted_exp > 0 or deleted_transfer > 0):

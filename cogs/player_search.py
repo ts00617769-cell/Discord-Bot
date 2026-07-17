@@ -1,4 +1,4 @@
-"""天眼尋人 / 轉服掃描指令（自 exp_tracker 拆出）。"""
+"""天眼尋人 / 轉服掃描指令（匹配邏輯見 services.player_matching）。"""
 import asyncio
 import datetime
 import logging
@@ -9,51 +9,13 @@ from collections import deque
 import discord
 from discord.ext import commands
 
+from services import player_matching as match
 from .error_handler import require_allowed_channel, parse_env_channel_ids
 
 logger = logging.getLogger(__name__)
 
-# 履歷聚合 SELECT（fetch profile 用）
-_PROFILE_SELECT = """
-    e.player_name, e.server_name,
-    MAX(e.level), MIN(e.record_time), MAX(e.record_time),
-    MIN(e.exp), MAX(e.exp),
-    (SELECT e2.class_name FROM exp_history e2
-     WHERE e2.player_name = e.player_name AND e2.server_name = e.server_name
-     ORDER BY e2.record_time DESC LIMIT 1) AS class_name,
-    MAX(e.subjugation_grade)
-"""
-
-# 無縫查詢共用 CTE：hit 粗篩 + prof 完整履歷聚合；fwd/back/near 只差 WHERE
-_PROFILE_CTE = """
-    WITH hit AS (
-        SELECT DISTINCT player_name, server_name
-        FROM exp_history
-        WHERE NOT (player_name = ? AND server_name = ?)
-          AND exp BETWEEN ? AND ?
-    ),
-    prof AS (
-        SELECT e.player_name, e.server_name,
-               MAX(e.level) AS lvl,
-               MIN(e.record_time) AS first_seen,
-               MAX(e.record_time) AS last_seen,
-               MIN(e.exp) AS min_exp,
-               MAX(e.exp) AS max_exp,
-               MAX(e.subjugation_grade) AS sub_grade,
-               (SELECT e2.class_name FROM exp_history e2
-                WHERE e2.player_name = e.player_name
-                  AND e2.server_name = e.server_name
-                ORDER BY e2.record_time DESC LIMIT 1) AS cls
-        FROM exp_history e
-        INNER JOIN hit
-          ON hit.player_name = e.player_name
-         AND hit.server_name = e.server_name
-        GROUP BY e.player_name, e.server_name
-    )
-    SELECT player_name, server_name, lvl, cls,
-           first_seen, last_seen, min_exp, max_exp, sub_grade
-    FROM prof
-"""
+_PROFILE_SELECT = match.PROFILE_SELECT
+_PROFILE_CTE = match.PROFILE_CTE
 
 
 class PlayerSearch(commands.Cog):
@@ -65,105 +27,32 @@ class PlayerSearch(commands.Cog):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     def _is_unknown_class(self, cls_name):
-        return cls_name in (None, "", "None", "未知")
+        return match.is_unknown_class(cls_name)
 
     def _class_compatible(self, t_cls, c_cls):
-        """high 信心要求職業相符，或雙方皆未知。"""
-        t_unknown = self._is_unknown_class(t_cls)
-        c_unknown = self._is_unknown_class(c_cls)
-        if t_unknown and c_unknown:
-            return True
-        if t_unknown or c_unknown:
-            return False
-        return t_cls == c_cls
+        return match.class_compatible(t_cls, c_cls)
 
     @staticmethod
     def _gap_hours(anchor_str, point_str):
-        try:
-            fmt = "%Y-%m-%d %H:%M:%S"
-            return abs(
-                (
-                    datetime.datetime.strptime(point_str, fmt)
-                    - datetime.datetime.strptime(anchor_str, fmt)
-                ).total_seconds()
-            ) / 3600
-        except (TypeError, ValueError):
-            return 9999.0
+        return match.gap_hours(anchor_str, point_str)
 
     @staticmethod
     def _observation_gap_hours(a_first, a_last, b_first, b_last):
-        """兩段觀測區間若不重疊，回傳最近端點的小時差；重疊則 0。"""
-        try:
-            fmt = "%Y-%m-%d %H:%M:%S"
-            af = datetime.datetime.strptime(a_first, fmt)
-            al = datetime.datetime.strptime(a_last, fmt)
-            bf = datetime.datetime.strptime(b_first, fmt)
-            bl = datetime.datetime.strptime(b_last, fmt)
-        except (TypeError, ValueError):
-            return 9999.0
-        if al < bf:
-            return (bf - al).total_seconds() / 3600
-        if bl < af:
-            return (af - bl).total_seconds() / 3600
-        return 0.0
+        return match.observation_gap_hours(a_first, a_last, b_first, b_last)
 
     def _pick_soft_candidates(
         self, soft_candidates, exclude_keys, per_direction=2, max_diff_over_best=2e10,
     ):
-        """每方向最多 per_direction 名；同方向經驗差遠大於最佳則淘汰。"""
-        soft_unique = []
-        soft_seen = set(exclude_keys)
-        for direction in ("forward", "backward"):
-            dir_cands = sorted(
-                (c for c in soft_candidates if c.get("direction") == direction),
-                key=lambda x: x["score"],
-            )
-            # 同 (name, server, direction) 只留最佳 score
-            best_by_key = {}
-            for cand in dir_cands:
-                key = (cand["name"], cand["server"], direction)
-                if key not in best_by_key:
-                    best_by_key[key] = cand
-            dir_cands = sorted(best_by_key.values(), key=lambda x: x["score"])
-
-            picked = []
-            for cand in dir_cands:
-                key = (cand["name"], cand["server"])
-                if key in soft_seen:
-                    continue
-                if picked:
-                    best_diff = picked[0].get("exp_diff", 0)
-                    cand_diff = cand.get("exp_diff", best_diff)
-                    if cand_diff > best_diff + max_diff_over_best:
-                        continue
-                soft_seen.add(key)
-                picked.append(cand)
-                if len(picked) >= per_direction:
-                    break
-            soft_unique.extend(picked)
-        soft_unique.sort(key=lambda x: x["score"])
-        return soft_unique
+        return match.pick_soft_candidates(
+            soft_candidates,
+            exclude_keys,
+            per_direction=per_direction,
+            max_diff_over_best=max_diff_over_best,
+        )
 
     @staticmethod
     def _format_track_entry(idx, p, *, show_confidence=False):
-        """單筆軌跡 yaml 行。無 diff_text 時顯示 EXP；有則顯示關聯。"""
-        exp_zhao = p["exp_val"] / 1_000_000_000_000
-        conf = p.get("confidence", "high")
-        if show_confidence or conf != "high":
-            type_line = f"   ▶ {p['match_type']} ({conf})\n"
-        else:
-            type_line = f"   ▶ {p['match_type']}\n"
-        lines = (
-            f"{idx}. {p['name']} [{p['server']}]\n"
-            f"{type_line}"
-            f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
-            f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
-        )
-        if p.get("diff_text"):
-            lines += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
-        else:
-            lines += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
-        return lines
+        return match.format_track_entry(idx, p, show_confidence=show_confidence)
 
     def _build_track_embeds(
         self, target_name, entries, *, header, title, color, footer, show_confidence=False,
@@ -187,75 +76,44 @@ class PlayerSearch(commands.Cog):
         return embeds
 
     def _confidence(self, t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server):
-        class_ok = self._class_compatible(t_cls, c_cls)
-        sub_ok = c_sub is None or t_sub is None or c_sub == t_sub
-        # high 一律要求職業相容（雙方未知可視為相容）
-        if class_ok and exp_diff <= 1e8 and gap_hours <= 72 and sub_ok:
-            return "high"
-        if same_server:
-            if (
-                class_ok
-                and not self._is_unknown_class(t_cls)
-                and exp_diff < 1e9
-                and gap_hours <= 24
-                and sub_ok
-            ):
-                return "high"
-            return "medium"
-        if (
-            class_ok
-            and not self._is_unknown_class(t_cls)
-            and exp_diff < 5e9
-            and gap_hours <= 48
-            and sub_ok
-        ):
-            return "high"
-        return "medium"
+        return match.confidence(
+            t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server
+        )
 
     def _score(
         self, t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl, same_server,
         forward=True,
     ):
-        score = exp_diff + gap_hours * 1e8
-        if not self._is_unknown_class(t_cls) and c_cls == t_cls:
-            score -= 5e11
-        if c_sub == t_sub:
-            score -= 1e11
-        elif (
-            c_sub is not None
-            and t_sub is not None
-            and abs(c_sub - t_sub) <= 1
-        ):
-            score -= 5e10
-        if forward:
-            if c_lvl == t_lvl:
-                score -= 5e10
-            if same_server:
-                score -= 2e10
-        else:
-            if c_lvl == t_lvl or c_lvl == t_lvl - 1:
-                score -= 5e10
-        if exp_diff <= 1e8:
-            score -= 1e12
-        return score
+        return match.score(
+            t_cls,
+            t_sub,
+            t_lvl,
+            exp_diff,
+            gap_hours,
+            c_cls,
+            c_sub,
+            c_lvl,
+            same_server,
+            forward=forward,
+        )
 
     async def _fetch_name_profiles(self, player_name, server_name=None):
         """依玩家名取履歷；可選 server_name 則回傳單筆（或 None）。"""
         if server_name is None:
-            sql = f'''
+            sql = f"""
                 SELECT {_PROFILE_SELECT}
                 FROM exp_history e
                 WHERE e.player_name = ?
                 GROUP BY e.player_name, e.server_name
-            '''
+            """
             async with self.bot.db.execute(sql, (player_name,)) as cursor:
                 return await cursor.fetchall()
-        sql = f'''
+        sql = f"""
             SELECT {_PROFILE_SELECT}
             FROM exp_history e
             WHERE e.player_name = ? AND e.server_name = ?
             GROUP BY e.player_name, e.server_name
-        '''
+        """
         async with self.bot.db.execute(sql, (player_name, server_name)) as cursor:
             return await cursor.fetchone()
 

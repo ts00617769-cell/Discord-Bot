@@ -1,0 +1,4 @@
+# 開發／測試依賴（正式部署只需 requirements.txt）
+-r requirements.txt
+pytest==8.3.5
+pytest-asyncio==0.25.3

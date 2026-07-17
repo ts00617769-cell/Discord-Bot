@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands, tasks
 
 from game_data import SERVER_MAP
+from db import apply_migrations, ensure_search_indexes
 from .error_handler import (
     min_complete_snapshot_servers,
     parse_env_channel_ids,
@@ -39,11 +40,11 @@ class ExpTracker(commands.Cog):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     async def cog_load(self):
-        await self.setup_database()
+        # schema 已在 bot.setup_hook 套用；此處再跑一次以支援 !reload
+        await apply_migrations(self.bot.db)
         await self._load_alert_settings()
         self._index_task = asyncio.create_task(self._ensure_search_indexes())
         self.auto_fetch_exp.start()
-        # 啟動後背景探活 SERVER_MAP（與官網 Ranking API 同源）
         self._validate_task = asyncio.create_task(self._startup_validate_servers())
 
     def cog_unload(self):
@@ -52,54 +53,6 @@ class ExpTracker(commands.Cog):
             task = getattr(self, attr, None)
             if task and not task.done():
                 task.cancel()
-
-    async def setup_database(self):
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS exp_history (
-                record_time TIMESTAMP,
-                server_name TEXT,
-                player_name TEXT,
-                level INTEGER,
-                exp REAL
-            )
-        ''')
-        
-        async with self.bot.db.execute("PRAGMA table_info(exp_history)") as cursor:
-            columns = [row[1] for row in await cursor.fetchall()]
-            if "class_name" not in columns:
-                await self.bot.db.execute(
-                    "ALTER TABLE exp_history ADD COLUMN class_name TEXT DEFAULT '未知'"
-                )
-            if "subjugation_grade" not in columns:
-                await self.bot.db.execute(
-                    "ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0"
-                )
-
-        # 表結構同步建好即可；大型索引／去重改背景執行，避免卡住 on_ready。
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS transfer_alerts_log (
-                old_name TEXT,
-                old_server TEXT,
-                new_name TEXT,
-                new_server TEXT,
-                alert_time TIMESTAMP,
-                PRIMARY KEY (old_name, old_server, new_name, new_server)
-            )
-        ''')
-
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS member_registry (
-                player_name TEXT PRIMARY KEY,
-                original_identity TEXT
-            )
-        ''')
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        ''')
-        await self.bot.db.commit()
 
     async def _load_alert_settings(self):
         """從 DB 還原警報開關，避免重啟後漏監控。"""
@@ -163,42 +116,6 @@ class ExpTracker(commands.Cog):
         except (asyncio.TimeoutError, OSError) as e:
             logger.warning(f"啟動伺服器探活略過: {e}")
 
-    async def _ensure_unique_exp_index(self):
-        """嘗試建立唯一索引；絕不在啟動路徑做全表 DELETE（會鎖庫並讓指令全面卡住）。"""
-        async with self.bot.db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_exp_history_unique'"
-        ) as cursor:
-            if await cursor.fetchone():
-                return
-
-        try:
-            async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
-                row_count = (await cursor.fetchone())[0]
-        except sqlite3.DatabaseError as e:
-            logger.warning(f"無法讀取 exp_history 筆數，略過唯一索引: {e}")
-            return
-
-        # 大表建唯一索引仍可能長時間鎖寫入；啟動時直接跳過，避免平台判定失敗
-        if row_count > 50_000:
-            logger.warning(
-                f"⚠️ exp_history 約 {row_count} 筆，略過啟動時唯一索引以免鎖庫。"
-                " 機器人可正常運作；重複列會由 INSERT OR IGNORE 在有索引後再生效。"
-            )
-            return
-
-        logger.info("⏳ 背景建立 exp_history 唯一索引...")
-        try:
-            await self.bot.db.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_history_unique
-                ON exp_history(record_time, server_name, player_name)
-            ''')
-            await self.bot.db.commit()
-            logger.info("✅ exp_history 唯一索引建立完成")
-        except sqlite3.DatabaseError as e:
-            logger.warning(
-                f"⚠️ 無法建立唯一索引（多半仍有重複列），已跳過以免影響運作: {e}"
-            )
-
     async def _ensure_search_indexes(self):
         try:
             for _ in range(120):
@@ -207,51 +124,9 @@ class ExpTracker(commands.Cog):
                 if self.bot.is_ready():
                     break
                 await asyncio.sleep(1)
-
             if self.bot.is_closed():
                 return
-
-            await self._ensure_unique_exp_index()
-            if self.bot.is_closed():
-                return
-
-            try:
-                async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
-                    row_count = (await cursor.fetchone())[0]
-            except sqlite3.DatabaseError:
-                row_count = 0
-
-            indexes = [
-                ("idx_time_server", "CREATE INDEX IF NOT EXISTS idx_time_server ON exp_history(record_time, server_name)"),
-                ("idx_player_server", "CREATE INDEX IF NOT EXISTS idx_player_server ON exp_history(player_name, server_name)"),
-                ("idx_exp", "CREATE INDEX IF NOT EXISTS idx_exp ON exp_history(exp)"),
-                ("idx_class_exp_time", "CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)"),
-            ]
-            async with self.bot.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            ) as cursor:
-                existing = {row[0] for row in await cursor.fetchall()}
-
-            missing = [item for item in indexes if item[0] not in existing]
-            if missing and row_count > 50_000:
-                names = ", ".join(name for name, _ in missing)
-                logger.warning(
-                    f"⚠️ exp_history 約 {row_count} 筆，略過啟動時建立索引: {names}"
-                )
-                return
-
-            for name, ddl in indexes:
-                if self.bot.is_closed():
-                    return
-                if name in existing:
-                    continue
-                logger.info(f"⏳ 背景建立資料庫索引 {name}...")
-                try:
-                    await self.bot.db.execute(ddl)
-                    await self.bot.db.commit()
-                    logger.info(f"✅ 索引 {name} 建立完成")
-                except sqlite3.DatabaseError as e:
-                    logger.error(f"❌ 建立索引 {name} 失敗: {e}")
+            await ensure_search_indexes(self.bot.db)
         except asyncio.CancelledError:
             return
         except sqlite3.DatabaseError as e:

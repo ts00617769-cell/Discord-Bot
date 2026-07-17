@@ -8,10 +8,11 @@ import sqlite3
 from collections import Counter
 from dotenv import load_dotenv
 import aiohttp
-import aiosqlite
 import logging
 
-from cogs.ranking_api import RankingClient
+from cogs.ranking_api import get_ranking_client
+from db import apply_migrations, connect_db
+from db.connection import resolve_db_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -133,23 +134,13 @@ class PrasiaBot(commands.Bot):
                 )
             }
             self.session = aiohttp.ClientSession(headers=headers)
-            self.ranking_client = RankingClient(self.session)
+            # 經 get_ranking_client 套用 RANKING_CACHE_TTL 等環境設定
+            self.ranking_client = get_ranking_client(self)
 
-            db_path = os.path.join(os.path.dirname(__file__), "prasia_data.db")
-            self.db = await aiosqlite.connect(db_path)
-            await self.db.execute("PRAGMA journal_mode=WAL")
-            await self.db.execute("PRAGMA busy_timeout=30000")
-            logger.info(f"✅ 資料庫已連接: {db_path}")
-
-            await self.db.execute('''
-                CREATE TABLE IF NOT EXISTS cmd_dedupe (
-                    message_id INTEGER PRIMARY KEY,
-                    claimed_at TEXT NOT NULL,
-                    pid INTEGER,
-                    host TEXT
-                )
-            ''')
-            await self.db.commit()
+            db_path = resolve_db_path(os.path.dirname(os.path.abspath(__file__)))
+            self.db = await connect_db(db_path)
+            schema_ver = await apply_migrations(self.db)
+            logger.info(f"✅ schema 版本: v{schema_ver}")
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.error(
