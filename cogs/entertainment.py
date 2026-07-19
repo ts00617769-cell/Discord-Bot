@@ -10,7 +10,6 @@ import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands
 
-from db import apply_migrations
 from services.timeutil import today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -19,9 +18,6 @@ logger = logging.getLogger(__name__)
 class Entertainment(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    async def cog_load(self):
-        await apply_migrations(self.bot.db)
 
     @commands.command(name="鍊成", help="模擬四合一鍊成。")
     async def alchemy(self, ctx, rarity: str):

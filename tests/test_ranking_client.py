@@ -57,6 +57,21 @@ async def test_retries_on_timeout_then_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_fetch_all_servers_reports_failures():
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    ok = FetchResult(ok=True, players=[{"gc_name": "A"}])
+    bad = FetchResult(ok=False, error="timeout")
+    client.fetch_server = AsyncMock(side_effect=[ok, bad])  # type: ignore[method-assign]
+
+    players, failed = await client.fetch_all_servers(
+        {"服A": ("g1", "w1"), "服B": ("g2", "w2")}
+    )
+    assert len(players) == 1
+    assert failed == ["服B"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_class_parses_gc():
     session = MagicMock()
     client = RankingClient(session, cache_ttl=0, max_retries=0)

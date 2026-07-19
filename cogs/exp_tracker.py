@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands, tasks
 
 from game_data import SERVER_MAP
-from db import apply_migrations, ensure_search_indexes
+from db import ensure_search_indexes
 from services.exp_speed import (
     collect_overspeed,
     collect_speed_ranking,
@@ -24,6 +24,7 @@ from services.transfer_detect import (
     POTENTIAL_TRANSFERS_SQL,
     build_alias_map,
     format_exp_diff,
+    pick_unique_pairs,
     rank_transfer_candidates,
 )
 from services.error_handler import (
@@ -57,8 +58,7 @@ class ExpTracker(commands.Cog):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     async def cog_load(self):
-        # schema 已在 bot.setup_hook 套用；此處再跑一次以支援 !reload
-        await apply_migrations(self.bot.db)
+        # schema 已在 bot.setup_hook 套用；!reload 時不必再 migrate
         await self._load_alert_settings()
         self._index_task = asyncio.create_task(self._ensure_search_indexes())
         self.auto_fetch_exp.start()
@@ -192,14 +192,12 @@ class ExpTracker(commands.Cog):
                     continue
                 await asyncio.sleep(0.5)
 
-            snapshot_complete = (
-                len(servers_failed) == 0
-                and len(servers_ok) >= len(SERVER_MAP)
-            )
+            snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
             if not snapshot_complete:
                 logger.warning(
-                    f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/{len(SERVER_MAP)} "
-                    f"failed={servers_failed}；跳過轉服偵測"
+                    f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/"
+                    f"{min_complete_snapshot_servers()} "
+                    f"(map={len(SERVER_MAP)}) failed={servers_failed}；跳過轉服偵測"
                 )
             await self.check_for_alerts(now_time, run_transfers=snapshot_complete)
         except sqlite3.DatabaseError as e:
@@ -210,6 +208,8 @@ class ExpTracker(commands.Cog):
             logger.error(f"🚨 [經驗值雷達] 資料格式錯誤：{e}\n{traceback.format_exc()}")
         except discord.HTTPException as e:
             logger.error(f"🚨 [經驗值雷達] Discord 發送失敗：{e}")
+        except Exception as e:
+            logger.error(f"🚨 [經驗值雷達] 未預期錯誤：{e}\n{traceback.format_exc()}")
 
     async def check_for_alerts(self, current_time, *, run_transfers: bool = True):
         min_servers = min_complete_snapshot_servers()
@@ -358,35 +358,23 @@ class ExpTracker(commands.Cog):
             ) as cursor:
                 registry_rows = await cursor.fetchall()
 
+            async with self.bot.db.execute(
+                """
+                SELECT old_name, old_server, new_name, new_server
+                FROM transfer_alerts_log
+                """
+            ) as cursor:
+                already_alerted = {tuple(row) for row in await cursor.fetchall()}
+
             alias_map = build_alias_map(registry_rows)
             ranked = rank_transfer_candidates(transfer_records, alias_map)
 
-            matched_old: set[tuple] = set()
-            matched_new: set[tuple] = set()
-
+            viable = []
             for row in ranked:
-                new_exp = row[0]
-                new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
-                old_name, old_server = row[5], row[6]
-                old_exp = row[9]
-                new_sub_grade = row[10]
-
-                old_key = (old_name, old_server)
-                new_key = (new_name, new_server)
-                if old_key in matched_old or new_key in matched_new:
+                pair_key = (row[5], row[6], row[1], row[2])
+                if pair_key in already_alerted:
                     continue
-
-                pair_key = (old_name, old_server, new_name, new_server)
-                async with self.bot.db.execute(
-                    '''
-                    SELECT 1 FROM transfer_alerts_log
-                    WHERE old_name = ? AND old_server = ? AND new_name = ? AND new_server = ?
-                    ''',
-                    pair_key,
-                ) as check_log_cursor:
-                    if await check_log_cursor.fetchone():
-                        continue
-
+                old_name, old_server = row[5], row[6]
                 old_missing_all = True
                 for miss_t in miss_times:
                     if await self._player_present_at(miss_t, old_name, old_server):
@@ -394,23 +382,20 @@ class ExpTracker(commands.Cog):
                         break
                 if not old_missing_all:
                     continue
+                viable.append(row)
 
-                matched_old.add(old_key)
-                matched_new.add(new_key)
-                status_str = (
-                    "跨服轉移並改名" if new_name != old_name else "跨服轉移"
-                )
+            for pair in pick_unique_pairs(viable, already_alerted):
                 sent = await self._send_transfer_alert(
                     time_now,
-                    new_name,
-                    new_server,
-                    old_name,
-                    old_server,
-                    new_lvl,
-                    new_cls,
-                    new_sub_grade,
-                    status_str,
-                    new_exp - old_exp,
+                    pair["new_name"],
+                    pair["new_server"],
+                    pair["old_name"],
+                    pair["old_server"],
+                    pair["new_lvl"],
+                    pair["new_cls"],
+                    pair["new_sub_grade"],
+                    pair["status"],
+                    pair["exp_diff"],
                 )
                 if sent > 0:
                     await self.bot.db.execute(
@@ -419,16 +404,16 @@ class ExpTracker(commands.Cog):
                         (old_name, old_server, new_name, new_server, alert_time)
                         VALUES (?, ?, ?, ?, ?)
                         ''',
-                        (*pair_key, time_now),
+                        (*pair["pair_key"], time_now),
                     )
                     await self.bot.db.commit()
+                    already_alerted.add(pair["pair_key"])
                 else:
                     logger.warning(
                         f"轉服警報送出失敗，未寫入 dedupe："
-                        f"{old_name}@{old_server} -> {new_name}@{new_server}"
+                        f"{pair['old_name']}@{pair['old_server']} -> "
+                        f"{pair['new_name']}@{pair['new_server']}"
                     )
-                    matched_old.discard(old_key)
-                    matched_new.discard(new_key)
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error in transfer check: {e}\n{traceback.format_exc()}")
         except (ValueError, TypeError, KeyError) as e:

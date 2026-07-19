@@ -25,10 +25,19 @@ class SubjugationCog(commands.Cog):
 
         try:
             client = get_ranking_client(self.bot)
-            all_players = await client.fetch_all_servers(SERVER_MAP, overall_only=True)
+            all_players, failed_servers = await client.fetch_all_servers(
+                SERVER_MAP, overall_only=True
+            )
 
             if not all_players:
                 return await processing_msg.edit(content="❌ 資料抓取異常，請確認官方 API 狀態。")
+
+            partial_note = ""
+            if failed_servers:
+                partial_note = (
+                    f"⚠️ 部分伺服器失敗（{len(failed_servers)}/"
+                    f"{len(SERVER_MAP)}）：{'、'.join(failed_servers)}\n"
+                )
 
             def sort_key(player):
                 grade_val = (player.get("string_map") or {}).get("grade", "0")
@@ -79,8 +88,22 @@ class SubjugationCog(commands.Cog):
                 )
                 embeds[-1].set_footer(text="系統：共用 RankingClient 極速雷達")
 
-            await processing_msg.delete()
-            for e in embeds:
+            if failed_servers and embeds:
+                embeds[-1].set_footer(
+                    text=(
+                        f"部分缺資料：{len(failed_servers)}/{len(SERVER_MAP)} 服失敗 | "
+                        "系統：共用 RankingClient 極速雷達"
+                    )
+                )
+
+            try:
+                await processing_msg.edit(
+                    content=partial_note or None, embed=embeds[0] if embeds else None
+                )
+            except discord.HTTPException:
+                if embeds:
+                    await ctx.send(content=partial_note or None, embed=embeds[0])
+            for e in embeds[1:]:
                 await ctx.send(embed=e)
 
         except asyncio.TimeoutError as e:

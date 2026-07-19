@@ -66,14 +66,22 @@ class RankTracker(commands.Cog):
 
         try:
             client = get_ranking_client(self.bot)
+            failed_servers: list[str] = []
             if is_global:
-                all_players = await client.fetch_all_servers(SERVER_MAP)
+                all_players, failed_servers = await client.fetch_all_servers(SERVER_MAP)
             else:
                 result = await client.fetch_server(target_group_id, target_world_id)
                 all_players = result.players if result.ok else []
 
             if not all_players:
                 return await processing_msg.edit(content="❌ 撈取失敗，找不到資料。")
+
+            partial_note = ""
+            if failed_servers:
+                partial_note = (
+                    f"⚠️ 部分伺服器失敗（{len(failed_servers)}/"
+                    f"{len(SERVER_MAP)}）：{'、'.join(failed_servers)}\n"
+                )
 
             if target_class:
                 filters = target_class.split("+")
@@ -179,10 +187,17 @@ class RankTracker(commands.Cog):
             embed = discord.Embed(
                 title=f"🏆 {display_title}", description=description, color=0xFFD700
             )
-            embed.set_footer(text="單位：兆經驗值 | 系統：即時雷達過濾引擎")
+            footer = "單位：兆經驗值 | 系統：即時雷達過濾引擎"
+            if failed_servers:
+                footer = (
+                    f"部分缺資料：{len(failed_servers)}/{len(SERVER_MAP)} 服失敗 | "
+                    + footer
+                )
+            embed.set_footer(text=footer)
 
-            await processing_msg.delete()
-            await ctx.send(embed=embed)
+            await processing_msg.edit(
+                content=partial_note or None, embed=embed
+            )
 
         except asyncio.TimeoutError as e:
             await error_handler.handle_api_error(

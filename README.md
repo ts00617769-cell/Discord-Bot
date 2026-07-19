@@ -56,9 +56,11 @@ python bot.py
 
 ### 官方 API
 
-- 客戶端：`cogs/ranking_api.py`（全 bot 共用 session + 併發上限 5）
+- 客戶端：`services/ranking_api.py`（全 bot 共用 session + 併發上限 5）
 - 失敗自動重試（timeout／5xx）；成功結果短 TTL 快取（預設 45 秒，`RANKING_CACHE_TTL`）
 - 開服／合服後請更新 `SERVER_MAP`，並用 `!伺服器檢查` 探活
+- Discord 需開啟 **Message Content Intent**（本 bot 不需 Members Intent）
+- `!求籤` 需專案根目錄有 `omikuji.json`
 
 ## 常用指令
 

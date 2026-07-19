@@ -105,20 +105,39 @@ class SecretQuizButton(discord.ui.Button):
             )
             return
 
-        poll["votes"][user_id] = {"name": user_name, "choice": self.choice_key}
-
+        # 以 DB UNIQUE(user_id) 為準：先寫入成功才更新記憶體，避免連點雙回覆
         try:
             db = interaction.client.db
-            await db.execute(
-                "INSERT OR REPLACE INTO quiz_votes (user_id, user_name, choice) VALUES (?, ?, ?)",
+            cursor = await db.execute(
+                "INSERT INTO quiz_votes (user_id, user_name, choice) VALUES (?, ?, ?)",
                 (user_id, user_name, self.choice_key),
             )
             await db.commit()
+            if cursor.rowcount == 0:
+                await interaction.response.send_message(
+                    "⚠️ 你已經投過票囉！請耐心等待晚上開獎。", ephemeral=True
+                )
+                return
+        except sqlite3.IntegrityError:
+            poll["votes"][user_id] = {"name": user_name, "choice": self.choice_key}
+            await interaction.response.send_message(
+                "⚠️ 你已經投過票囉！請耐心等待晚上開獎。", ephemeral=True
+            )
+            return
         except asyncio.TimeoutError as e:
             logger.error(f"Database timeout while saving quiz vote for user {user_id}: {e}")
+            await interaction.response.send_message(
+                "❌ 投票暫存失敗，請稍後再試。", ephemeral=True
+            )
+            return
         except sqlite3.DatabaseError as e:
             logger.error(f"Failed to save quiz vote to database for user {user_id}: {e}")
+            await interaction.response.send_message(
+                "❌ 投票寫入失敗，請稍後再試。", ephemeral=True
+            )
+            return
 
+        poll["votes"][user_id] = {"name": user_name, "choice": self.choice_key}
         reveal_label = REVEAL_TIME.strftime("%H:%M")
         await interaction.response.send_message(
             f"✅ 投票成功！你選擇了「{self.label}」。結果將於 {reveal_label} 公布。",
@@ -166,7 +185,6 @@ class QuizSystem(commands.Cog):
             self.quiz_data = []
 
     async def cog_load(self):
-        await self.setup_database()
         await self.check_active_quiz_resume()
         self.auto_post_quiz.start()
         self.auto_reveal_quiz.start()
@@ -174,11 +192,6 @@ class QuizSystem(commands.Cog):
     def cog_unload(self):
         self.auto_post_quiz.cancel()
         self.auto_reveal_quiz.cancel()
-
-    async def setup_database(self):
-        from db import apply_migrations
-
-        await apply_migrations(self.bot.db)
 
     async def check_active_quiz_resume(self):
         async with self.bot.db.execute(

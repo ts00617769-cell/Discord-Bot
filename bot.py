@@ -11,6 +11,7 @@ import aiohttp
 import logging
 
 from services.ranking_api import get_ranking_client
+from services.timeutil import now_naive_taipei, taipei_cutoff_str
 from db import apply_migrations, connect_db
 from db.connection import resolve_db_path
 
@@ -122,7 +123,6 @@ class PrasiaBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -192,9 +192,10 @@ async def claim_command_once(ctx: commands.Context):
         return
     host = socket.gethostname()
     try:
+        claimed_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         await ctx.bot.db.execute(
-            'INSERT INTO cmd_dedupe (message_id, claimed_at, pid, host) VALUES (?, datetime("now"), ?, ?)',
-            (ctx.message.id, os.getpid(), host),
+            "INSERT INTO cmd_dedupe (message_id, claimed_at, pid, host) VALUES (?, ?, ?, ?)",
+            (ctx.message.id, claimed_at, os.getpid(), host),
         )
         await ctx.bot.db.commit()
     except sqlite3.IntegrityError:
@@ -246,8 +247,10 @@ async def on_ready():
         logger.warning(f"無法更新 presence: {e}")
 
     try:
+        cutoff = taipei_cutoff_str(2)
         await bot.db.execute(
-            "DELETE FROM cmd_dedupe WHERE claimed_at < datetime('now', '-2 days')"
+            "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
+            (cutoff,),
         )
         await bot.db.commit()
     except sqlite3.DatabaseError as e:

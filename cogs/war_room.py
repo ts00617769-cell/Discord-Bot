@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from services.error_handler import parse_env_channel_id
 
-from services.timeutil import TAIPEI, now_taipei
+from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str
 
 logger = logging.getLogger(__name__)
 
@@ -144,19 +144,22 @@ class WarRoom(commands.Cog):
     async def db_cleanup_task(self):
         """每天凌晨 4 點清理超過 60 天的資料（不在線上 VACUUM，避免鎖庫）。"""
         try:
+            cutoff = taipei_cutoff_str(60)
             async with self.bot.db.execute(
                 """
                 DELETE FROM exp_history
-                WHERE record_time < datetime('now', 'localtime', '-60 days')
-                """
+                WHERE record_time < ?
+                """,
+                (cutoff,),
             ) as cursor:
                 deleted_exp = cursor.rowcount or 0
 
             async with self.bot.db.execute(
                 """
                 DELETE FROM transfer_alerts_log
-                WHERE alert_time < datetime('now', 'localtime', '-60 days')
-                """
+                WHERE alert_time < ?
+                """,
+                (cutoff,),
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
 

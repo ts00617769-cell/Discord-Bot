@@ -1,10 +1,11 @@
 import discord
 from discord.ext import commands, tasks
 import datetime
-from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
 import logging
+import sqlite3
+from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
 from services.error_handler import parse_env_channel_id
-from services.timeutil import now_taipei
+from services.timeutil import now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,22 @@ class BossSchedule(commands.Cog):
     def cog_unload(self):
         self.auto_boss_reminder.cancel()
 
+    async def _already_reminded(self, key: str) -> bool:
+        async with self.bot.db.execute(
+            "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def _mark_reminded(self, key: str) -> None:
+        await self.bot.db.execute(
+            """
+            INSERT INTO bot_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, "1"),
+        )
+        await self.bot.db.commit()
+
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):
         if not self.REMINDER_CHANNEL_ID:
@@ -34,21 +51,38 @@ class BossSchedule(commands.Cog):
         target_minute = ten_mins_later.minute
         weekday = ten_mins_later.weekday()
 
-        if target_minute == 0 and target_hour in GAP_BOSS_SCHEDULE.get(weekday, []):
-            channel = self.bot.get_channel(self.REMINDER_CHANNEL_ID)
-            if not channel:
-                logger.warning(f"Boss reminder channel {self.REMINDER_CHANNEL_ID} not found")
+        if target_minute != 0 or target_hour not in GAP_BOSS_SCHEDULE.get(weekday, []):
+            return
+
+        # 同一提醒窗只發一次（重啟也不會重複 @everyone）
+        dedupe_key = f"boss_reminder:{today_taipei_str()}:{target_hour:02d}"
+        try:
+            if await self._already_reminded(dedupe_key):
                 return
-            try:
-                time_str = "點、".join(map(str, GAP_BOSS_SCHEDULE[weekday])) + "點"
-                embed = discord.Embed(
-                    title="🕒 時空縫隙首領召喚提醒",
-                    description=f"**10 分鐘後** 將開始召喚首領！\n\n今天召喚時段\n✅ **{time_str}**",
-                    color=discord.Color.red(),
-                )
-                await channel.send(content="@everyone", embed=embed)
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send boss reminder: {e}")
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Boss reminder dedupe check failed: {e}")
+            return
+
+        channel = self.bot.get_channel(self.REMINDER_CHANNEL_ID)
+        if not channel:
+            logger.warning(f"Boss reminder channel {self.REMINDER_CHANNEL_ID} not found")
+            return
+        try:
+            time_str = "點、".join(map(str, GAP_BOSS_SCHEDULE[weekday])) + "點"
+            embed = discord.Embed(
+                title="🕒 時空縫隙首領召喚提醒",
+                description=(
+                    f"**10 分鐘後** 將開始召喚首領！\n\n"
+                    f"今天召喚時段\n✅ **{time_str}**"
+                ),
+                color=discord.Color.red(),
+            )
+            await channel.send(content="@everyone", embed=embed)
+            await self._mark_reminded(dedupe_key)
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Failed to persist boss reminder dedupe: {e}")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send boss reminder: {e}")
 
     @auto_boss_reminder.before_loop
     async def before_auto_boss_reminder(self):

@@ -123,17 +123,29 @@ class RankingClient:
                     unique_players[name] = p
         return FetchResult(ok=True, players=list(unique_players.values()))
 
-    async def fetch_all_servers(self, server_map: dict, **kwargs) -> list:
+    async def fetch_all_servers(
+        self, server_map: dict, **kwargs
+    ) -> tuple[list, list[str]]:
+        """回傳 (players, failed_server_names)。部分服失敗時仍彙整成功資料。"""
+        names = list(server_map.keys())
         tasks = [
             self.fetch_server(g_id, w_id, **kwargs)
             for _, (g_id, w_id) in server_map.items()
         ]
         results = await asyncio.gather(*tasks)
         all_players = []
-        for r in results:
+        failed: list[str] = []
+        for name, r in zip(names, results):
             if r.ok:
                 all_players.extend(r.players)
-        return all_players
+            else:
+                failed.append(name)
+        if failed:
+            logger.warning(
+                f"fetch_all_servers partial failure: {len(failed)}/{len(names)} "
+                f"failed ({', '.join(failed)})"
+            )
+        return all_players, failed
 
     async def probe_server(self, group_id: str, world_id: str) -> dict:
         """對單一伺服器打總榜探活（與官網 Ranking API）。"""

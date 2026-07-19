@@ -23,6 +23,12 @@ DEFAULT_DB = ROOT / "prasia_data.db"
 LOCK_PATH = ROOT / ".bot.lock"
 DEFAULT_DAYS = 60
 
+# 允許直接執行：把專案根加入 path
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from services.timeutil import taipei_cutoff_str  # noqa: E402
+
 
 def _fmt_bytes(n: int) -> str:
     size = float(n)
@@ -143,23 +149,24 @@ def main() -> int:
             transfer_stale = transfer_total
             mode = "清空全部歷史"
         else:
+            cutoff = taipei_cutoff_str(args.days)
             exp_stale = _count(
                 conn,
                 """
                 SELECT COUNT(*) FROM exp_history
-                WHERE record_time < datetime('now', 'localtime', ?)
+                WHERE record_time < ?
                 """,
-                (f"-{args.days} days",),
+                (cutoff,),
             )
             transfer_stale = _count(
                 conn,
                 """
                 SELECT COUNT(*) FROM transfer_alerts_log
-                WHERE alert_time < datetime('now', 'localtime', ?)
+                WHERE alert_time < ?
                 """,
-                (f"-{args.days} days",),
+                (cutoff,),
             )
-            mode = f"保留最近 {args.days} 天"
+            mode = f"保留最近 {args.days} 天（截止 {cutoff} 台北）"
 
         print(f"模式：{mode}")
         print(f"exp_history：共 {exp_total:,} 筆，將刪 {exp_stale:,} 筆")
@@ -177,19 +184,20 @@ def main() -> int:
             deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
             deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
         else:
+            cutoff = taipei_cutoff_str(args.days)
             deleted_exp = conn.execute(
                 """
                 DELETE FROM exp_history
-                WHERE record_time < datetime('now', 'localtime', ?)
+                WHERE record_time < ?
                 """,
-                (f"-{args.days} days",),
+                (cutoff,),
             ).rowcount
             deleted_transfer = conn.execute(
                 """
                 DELETE FROM transfer_alerts_log
-                WHERE alert_time < datetime('now', 'localtime', ?)
+                WHERE alert_time < ?
                 """,
-                (f"-{args.days} days",),
+                (cutoff,),
             ).rowcount
 
         conn.commit()

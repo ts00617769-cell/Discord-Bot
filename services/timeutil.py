@@ -1,7 +1,7 @@
 """台北時區單一來源（zoneinfo Asia/Taipei）。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -21,3 +21,8 @@ def now_naive_taipei() -> datetime:
 
 def today_taipei_str() -> str:
     return now_taipei().strftime(FMT_DATE)
+
+
+def taipei_cutoff_str(days: int) -> str:
+    """台北時間往前 N 天的 naive SQL 字串（供 retention／清理用）。"""
+    return (now_naive_taipei() - timedelta(days=int(days))).strftime(FMT_SQL)

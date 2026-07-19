@@ -3,6 +3,7 @@
 """
 import logging
 import os
+import sqlite3
 import traceback
 
 import discord
@@ -133,10 +134,10 @@ def log_command_error(ctx, command_name: str, exception: Exception):
 
 
 async def safe_database_operation(operation_name: str, operation_func, *args, **kwargs):
-    """安全的資料庫操作包裝器；失敗回傳 None。"""
+    """安全的資料庫操作包裝器；僅吞資料庫錯誤，其餘向上拋。"""
     try:
         return await operation_func(*args, **kwargs)
-    except Exception as e:
+    except sqlite3.DatabaseError as e:
         logger.error(
             f"Database operation '{operation_name}' failed: "
             f"{type(e).__name__}: {e}\n{traceback.format_exc()}"

@@ -63,16 +63,25 @@ class PlayerSearch(commands.Cog):
         async with self.bot.db.execute(sql, tuple(name_list)) as cursor:
             return await cursor.fetchall()
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        """跳脫 LIKE 萬用字元 % / _ 與跳脫符本身。"""
+        return (
+            value.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+
     async def _get_related_names(self, target_name):
         """定向查詢別名群組，避免全表掃描 member_registry。"""
         names = {target_name}
-        like = f"%{target_name}%"
+        like = f"%{self._escape_like(target_name)}%"
         async with self.bot.db.execute(
             '''
             SELECT player_name, original_identity FROM member_registry
             WHERE player_name = ?
                OR original_identity = ?
-               OR original_identity LIKE ?
+               OR original_identity LIKE ? ESCAPE '\\'
             ''',
             (target_name, target_name, like),
         ) as cursor:
@@ -624,6 +633,56 @@ class PlayerSearch(commands.Cog):
                 await processing_msg.edit(content=f"❌ 尋人系統資料異常: {type(e).__name__}")
             except discord.NotFound:
                 pass
+
+    @staticmethod
+    def _format_track_entry(idx, p, *, show_confidence=False):
+        """單筆軌跡 yaml 行。無 diff_text 時顯示 EXP；有則顯示關聯。"""
+        exp_zhao = p["exp_val"] / 1_000_000_000_000
+        conf = p.get("confidence", "high")
+        if show_confidence or conf != "high":
+            type_line = f"   ▶ {p['match_type']} ({conf})\n"
+        else:
+            type_line = f"   ▶ {p['match_type']}\n"
+        lines = (
+            f"{idx}. {p['name']} [{p['server']}]\n"
+            f"{type_line}"
+            f"   ▶ 職業: {p['cls']} | Lv.{p['lvl']} | 討伐 {p.get('sub_grade', 0)}\n"
+            f"   ▶ 觀測: {p['first'][5:16]} ~ {p['last'][5:16]}\n"
+        )
+        if p.get("diff_text"):
+            lines += f"   ▶ 關聯: {p['diff_text']} (特徵: {exp_zhao:,.2f}兆)\n\n"
+        else:
+            lines += f"   ▶ EXP : {exp_zhao:,.2f} 兆\n\n"
+        return lines
+
+    def _build_track_embeds(
+        self,
+        target_name,
+        entries,
+        *,
+        header,
+        title,
+        color,
+        footer,
+        show_confidence=False,
+    ):
+        """將軌跡 entries 切成多個 Embed（description 約 3800 字切頁）。"""
+        embeds = []
+        desc = f"{header}```yaml\n"
+        for idx, p in enumerate(entries, 1):
+            entry = self._format_track_entry(idx, p, show_confidence=show_confidence)
+            if len(desc) + len(entry) > 3800:
+                desc += "```"
+                embeds.append(discord.Embed(title=title, description=desc, color=color))
+                desc = "```yaml\n" + entry
+            else:
+                desc += entry
+        if desc != "```yaml\n":
+            desc += "```"
+            embeds.append(discord.Embed(title=title, description=desc, color=color))
+        if embeds:
+            embeds[-1].set_footer(text=footer)
+        return embeds
 
     async def _deliver_embeds(self, ctx, processing_msg, embeds):
         """先 edit 第一則，其餘再 send；避免 delete 後失敗變成無回應。"""
