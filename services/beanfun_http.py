@@ -34,6 +34,9 @@ class FetchResult:
     players: list = field(default_factory=list)
     error: Optional[str] = None
     from_cache: bool = False
+    # ranking fetch_server：部分職業榜失敗／總榜是否成功（快照品質用）
+    partial: bool = False
+    overall_ok: bool = True
 
     @property
     def data(self) -> Any:

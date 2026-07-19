@@ -116,7 +116,10 @@ class LeagueTracker(commands.Cog):
                     color=0x9B59B6,
                 )
                 embed.set_footer(
-                    text=f"查詢參數：S0{season} 賽季 | 第 {round_num} 回合 | 第 {league_id} 組"
+                    text=(
+                        f"查詢參數：S{season_padded} 賽季 | "
+                        f"第 {round_num} 回合 | 第 {league_id} 組"
+                    )
                 )
                 embeds.append(embed)
 

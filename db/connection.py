@@ -32,7 +32,7 @@ async def configure_connection(db: aiosqlite.Connection) -> None:
     # 負值單位為 KB：約 64MB page cache
     await db.execute("PRAGMA cache_size=-65536")
     await db.execute("PRAGMA temp_store=MEMORY")
-    # mmap 加速大表掃描（尋人 / 歷史排名）；失敗則略過
+    # mmap 加速大表掃描（尋人／轉服）；失敗則略過
     try:
         await db.execute("PRAGMA mmap_size=268435456")
     except (OSError, ValueError) as e:

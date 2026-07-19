@@ -17,7 +17,7 @@ from services.exp_speed import (
 from services.exp_snapshots import EXP_HISTORY_INSERT_SQL, players_to_insert_batch
 from services.member_registry import get_member_tag
 from services.text_display import pad_text
-from services.timeutil import now_naive_taipei, today_taipei_str
+from services.timeutil import now_naive_taipei
 from services.transfer_detect import (
     CLASS_MARGIN,
     NAME_MARGIN,
@@ -28,8 +28,8 @@ from services.transfer_detect import (
     rank_transfer_candidates,
 )
 from services.error_handler import (
-    handle_db_error,
     min_complete_snapshot_servers,
+    min_snapshot_players,
     parse_env_channel_ids,
     parse_env_float,
     require_allowed_channel,
@@ -109,6 +109,22 @@ class ExpTracker(commands.Cog):
         )
         await self.bot.db.commit()
 
+    async def _setting_exists(self, key: str) -> bool:
+        async with self.bot.db.execute(
+            "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def _mark_setting(self, key: str, value: str = "1") -> None:
+        await self.bot.db.execute(
+            """
+            INSERT INTO bot_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
+        )
+        await self.bot.db.commit()
+
     async def _startup_validate_servers(self):
         try:
             for _ in range(60):
@@ -161,6 +177,8 @@ class ExpTracker(commands.Cog):
 
             servers_ok = []
             servers_failed = []
+            servers_thin = []
+            min_players = min_snapshot_players()
 
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
@@ -181,7 +199,21 @@ class ExpTracker(commands.Cog):
                             EXP_HISTORY_INSERT_SQL, insert_batch
                         )
                         await self.bot.db.commit()
-                    servers_ok.append(server_name)
+
+                    # 總榜成功且人數達標才算完整服；薄名冊仍寫入但不計入轉服門檻
+                    quality_ok = (
+                        result.overall_ok and len(result.players) >= min_players
+                    )
+                    if quality_ok:
+                        servers_ok.append(server_name)
+                    else:
+                        servers_thin.append(server_name)
+                        logger.warning(
+                            f"⚠️ 伺服器 {server_name} 快照品質不足 "
+                            f"(overall_ok={result.overall_ok} "
+                            f"players={len(result.players)}/{min_players} "
+                            f"partial={result.partial})；已寫入但不計入完整快照"
+                        )
                 except sqlite3.DatabaseError as e:
                     servers_failed.append(server_name)
                     logger.error(f"DB error processing server {server_name}: {e}")
@@ -197,7 +229,8 @@ class ExpTracker(commands.Cog):
                 logger.warning(
                     f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/"
                     f"{min_complete_snapshot_servers()} "
-                    f"(map={len(SERVER_MAP)}) failed={servers_failed}；跳過轉服偵測"
+                    f"(map={len(SERVER_MAP)}) failed={servers_failed} "
+                    f"thin={servers_thin}；跳過轉服偵測"
                 )
             await self.check_for_alerts(now_time, run_transfers=snapshot_complete)
         except sqlite3.DatabaseError as e:
@@ -265,6 +298,22 @@ class ExpTracker(commands.Cog):
                 )[: self.alert_count]
 
                 if alert_list:
+                    dedupe_key = (
+                        f"overspeed:{time_now}|{time_prev}|"
+                        f"{self.alert_server}|{self.alert_count}"
+                    )
+                    try:
+                        if await self._setting_exists(dedupe_key):
+                            logger.info(
+                                f"略過重複超速警報 interval={time_prev}→{time_now} "
+                                f"server={self.alert_server}"
+                            )
+                            alert_list = []
+                    except sqlite3.DatabaseError as e:
+                        logger.error(f"Overspeed dedupe check failed: {e}")
+                        alert_list = []
+
+                if alert_list:
                     chunk_size = 50
                     for i in range(0, len(alert_list), chunk_size):
                         chunk = alert_list[i : i + chunk_size]
@@ -292,6 +341,10 @@ class ExpTracker(commands.Cog):
                                     await channel.send(embed=embed)
                                 except discord.HTTPException as e:
                                     logger.error(f"Failed to send alert to {channel_id}: {e}")
+                    try:
+                        await self._mark_setting(dedupe_key)
+                    except sqlite3.DatabaseError as e:
+                        logger.error(f"Failed to persist overspeed dedupe: {e}")
 
         if run_transfers:
             await self.check_for_transfers(time_now, time_prev_scan, complete_times=times)
@@ -607,128 +660,6 @@ class ExpTracker(commands.Cog):
                 await processing_msg.edit(content="❌ 測速資料格式異常")
             except discord.NotFound:
                 pass
-
-    @commands.command(
-        name="歷史排名",
-        aliases=["查歷史", "歷史"],
-        help="查詢過去的資料庫排名。用法: !歷史排名 100 2026-05-08 萊涅04 太陽監視者",
-    )
-    @commands.cooldown(1, 10, commands.BucketType.user)
-    async def historical_ranking(self, ctx, *args):
-        if not await require_allowed_channel(ctx):
-            return
-        count = 100
-        date_str = today_taipei_str()
-        target_server = "全服"
-        target_class = None
-        
-        args_list = [arg for arg in args if arg.strip()]
-        class_parts = []
-        for arg in args_list:
-            if arg.isdigit():
-                count = int(arg)
-            elif "-" in arg and len(arg) >= 8:
-                date_str = arg
-            elif arg in SERVER_MAP or arg in ["全服", "全部", "global"]:
-                target_server = arg
-            else:
-                class_parts.append(arg)
-        if class_parts:
-            target_class = "".join(class_parts)
-
-        is_global = target_server in ["全服", "全部", "global"]
-        if not is_global and target_server not in SERVER_MAP:
-            return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
-
-        count = max(1, min(100, count))
-        filter_msg = f" 【{target_class}】的" if target_class else " "
-        processing_msg = await ctx.send(
-            f"📊 正在潛入資料庫，調閱 `{date_str}` 的 {target_server}{filter_msg}歷史排行榜..."
-        )
-
-        sql = '''
-            SELECT h1.player_name, h1.server_name, h1.level, h1.exp, h1.class_name
-            FROM exp_history h1
-            INNER JOIN (
-                SELECT player_name, server_name, MAX(record_time) as max_time
-                FROM exp_history
-                WHERE record_time LIKE ?
-        '''
-        params = [f"{date_str}%"]
-        if not is_global:
-            sql += " AND server_name = ?"
-            params.append(target_server)
-        if target_class:
-            sql += " AND class_name LIKE ?"
-            params.append(f"%{target_class}%")
-        sql += '''
-                GROUP BY player_name, server_name
-            ) h2 ON h1.player_name = h2.player_name
-                AND h1.server_name = h2.server_name
-                AND h1.record_time = h2.max_time
-            ORDER BY h1.exp DESC
-            LIMIT ?
-        '''
-        params.append(count)
-
-        try:
-            async with self.bot.db.execute(sql, tuple(params)) as cursor:
-                rows = await cursor.fetchall()
-            
-            if not rows:
-                err_msg = f"❌ 資料庫中找不到 `{date_str}` 的排名資料。"
-                if target_class:
-                    err_msg = f"❌ 找不到符合條件的【{target_class}】玩家資料。"
-                return await processing_msg.edit(content=err_msg)
-
-            desc = f"**歷史快照日期：{date_str}**\n```yaml\n"
-            embeds = []
-            for idx, r in enumerate(rows, 1):
-                name, server, level, exp, class_name = r
-                tag = await self.get_member_info(name)
-                display_name = f"{name}{tag}"
-                name_padded = pad_text(display_name, 16)
-                srv_info = f"({server})" if is_global else ""
-                exp_zhao = exp / 1000000000000
-                line = (
-                    f"{idx:02d}. {name_padded} [{class_name}]{'':<1} | "
-                    f"Lv.{level:<2} | {exp_zhao:>7.2f} 兆 {srv_info}\n"
-                )
-                if len(desc) + len(line) > 1900:
-                    desc += "```"
-                    embeds.append(
-                        discord.Embed(
-                            title=f"📜 {target_server}{filter_msg}歷史排名 (續)",
-                            description=desc,
-                            color=0x3498db,
-                        )
-                    )
-                    desc = "```yaml\n"
-                desc += line
-                
-            if desc != "```yaml\n":
-                desc += "```"
-                embeds.append(
-                    discord.Embed(
-                        title=f"📜 {target_server}{filter_msg}歷史排名 TOP {len(rows)}",
-                        description=desc,
-                        color=0x3498db,
-                    )
-                )
-                embeds[-1].set_footer(text="系統：天眼資料庫歷史快照 (支援職業篩選)")
-
-            await processing_msg.delete()
-            for e in embeds:
-                await ctx.send(embed=e)
-
-        except sqlite3.DatabaseError as e:
-            logger.error(f"DB error historical ranking: {e}")
-            await handle_db_error(ctx, "歷史排名查詢失敗", e)
-        except asyncio.TimeoutError:
-            await processing_msg.edit(content="❌ 資料庫查詢逾時，請重試")
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid value in historical ranking: {e}")
-            await processing_msg.edit(content="❌ 資料格式錯誤，請檢查查詢參數")
 
     @commands.command(
         name="伺服器檢查",

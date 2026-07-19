@@ -1,10 +1,12 @@
-import discord
-from discord.ext import commands
-import aiohttp
 import asyncio
-from game_data import SERVER_MAP
 import logging
 
+import aiohttp
+import discord
+from discord.ext import commands
+
+from game_data import SERVER_MAP
+from services import error_handler
 from services.beanfun_http import get_beanfun_client
 from services.text_display import pad_text
 
@@ -20,6 +22,7 @@ class CastleTracker(commands.Cog):
         self.bot = bot
 
     async def fetch_territory_data(self, server_name, group_id, world_id):
+        """回傳 (territories, error)。成功時 error 為 None。"""
         payload = {
             "world_group_id": group_id,
             "world_id": world_id,
@@ -30,12 +33,12 @@ class CastleTracker(commands.Cog):
         result = await client.post_json(TERRITORY_API_URL, payload)
         if not result.ok:
             logger.warning(f"Territory API failed for {server_name}: {result.error}")
-            return []
+            return [], result.error or "fetch_failed"
         json_data = result.data or {}
         territories = json_data.get("data", {}).get("territory") or []
         for t in territories:
             t["real_server_name"] = server_name
-        return territories
+        return territories, None
 
     @commands.command(name="稅收", help="例如: !稅收 全服, !稅收 20 萊涅01")
     @commands.cooldown(1, 15, commands.BucketType.user)
@@ -71,22 +74,36 @@ class CastleTracker(commands.Cog):
 
         try:
             all_territories = []
+            failed_servers: list[str] = []
             if is_global:
+                server_names = list(SERVER_MAP.keys())
                 tasks = [
                     self.fetch_territory_data(s_name, g_id, w_id)
                     for s_name, (g_id, w_id) in SERVER_MAP.items()
                 ]
                 results = await asyncio.gather(*tasks)
-                for r in results:
-                    all_territories.extend(r)
+                for s_name, (territories, err) in zip(server_names, results):
+                    if err:
+                        failed_servers.append(s_name)
+                    else:
+                        all_territories.extend(territories)
             else:
-                territories = await self.fetch_territory_data(
+                territories, err = await self.fetch_territory_data(
                     target_server, target_group_id, target_world_id
                 )
+                if err:
+                    return await processing_msg.edit(content=f"❌ 掃描失敗：{err}")
                 all_territories.extend(territories)
 
             if not all_territories:
                 return await processing_msg.edit(content="❌ 掃描失敗，該區目前沒有據點資料。")
+
+            partial_note = ""
+            if failed_servers:
+                partial_note = (
+                    f"⚠️ 部分伺服器失敗（{len(failed_servers)}/"
+                    f"{len(SERVER_MAP)}）：{'、'.join(failed_servers)}\n"
+                )
 
             all_territories.sort(key=lambda x: x.get("tax_dia", 0), reverse=True)
             rich_territories = [t for t in all_territories if t.get("tax_dia", 0) > 0]
@@ -129,24 +146,34 @@ class CastleTracker(commands.Cog):
             embed = discord.Embed(
                 title=f"🏰 {display_title}", description=description, color=0x00FFFF
             )
-            embed.set_footer(text="系統：O(1) 極速據點掃描器 (修正官方漏字Bug)")
-            await processing_msg.delete()
-            await ctx.send(embed=embed)
+            footer = "系統：O(1) 極速據點掃描器 (修正官方漏字Bug)"
+            if failed_servers:
+                footer = (
+                    f"部分缺資料：{len(failed_servers)}/{len(SERVER_MAP)} 服失敗 | "
+                    + footer
+                )
+            embed.set_footer(text=footer)
+            await processing_msg.edit(content=partial_note or None, embed=embed)
 
-        except asyncio.TimeoutError:
-            await processing_msg.edit(content="❌ 連線逾時：據點掃描花時過久，請重試")
+        except asyncio.TimeoutError as e:
+            await error_handler.handle_api_error(
+                ctx, "連線逾時：據點掃描花時過久，請重試", str(e)
+            )
         except aiohttp.ClientError as e:
-            logger.error(f"Castle tax client error: {e}")
-            await processing_msg.edit(content="❌ 網路連線失敗：無法連接到遊戲伺服器")
+            await error_handler.handle_api_error(
+                ctx, "網路連線失敗：無法連接到遊戲伺服器", str(e)
+            )
         except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"Castle tax parse error: {e}")
-            await processing_msg.edit(content="❌ 資料解析錯誤：伺服器回傳格式異常")
+            await error_handler.handle_api_error(
+                ctx, "資料解析錯誤：伺服器回傳格式異常", str(e)
+            )
+        except discord.NotFound:
+            logger.error("Processing message was deleted before we could edit it")
         except discord.HTTPException as e:
-            logger.error(f"Castle tax discord error: {e}")
-            try:
-                await processing_msg.edit(content="❌ 訊息發送失敗")
-            except discord.HTTPException:
-                pass
+            error_handler.log_command_error(ctx, "稅收", e)
+            await error_handler.handle_api_error(
+                ctx, f"Discord 發送失敗：{type(e).__name__}", str(e)
+            )
 
 
 async def setup(bot):

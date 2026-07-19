@@ -19,12 +19,7 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(
             name="🏆 即時排名",
-            value="`!排名 [數量] [伺服器]`\n例：`!排名 50 萊涅01`",
-            inline=False,
-        )
-        embed.add_field(
-            name="📜 歷史排名 (支援職業與日期篩選)",
-            value="`!歷史排名 [數量] [日期] [伺服器] [職業]`\n例：`!歷史 2026-05-08 萊涅04 太陽監視者`",
+            value="`!排名 [數量] [伺服器] [職業]`\n例：`!排名 50 萊涅01` 或 `!排名 幻影劍士`",
             inline=False,
         )
         embed.add_field(

@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from services.beanfun_http import BeanfunClient, FetchResult, _is_retryable_error
-from services.ranking_api import RankingClient
+from services.ranking_api import RankingClient, resolve_class_key
+from services.text_display import escape_like
 
 
 def test_retryable_errors():
@@ -103,8 +104,27 @@ async def test_fetch_server_merges_partial_class_success():
         "g", "w", classes=[None, "MirageBlade", "Enforcer"]
     )
     assert result.ok
+    assert result.partial is True
+    assert result.overall_ok is True
     names = {p["gc_name"] for p in result.players}
     assert names == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_overall_fail_marks_overall_ok_false():
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    client.fetch_class = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            FetchResult(ok=False, error="timeout"),
+            FetchResult(ok=True, players=[{"gc_name": "A"}]),
+        ]
+    )
+    result = await client.fetch_server("g", "w", classes=[None, "Enforcer"])
+    assert result.ok
+    assert result.partial is True
+    assert result.overall_ok is False
+    assert result.players[0]["gc_name"] == "A"
 
 
 @pytest.mark.asyncio
@@ -118,3 +138,16 @@ async def test_fetch_server_all_classes_fail():
     assert not result.ok
     assert result.error == "HTTP 500"
     assert result.players == []
+    assert result.overall_ok is False
+
+
+def test_resolve_class_key():
+    assert resolve_class_key("太陽監視者") == "SolarSentinel"
+    assert resolve_class_key("深淵放逐者") == "abyssrevenant"
+    assert resolve_class_key("MirageBlade") == "MirageBlade"
+    assert resolve_class_key("mirageblade") == "MirageBlade"
+    assert resolve_class_key("不存在") is None
+
+
+def test_escape_like():
+    assert escape_like("a%b_c\\d") == "a\\%b\\_c\\\\d"

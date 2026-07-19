@@ -10,6 +10,7 @@ from discord.ext import commands
 
 from services import player_matching as match
 from services.error_handler import require_allowed_channel, parse_env_channel_ids
+from services.text_display import escape_like
 from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,7 @@ class PlayerSearch(commands.Cog):
     @staticmethod
     def _escape_like(value: str) -> str:
         """跳脫 LIKE 萬用字元 % / _ 與跳脫符本身。"""
-        return (
-            value.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
+        return escape_like(value)
 
     async def _get_related_names(self, target_name):
         """定向查詢別名群組，避免全表掃描 member_registry。"""

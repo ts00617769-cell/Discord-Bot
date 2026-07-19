@@ -119,7 +119,6 @@ class SecretQuizButton(discord.ui.Button):
                 )
                 return
         except sqlite3.IntegrityError:
-            poll["votes"][user_id] = {"name": user_name, "choice": self.choice_key}
             await interaction.response.send_message(
                 "⚠️ 你已經投過票囉！請耐心等待晚上開獎。", ephemeral=True
             )

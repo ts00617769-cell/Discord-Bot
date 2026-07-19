@@ -9,7 +9,7 @@ from game_data import SERVER_MAP
 from services import error_handler
 from services.error_handler import require_allowed_channel
 from services.member_registry import get_member_tag
-from services.ranking_api import get_ranking_client
+from services.ranking_api import get_ranking_client, resolve_class_key
 
 logger = logging.getLogger(__name__)
 
@@ -67,31 +67,13 @@ class RankTracker(commands.Cog):
         try:
             client = get_ranking_client(self.bot)
             failed_servers: list[str] = []
-            if is_global:
-                all_players, failed_servers = await client.fetch_all_servers(SERVER_MAP)
-            else:
-                result = await client.fetch_server(target_group_id, target_world_id)
-                if not result.ok:
-                    err = result.error or "未知錯誤"
-                    return await processing_msg.edit(content=f"❌ 撈取失敗：{err}")
-                all_players = result.players
 
-            if not all_players:
-                return await processing_msg.edit(content="❌ 撈取失敗，找不到資料。")
-
-            partial_note = ""
-            if failed_servers:
-                partial_note = (
-                    f"⚠️ 部分伺服器失敗（{len(failed_servers)}/"
-                    f"{len(SERVER_MAP)}）：{'、'.join(failed_servers)}\n"
-                )
-
+            # 先解析職業篩選：能對應 API key 時只打該職業榜（較快）
+            class_filter = ""
+            grade_filter = 0
+            level_filter = 0
             if target_class:
                 filters = target_class.split("+")
-                class_filter = ""
-                grade_filter = 0
-                level_filter = 0
-
                 for f in filters:
                     if f.startswith("職業"):
                         class_filter = f[2:]
@@ -123,11 +105,42 @@ class RankTracker(commands.Cog):
                     ):
                         class_filter = f
 
+            class_key = resolve_class_key(class_filter) if class_filter else None
+            fetch_kwargs = {}
+            if class_key:
+                fetch_kwargs["classes"] = [class_key]
+
+            if is_global:
+                all_players, failed_servers = await client.fetch_all_servers(
+                    SERVER_MAP, **fetch_kwargs
+                )
+            else:
+                result = await client.fetch_server(
+                    target_group_id, target_world_id, **fetch_kwargs
+                )
+                if not result.ok:
+                    err = result.error or "未知錯誤"
+                    return await processing_msg.edit(content=f"❌ 撈取失敗：{err}")
+                all_players = result.players
+
+            if not all_players:
+                return await processing_msg.edit(content="❌ 撈取失敗，找不到資料。")
+
+            partial_note = ""
+            if failed_servers:
+                partial_note = (
+                    f"⚠️ 部分伺服器失敗（{len(failed_servers)}/"
+                    f"{len(SERVER_MAP)}）：{'、'.join(failed_servers)}\n"
+                )
+
+            if target_class:
                 filtered_players = []
                 for p in all_players:
                     match = True
-                    if class_filter and class_filter not in str(p.get("class_name", "")):
-                        match = False
+                    # 已用 API class key 抓取時不必再字串比對；模糊關鍵字仍 client-side 篩
+                    if class_filter and not class_key:
+                        if class_filter not in str(p.get("class_name", "")):
+                            match = False
 
                     if grade_filter > 0:
                         p_grade_val = (p.get("string_map") or {}).get("grade", "0")

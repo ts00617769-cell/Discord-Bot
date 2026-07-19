@@ -20,6 +20,7 @@ RANKING_HEADERS = {
     **DEFAULT_HEADERS,
     "Referer": "https://warsofprasia.beanfun.com/Main/Ranking",
 }
+# 總榜 + 六職業（官網 Ranking class 參數；已對照台港澳職業名）
 ALL_CLASSES = [
     None,
     "abyssrevenant",
@@ -30,7 +31,34 @@ ALL_CLASSES = [
     "Enforcer",
 ]
 
+# 中文顯示名 / API key → Ranking API class 參數
+CLASS_NAME_TO_KEY = {
+    "深淵放逐者": "abyssrevenant",
+    "太陽監視者": "SolarSentinel",
+    "幻影劍士": "MirageBlade",
+    "香射手": "IncenseArcher",
+    "咒文刻印使": "RuneScribe",
+    "執行官": "Enforcer",
+    "abyssrevenant": "abyssrevenant",
+    "SolarSentinel": "SolarSentinel",
+    "MirageBlade": "MirageBlade",
+    "IncenseArcher": "IncenseArcher",
+    "RuneScribe": "RuneScribe",
+    "Enforcer": "Enforcer",
+}
+
 _DEFAULT_CACHE_TTL = 45.0
+
+
+def resolve_class_key(name: Optional[str]) -> Optional[str]:
+    """將中文職業名或 API key 解析為 Ranking class 參數；無法對應則 None。"""
+    if not name:
+        return None
+    key = CLASS_NAME_TO_KEY.get(name)
+    if key:
+        return key
+    lower_map = {k.lower(): v for k, v in CLASS_NAME_TO_KEY.items()}
+    return lower_map.get(name.lower())
 
 
 class RankingClient:
@@ -98,7 +126,10 @@ class RankingClient:
     ) -> FetchResult:
         """抓取單一伺服器玩家；overall_only 只打總榜（討伐排名用）。"""
         if overall_only:
-            return await self.fetch_class(group_id, world_id, None, limit=limit)
+            result = await self.fetch_class(group_id, world_id, None, limit=limit)
+            result.overall_ok = result.ok
+            result.partial = False
+            return result
 
         class_list = classes if classes is not None else ALL_CLASSES
         results = await asyncio.gather(
@@ -106,6 +137,10 @@ class RankingClient:
         )
         ok_results = [r for r in results if r.ok]
         failed = [r for r in results if not r.ok]
+        overall_ok = True
+        if None in class_list:
+            overall_ok = bool(results[class_list.index(None)].ok)
+
         if failed:
             err = failed[0].error or "class_fetch_failed"
             logger.warning(
@@ -113,7 +148,9 @@ class RankingClient:
                 f"{len(failed)}/{len(results)} class endpoints failed ({err})"
             )
             if not ok_results:
-                return FetchResult(ok=False, error=err)
+                return FetchResult(
+                    ok=False, error=err, partial=True, overall_ok=overall_ok
+                )
 
         unique_players: dict[str, Any] = {}
         for res in ok_results:
@@ -123,7 +160,12 @@ class RankingClient:
                 name = p.get("gc_name")
                 if name and name not in unique_players:
                     unique_players[name] = p
-        return FetchResult(ok=True, players=list(unique_players.values()))
+        return FetchResult(
+            ok=True,
+            players=list(unique_players.values()),
+            partial=bool(failed),
+            overall_ok=overall_ok,
+        )
 
     async def fetch_all_servers(
         self, server_map: dict, **kwargs

@@ -94,6 +94,17 @@ def min_complete_snapshot_servers() -> int:
     return max(2, n)
 
 
+def min_snapshot_players() -> int:
+    """單一伺服器算入完整快照所需的最少玩家數（預設 30）。
+
+    總榜失敗或合併人數過低的服仍可寫入，但不計入 SNAPSHOT_MIN_SERVERS。
+    """
+    raw = (os.getenv("SNAPSHOT_MIN_PLAYERS", "") or "").strip()
+    if raw.isdigit():
+        return max(1, int(raw))
+    return 30
+
+
 def parse_env_float(env_name: str, default: float) -> float:
     """安全讀取浮點環境變數。"""
     raw = (os.getenv(env_name, "") or "").strip()
