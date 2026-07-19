@@ -154,7 +154,7 @@ class PrasiaBot(commands.Bot):
                 if (
                     f.endswith(".py")
                     and not f.startswith("__")
-                    and f not in ("error_handler.py", "ranking_api.py")
+                    and f not in ("error_handler.py", "ranking_api.py", "beanfun_http.py")
                 )
             )
             for filename in cog_files:

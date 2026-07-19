@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sqlite3
 import unicodedata
 
 import aiohttp
@@ -8,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from game_data import SERVER_MAP
+from services.member_registry import get_member_tag
 from . import error_handler
 from .error_handler import require_allowed_channel
 from .ranking_api import get_ranking_client
@@ -20,15 +20,7 @@ class RankTracker(commands.Cog):
         self.bot = bot
 
     async def get_member_info(self, name):
-        try:
-            async with self.bot.db.execute(
-                "SELECT original_identity FROM member_registry WHERE player_name = ?", (name,)
-            ) as cursor:
-                result = await cursor.fetchone()
-                return f"({result[0]})" if result else ""
-        except sqlite3.DatabaseError as e:
-            logger.error(f"Database error while fetching member info for '{name}': {e}")
-            return ""
+        return await get_member_tag(self.bot.db, name)
 
     @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
     @commands.cooldown(1, 20, commands.BucketType.user)

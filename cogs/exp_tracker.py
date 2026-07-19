@@ -10,6 +10,20 @@ from discord.ext import commands, tasks
 
 from game_data import SERVER_MAP
 from db import apply_migrations, ensure_search_indexes
+from services.exp_speed import (
+    collect_overspeed,
+    collect_speed_ranking,
+    pick_interval_baseline,
+)
+from services.member_registry import get_member_tag
+from services.transfer_detect import (
+    CLASS_MARGIN,
+    NAME_MARGIN,
+    POTENTIAL_TRANSFERS_SQL,
+    build_alias_map,
+    format_exp_diff,
+    rank_transfer_candidates,
+)
 from .error_handler import (
     min_complete_snapshot_servers,
     parse_env_channel_ids,
@@ -133,15 +147,7 @@ class ExpTracker(commands.Cog):
             logger.error(f"❌ 檢查/建立尋人索引時發生資料庫錯誤: {e}")
 
     async def get_member_info(self, name):
-        try:
-            async with self.bot.db.execute(
-                "SELECT original_identity FROM member_registry WHERE player_name = ?", (name,)
-            ) as cursor:
-                result = await cursor.fetchone()
-                return f"({result[0]})" if result else ""
-        except sqlite3.DatabaseError as e:
-            logger.error(f"DB error fetching member info for '{name}': {e}")
-            return ""
+        return await get_member_tag(self.bot.db, name)
 
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
@@ -237,28 +243,16 @@ class ExpTracker(commands.Cog):
         time_now, time_prev_scan = times[0][0], times[1][0]
 
         fmt = "%Y-%m-%d %H:%M:%S"
-        t1 = datetime.datetime.strptime(time_now, fmt)
 
         should_alert = self.alerts_enabled
         if should_alert and isinstance(current_time, datetime.datetime):
             should_alert = (current_time.minute % self.alert_interval_minutes) == 0
 
         if should_alert:
-            time_prev = time_prev_scan
-            minutes_diff = (t1 - datetime.datetime.strptime(time_prev_scan, fmt)).total_seconds() / 60
-            best_gap = abs(minutes_diff - self.alert_interval_minutes)
-            for (rt,) in times[1:]:
-                t2 = datetime.datetime.strptime(rt, fmt)
-                gap = (t1 - t2).total_seconds() / 60
-                if gap <= 0:
-                    continue
-                score = abs(gap - self.alert_interval_minutes)
-                if score < best_gap:
-                    best_gap = score
-                    time_prev = rt
-                    minutes_diff = gap
-
-            if minutes_diff > 0:
+            time_prev, minutes_diff = pick_interval_baseline(
+                times, self.alert_interval_minutes, fmt=fmt
+            )
+            if time_prev and minutes_diff > 0:
                 if self.alert_server == "全服":
                     sql = '''
                         SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
@@ -281,20 +275,11 @@ class ExpTracker(commands.Cog):
                 async with self.bot.db.execute(sql, params) as cursor:
                     records = await cursor.fetchall()
 
-                alert_list = []
-                for name, server, level, exp_now, exp_prev in records:
-                    diff = exp_now - exp_prev
-                    if diff > 0:
-                        hourly_speed = (diff / minutes_diff) * 60
-                        speed_yi = hourly_speed / 100_000_000
-                        if speed_yi >= self.SPEED_LIMIT:
-                            alert_list.append(
-                                {"name": name, "server": server, "level": level, "speed": speed_yi}
-                            )
+                alert_list = collect_overspeed(
+                    records, minutes_diff, self.SPEED_LIMIT
+                )[: self.alert_count]
 
                 if alert_list:
-                    alert_list.sort(key=lambda x: x["speed"], reverse=True)
-                    alert_list = alert_list[: self.alert_count]
                     chunk_size = 50
                     for i in range(0, len(alert_list), chunk_size):
                         chunk = alert_list[i : i + chunk_size]
@@ -333,51 +318,9 @@ class ExpTracker(commands.Cog):
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
         """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""
-        sql = '''
-            SELECT DISTINCT t_now.exp, t_now.player_name, t_now.server_name, t_now.level, t_now.class_name,
-                            t_old.player_name, t_old.server_name, t_old.level, t_old.class_name,
-                            t_old.exp, t_now.subjugation_grade, t_old.subjugation_grade
-            FROM exp_history t_now
-            JOIN (
-                SELECT e.player_name, e.server_name, e.class_name, e.level, e.subjugation_grade, e.exp, e.record_time
-                FROM exp_history e
-                INNER JOIN (
-                    SELECT player_name, server_name, MAX(record_time) AS max_time
-                    FROM exp_history
-                    WHERE record_time <= ? AND record_time >= datetime(?, '-7 days')
-                    GROUP BY player_name, server_name
-                ) latest
-                  ON e.player_name = latest.player_name
-                 AND e.server_name = latest.server_name
-                 AND e.record_time = latest.max_time
-            ) t_old ON (
-                (t_now.player_name = t_old.player_name
-                 AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?))
-                OR (
-                    t_now.player_name != t_old.player_name
-                    AND t_now.class_name = t_old.class_name
-                    AND t_now.class_name IS NOT NULL
-                    AND t_old.class_name IS NOT NULL
-                    AND t_now.class_name NOT IN ('', 'None', '未知')
-                    AND t_old.class_name NOT IN ('', 'None', '未知')
-                    AND COALESCE(t_now.subjugation_grade, -1) = COALESCE(t_old.subjugation_grade, -2)
-                    AND ABS(t_now.level - t_old.level) <= 1
-                    AND t_now.exp >= t_old.exp AND t_now.exp <= (t_old.exp + ?)
-                )
-            )
-            WHERE t_now.record_time = ? AND t_now.exp > 1000000000000
-              AND t_now.level >= t_old.level
-              AND COALESCE(t_now.subjugation_grade, 0) >= COALESCE(t_old.subjugation_grade, 0)
-              AND t_now.server_name != t_old.server_name
-              AND NOT EXISTS (
-                  SELECT 1 FROM exp_history t_check
-                  WHERE t_check.record_time = ?
-                    AND t_check.player_name = t_now.player_name
-                    AND t_check.server_name = t_now.server_name
-              )
-        '''
         async with self.bot.db.execute(
-            sql, (time_prev, time_prev, name_margin, class_margin, time_now, time_prev)
+            POTENTIAL_TRANSFERS_SQL,
+            (time_prev, time_prev, name_margin, class_margin, time_now, time_prev),
         ) as cursor:
             return await cursor.fetchall()
 
@@ -386,11 +329,7 @@ class ExpTracker(commands.Cog):
         new_lvl, new_cls, new_sub_grade, status_str, exp_diff,
     ) -> int:
         """發送轉服警報；回傳成功送達的頻道數。"""
-        if exp_diff == 0:
-            diff_str = "+0.00% (完美吻合)"
-        else:
-            diff_str = f"+{(exp_diff / 100000000):,.0f} 億 (轉移期間偷練)"
-
+        diff_str = format_exp_diff(exp_diff)
         embed = discord.Embed(
             title="【波拉西亞戰記】轉移/旅團變動警報",
             description=(
@@ -422,16 +361,12 @@ class ExpTracker(commands.Cog):
 
     async def check_for_transfers(self, time_now, time_prev, complete_times=None):
         try:
-            # 同名 margin 收緊到 1000 億；異名（僅同職）100 億
-            NAME_MARGIN = 1000 * 100000000
-            CLASS_MARGIN = 100 * 100000000
             transfer_records = await self._get_potential_transfers(
                 time_now, time_prev, NAME_MARGIN, CLASS_MARGIN
             )
             if not transfer_records:
                 return
 
-            # 連續缺席確認：需在最近兩個完整快照都找不到舊角
             miss_times = [time_now]
             if complete_times and len(complete_times) >= 2:
                 miss_times = [complete_times[0][0], complete_times[1][0]]
@@ -441,43 +376,18 @@ class ExpTracker(commands.Cog):
             ) as cursor:
                 registry_rows = await cursor.fetchall()
 
-            alias_map = {}
-            for row in registry_rows:
-                name = row[0]
-                identities = [i.strip() for i in row[1].split(",")] if row[1] else []
-                alias_map[name] = set(identities)
+            alias_map = build_alias_map(registry_rows)
+            ranked = rank_transfer_candidates(transfer_records, alias_map)
 
-            def is_known_alias(new_name, old_name):
-                return (
-                    old_name in alias_map.get(new_name, set())
-                    or new_name in alias_map.get(old_name, set())
-                )
+            matched_old: set[tuple] = set()
+            matched_new: set[tuple] = set()
 
-            transfer_records.sort(
-                key=lambda x: (
-                    0 if x[1] == x[5] else 1,
-                    0 if is_known_alias(x[1], x[5]) else 1,
-                    0 if x[3] == x[7] else 1,
-                    0 if (x[10] is not None and x[11] is not None and x[10] == x[11]) else 1,
-                    x[0] - x[9],
-                )
-            )
-
-            matched_old = set()
-            matched_new = set()
-            reported_pairs = set()
-
-            for row in transfer_records:
+            for row in ranked:
                 new_exp = row[0]
                 new_name, new_server, new_lvl, new_cls = row[1], row[2], row[3], row[4]
-                old_name, old_server, old_lvl, old_cls = row[5], row[6], row[7], row[8]
+                old_name, old_server = row[5], row[6]
                 old_exp = row[9]
                 new_sub_grade = row[10]
-
-                # 異名且非登錄別名：必須同職（SQL 已保證）且討伐一致
-                if new_name != old_name and not is_known_alias(new_name, old_name):
-                    if row[10] is None or row[11] is None or row[10] != row[11]:
-                        continue
 
                 old_key = (old_name, old_server)
                 new_key = (new_name, new_server)
@@ -485,9 +395,6 @@ class ExpTracker(commands.Cog):
                     continue
 
                 pair_key = (old_name, old_server, new_name, new_server)
-                if pair_key in reported_pairs:
-                    continue
-
                 async with self.bot.db.execute(
                     '''
                     SELECT 1 FROM transfer_alerts_log
@@ -495,11 +402,9 @@ class ExpTracker(commands.Cog):
                     ''',
                     pair_key,
                 ) as check_log_cursor:
-                    already_alerted = await check_log_cursor.fetchone()
-                if already_alerted:
-                    continue
+                    if await check_log_cursor.fetchone():
+                        continue
 
-                # 需連續兩個完整快照都缺席，降低掉出前100的假警報
                 old_missing_all = True
                 for miss_t in miss_times:
                     if await self._player_present_at(miss_t, old_name, old_server):
@@ -508,14 +413,22 @@ class ExpTracker(commands.Cog):
                 if not old_missing_all:
                     continue
 
-                reported_pairs.add(pair_key)
                 matched_old.add(old_key)
                 matched_new.add(new_key)
-
-                status_str = "跨服轉移並改名" if new_name != old_name else "跨服轉移"
+                status_str = (
+                    "跨服轉移並改名" if new_name != old_name else "跨服轉移"
+                )
                 sent = await self._send_transfer_alert(
-                    time_now, new_name, new_server, old_name, old_server,
-                    new_lvl, new_cls, new_sub_grade, status_str, new_exp - old_exp,
+                    time_now,
+                    new_name,
+                    new_server,
+                    old_name,
+                    old_server,
+                    new_lvl,
+                    new_cls,
+                    new_sub_grade,
+                    status_str,
+                    new_exp - old_exp,
                 )
                 if sent > 0:
                     await self.bot.db.execute(
@@ -524,7 +437,7 @@ class ExpTracker(commands.Cog):
                         (old_name, old_server, new_name, new_server, alert_time)
                         VALUES (?, ?, ?, ?, ?)
                         ''',
-                        (old_name, old_server, new_name, new_server, time_now),
+                        (*pair_key, time_now),
                     )
                     await self.bot.db.commit()
                 else:
@@ -532,8 +445,6 @@ class ExpTracker(commands.Cog):
                         f"轉服警報送出失敗，未寫入 dedupe："
                         f"{old_name}@{old_server} -> {new_name}@{new_server}"
                     )
-                    # 送失敗時放開配對鎖，下輪可重試
-                    reported_pairs.discard(pair_key)
                     matched_old.discard(old_key)
                     matched_new.discard(new_key)
         except sqlite3.DatabaseError as e:
@@ -672,21 +583,7 @@ class ExpTracker(commands.Cog):
             async with self.bot.db.execute(sql, tuple(params)) as cursor:
                 speed_records = await cursor.fetchall()
 
-            speed_data = []
-            for name, server, level, exp_now, exp_prev in speed_records:
-                diff = exp_now - exp_prev
-                if diff > 0:
-                    speed_data.append(
-                        {
-                            "name": name,
-                            "server": server,
-                            "level": level,
-                            "speed": (diff / minutes_diff) * 60,
-                        }
-                    )
-
-            speed_data.sort(key=lambda x: x["speed"], reverse=True)
-            top_list = speed_data[:count]
+            top_list = collect_speed_ranking(speed_records, minutes_diff)[:count]
             if not top_list:
                 return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
 

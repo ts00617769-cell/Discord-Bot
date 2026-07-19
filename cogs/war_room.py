@@ -21,10 +21,14 @@ class WarRoom(commands.Cog):
     async def cog_load(self):
         if not self.db_cleanup_task.is_running():
             self.db_cleanup_task.start()
+        if not self.health_summary_task.is_running():
+            self.health_summary_task.start()
 
     def cog_unload(self):
         if self.db_cleanup_task.is_running():
             self.db_cleanup_task.cancel()
+        if self.health_summary_task.is_running():
+            self.health_summary_task.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -35,7 +39,9 @@ class WarRoom(commands.Cog):
         channel = self.bot.get_channel(self.log_channel_id)
         if channel:
             try:
-                await channel.send("🟢 **【系統廣播】** 戰情雷達已重新啟動，後勤監視與自動排程上線。")
+                await channel.send(
+                    "🟢 **【系統廣播】** 戰情雷達已重新啟動，後勤監視與自動排程上線。"
+                )
             except discord.HTTPException as e:
                 logger.error(f"Failed to send war room ready message: {e}")
 
@@ -44,7 +50,6 @@ class WarRoom(commands.Cog):
         if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
             return
 
-        # 冷卻／併發／參數錯誤：回覆使用者，避免「下指令沒反應」
         if isinstance(error, commands.CommandOnCooldown):
             try:
                 await ctx.send(
@@ -56,7 +61,9 @@ class WarRoom(commands.Cog):
             return
         if isinstance(error, commands.MaxConcurrencyReached):
             try:
-                await ctx.send("⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10)
+                await ctx.send(
+                    "⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10
+                )
             except discord.HTTPException:
                 pass
             return
@@ -102,6 +109,36 @@ class WarRoom(commands.Cog):
 
     tz = datetime.timezone(datetime.timedelta(hours=8))
     clean_time = datetime.time(hour=4, minute=0, tzinfo=tz)
+    # 每週日 09:00 健康摘要
+    health_time = datetime.time(hour=9, minute=0, tzinfo=tz)
+
+    async def _gather_health_stats(self) -> dict:
+        stats = {
+            "exp_rows": 0,
+            "transfer_rows": 0,
+            "last_snapshot": None,
+            "server_count_last": 0,
+        }
+        async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+            stats["exp_rows"] = (await cursor.fetchone())[0]
+        async with self.bot.db.execute(
+            "SELECT COUNT(*) FROM transfer_alerts_log"
+        ) as cursor:
+            stats["transfer_rows"] = (await cursor.fetchone())[0]
+        async with self.bot.db.execute(
+            """
+            SELECT record_time, COUNT(DISTINCT server_name)
+            FROM exp_history
+            GROUP BY record_time
+            ORDER BY record_time DESC
+            LIMIT 1
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                stats["last_snapshot"] = row[0]
+                stats["server_count_last"] = row[1]
+        return stats
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
@@ -124,7 +161,6 @@ class WarRoom(commands.Cog):
                 deleted_transfer = cursor.rowcount or 0
 
             await self.bot.db.commit()
-            # 協助查詢規劃器更新統計（不鎖表、不做 VACUUM）
             try:
                 await self.bot.db.execute("PRAGMA optimize")
             except sqlite3.DatabaseError as e:
@@ -132,10 +168,15 @@ class WarRoom(commands.Cog):
 
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel and (deleted_exp > 0 or deleted_transfer > 0):
+                vacuum_hint = ""
+                if deleted_exp >= 5000:
+                    vacuum_hint = (
+                        "\n💡 刪除量較大，建議停 bot 後執行 `python cleanup_db.py` 釋放磁碟。"
+                    )
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 清理 `exp_history` {deleted_exp} 筆、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆。"
-                    f"（VACUUM 請離線執行 `cleanup_db.py`）"
+                    f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
                 )
 
         except sqlite3.DatabaseError as e:
@@ -146,6 +187,44 @@ class WarRoom(commands.Cog):
 
     @db_cleanup_task.before_loop
     async def before_db_cleanup_task(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(time=health_time)
+    async def health_summary_task(self):
+        """每週日發送資料庫／掃描健康摘要。"""
+        now = datetime.datetime.now(self.tz)
+        if now.weekday() != 6:  # Sunday
+            return
+        if not self.log_channel_id:
+            return
+        channel = self.bot.get_channel(self.log_channel_id)
+        if not channel:
+            return
+        try:
+            stats = await self._gather_health_stats()
+            last = stats["last_snapshot"] or "尚無"
+            vacuum_note = ""
+            if stats["exp_rows"] > 50_000:
+                vacuum_note = (
+                    "\n⚠️ `exp_history` 超過 5 萬筆；若啟動略過索引，"
+                    "請離線執行 `python cleanup_db.py`。"
+                )
+            await channel.send(
+                f"📊 **【每週健康摘要】**\n"
+                f"> `exp_history`：{stats['exp_rows']:,} 筆\n"
+                f"> `transfer_alerts_log`：{stats['transfer_rows']:,} 筆\n"
+                f"> 最近快照：`{last}`（{stats['server_count_last']} 服）"
+                f"{vacuum_note}"
+            )
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Health summary failed: {e}", exc_info=True)
+            try:
+                await channel.send(f"⚠️ **【健康摘要失敗】**\n```python\n{e}\n```")
+            except discord.HTTPException:
+                pass
+
+    @health_summary_task.before_loop
+    async def before_health_summary_task(self):
         await self.bot.wait_until_ready()
 
 

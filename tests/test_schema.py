@@ -23,6 +23,10 @@ async def test_apply_migrations_fresh_db(tmp_path):
         assert "bot_settings" in tables
         assert "cmd_dedupe" in tables
         assert "schema_meta" in tables
+        assert "quiz_history" in tables
+        assert "horoscope_cache" in tables
+        assert "active_quiz_status" in tables
+        assert "quiz_votes" in tables
 
         # 冪等
         ver2 = await apply_migrations(db)

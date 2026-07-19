@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -63,6 +63,42 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "legacy column backfill + light indexes",
         [
             # 舊庫可能缺欄位；用 PRAGMA 檢查後在 apply 裡補
+        ],
+    ),
+    (
+        3,
+        "quiz + horoscope tables",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS quiz_history (
+                quiz_id TEXT PRIMARY KEY,
+                used_date TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS active_quiz_status (
+                id INTEGER PRIMARY KEY,
+                is_active INTEGER,
+                quiz_id TEXT,
+                channel_id TEXT,
+                date_str TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS quiz_votes (
+                user_id TEXT PRIMARY KEY,
+                user_name TEXT,
+                choice TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS horoscope_cache (
+                date TEXT,
+                sign TEXT,
+                content TEXT,
+                PRIMARY KEY (date, sign)
+            )
+            """,
         ],
     ),
 ]

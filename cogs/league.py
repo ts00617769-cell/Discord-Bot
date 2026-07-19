@@ -5,31 +5,33 @@ import unicodedata
 import logging
 import asyncio
 from . import error_handler
+from .beanfun_http import get_beanfun_client
 
 logger = logging.getLogger(__name__)
+
+LEAGUE_API_URL = "https://warsofprasia.beanfun.com/api/UniverseLeague/Ranking"
+
 
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # 📏 輔助函數：計算中英文等寬對齊
     def pad_text(self, text, target_width):
         text_str = str(text)
-        current_width = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text_str)
+        current_width = sum(
+            2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text_str
+        )
         return text_str + " " * max(0, target_width - current_width)
 
-    # ✨ 這裡加上了參數接收與預設值，解決變數未定義的問題！
     @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     @commands.cooldown(1, 15, commands.BucketType.user)
     @commands.max_concurrency(2, commands.BucketType.default, wait=False)
     async def get_league_score(self, ctx, season: str = "3", round_num: str = "3", league_id: str = "1"):
-        # ✅ 新增參數驗證
         try:
             season_int = int(season)
             round_int = int(round_num)
             league_int = int(league_id)
-            
-            # 合理性檢查
+
             if not (1 <= season_int <= 10):
                 await ctx.send("❌ 賽季必須是 1-10 的數字")
                 return
@@ -39,12 +41,11 @@ class LeagueTracker(commands.Cog):
             if not (1 <= league_int <= 5):
                 await ctx.send("❌ 級別必須是 1-5 的數字 (1:挑戰者 2:菁英 3:超級菁英 4:傳奇 5:不朽)")
                 return
-                
+
         except ValueError:
             await ctx.send("❌ 請輸入數字。用法: `!聯賽 [季] [回合] [級別]` 例: `!聯賽 3 3 1`")
             return
 
-        # 💡 友善的提示訊息 (參數回顯機制)
         hint_msg = (
             f"🛰️ **啟動宇宙聯賽觀測站**\n"
             f"🔍 您的查詢條件為：\n"
@@ -55,59 +56,47 @@ class LeagueTracker(commands.Cog):
         )
         processing_msg = await ctx.send(hint_msg)
 
-        api_url = "https://warsofprasia.beanfun.com/api/UniverseLeague/Ranking"
-        
-        # 動態生成 Payload 參數
         payload = {
             "season": f"UniverseLeague_TW_Live_Season0{season}",
             "roundId": f"Live_CrossRealmRound_UniverseLeague_TW_S0{season}_R{round_num}",
-            "leagueId": str(league_id)
-        }
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Origin": "https://warsofprasia.beanfun.com",
-            "Referer": "https://warsofprasia.beanfun.com/Main/Ranking"
+            "leagueId": str(league_id),
         }
 
         try:
-            # ✨ 直接使用全域 session，不重複建立連線！
-            async with self.bot.session.post(api_url, json=payload, headers=headers, timeout=10) as response:
-                if response.status != 200:
-                    return await processing_msg.edit(content=f"❌ API 連線失敗 (狀態碼: {response.status})。請確認 API 網址是否正確。")
-                
-                json_data = await response.json()
-                    
+            client = get_beanfun_client(self.bot)
+            result = await client.post_json(LEAGUE_API_URL, payload)
+            if not result.ok:
+                return await processing_msg.edit(
+                    content=f"❌ API 連線失敗 ({result.error})。請稍後再試。"
+                )
+
+            json_data = result.data or {}
             league_ranking = json_data.get("data", {}).get("league_ranking", [])
             if not league_ranking:
-                return await processing_msg.edit(content="❌ 找不到該季/回合的聯賽資料，可能尚未開打或參數輸入錯誤。")
+                return await processing_msg.edit(
+                    content="❌ 找不到該季/回合的聯賽資料，可能尚未開打或參數輸入錯誤。"
+                )
 
             match_list = league_ranking[0].get("match", [])
             if not match_list:
                 return await processing_msg.edit(content="❌ 資料庫回傳為空，沒有對戰紀錄。")
 
             embeds = []
-            
-            # 遍歷每一個賽區 (例如：挑戰者 1)
+
             for match in match_list:
                 match_name = match.get("league_name", "未知賽區")
                 teams = match.get("team", [])
-                
-                # 排序：把總分最高的陣營排在前面
                 teams.sort(key=lambda x: x.get("team_score", 0), reverse=True)
-                
+
                 description = "```yaml\n"
-                
-                # 遍歷賽區內的每一個陣營
+
                 for team_idx, team in enumerate(teams, 1):
                     team_score = team.get("team_score", 0)
                     members = team.get("team_member", [])
-                    
+
                     description += f"🏆 陣營 {team_idx} (總分: {team_score})\n"
-                    
-                    # 排序：把陣營內貢獻分數最高的公會排在前面
                     members.sort(key=lambda x: x.get("ranking_value", 0), reverse=True)
-                    
+
                     for member in members:
                         is_leader = member.get("team_leader_flag", False)
                         icon = "👑" if is_leader else "🔸"
@@ -115,49 +104,56 @@ class LeagueTracker(commands.Cog):
                         guild = member.get("guild_name", "未知公會")
                         score = member.get("ranking_value", 0)
                         territory = member.get("territory_name", "無據點")
-                        
-                        # 組合字串並對齊
+
                         guild_display = f"[{world}] {guild}"
                         guild_padded = self.pad_text(guild_display, 22)
-                        
+
                         description += f"   {icon} {guild_padded} | {score:>5}分 | {territory}\n"
-                    
-                    description += "\n" # 陣營之間空一行
-                
+
+                    description += "\n"
+
                 description += "```"
-                
-                # 為每個賽區建立獨立的 Embed 卡片
-                embed = discord.Embed(title=f"🌌 宇宙聯賽 - {match_name}", description=description, color=0x9B59B6)
-                
-                # 💡 在報表底部加上查詢參數，看起來更專業
-                embed.set_footer(text=f"查詢參數：S0{season} 賽季 | 第 {round_num} 回合 | 第 {league_id} 組")
+
+                embed = discord.Embed(
+                    title=f"🌌 宇宙聯賽 - {match_name}",
+                    description=description,
+                    color=0x9B59B6,
+                )
+                embed.set_footer(
+                    text=f"查詢參數：S0{season} 賽季 | 第 {round_num} 回合 | 第 {league_id} 組"
+                )
                 embeds.append(embed)
 
             await processing_msg.delete()
-            
-            # 依序發送所有賽區的卡片
+
             for emb in embeds:
                 await ctx.send(embed=emb)
 
-        # ==========================================
-        # 👇 替換這段：加上雙重保護的錯誤攔截機制
-        # ==========================================
         except asyncio.TimeoutError as e:
-            await error_handler.handle_api_error(ctx, "連線逾時：抓取聯賽資料花時過久，請重試", str(e))
+            await error_handler.handle_api_error(
+                ctx, "連線逾時：抓取聯賽資料花時過久，請重試", str(e)
+            )
         except aiohttp.ClientError as e:
-            await error_handler.handle_api_error(ctx, "網路連線失敗：無法連接到遊戲伺服器", str(e))
+            await error_handler.handle_api_error(
+                ctx, "網路連線失敗：無法連接到遊戲伺服器", str(e)
+            )
         except ValueError as e:
-            await error_handler.handle_api_error(ctx, "資料解析錯誤：伺服器回傳的資料格式異常", str(e))
+            await error_handler.handle_api_error(
+                ctx, "資料解析錯誤：伺服器回傳的資料格式異常", str(e)
+            )
         except KeyError as e:
             await error_handler.handle_api_error(ctx, "模組發生錯誤：資料欄位異常", str(e))
         except discord.HTTPException as e:
             error_handler.log_command_error(ctx, "聯賽", e)
-            await error_handler.handle_api_error(ctx, f"Discord 發送失敗：{type(e).__name__}", str(e))
+            await error_handler.handle_api_error(
+                ctx, f"Discord 發送失敗：{type(e).__name__}", str(e)
+            )
         finally:
             try:
                 await processing_msg.delete()
             except discord.NotFound:
                 pass
-        # ==========================================
+
+
 async def setup(bot):
     await bot.add_cog(LeagueTracker(bot))

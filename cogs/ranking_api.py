@@ -1,22 +1,24 @@
-"""共用官方排名 API 客戶端（併發限制、重試、短 TTL 快取）。"""
+"""共用官方排名 API 客戶端（建立在 BeanfunClient 之上）。"""
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
-import time
-from dataclasses import dataclass, field
+import os
 from typing import Any, Optional
 
-import aiohttp
+from .beanfun_http import (
+    DEFAULT_HEADERS,
+    BeanfunClient,
+    FetchResult,
+    _is_retryable_error,
+    get_beanfun_client,
+)
 
 logger = logging.getLogger(__name__)
 
 RANKING_API_URL = "https://warsofprasia.beanfun.com/api/Records/PostLiveapiGCRanking"
 RANKING_HEADERS = {
-    "Content-Type": "application/json",
-    "Origin": "https://warsofprasia.beanfun.com",
+    **DEFAULT_HEADERS,
     "Referer": "https://warsofprasia.beanfun.com/Main/Ranking",
 }
 ALL_CLASSES = [
@@ -29,137 +31,39 @@ ALL_CLASSES = [
     "Enforcer",
 ]
 
-# 全 bot 共用：避免背景掃描與手動指令同時打爆官方 API
-_API_SEMAPHORE = asyncio.Semaphore(5)
-
-# 預設：成功回應快取秒數；可用環境變數覆寫
 _DEFAULT_CACHE_TTL = 45.0
-_DEFAULT_MAX_RETRIES = 2
-
-
-@dataclass
-class FetchResult:
-    """區分 API 失敗與真的空榜。"""
-
-    ok: bool
-    players: list = field(default_factory=list)
-    error: Optional[str] = None
-    from_cache: bool = False
-
-
-@dataclass
-class _CacheEntry:
-    result: FetchResult
-    expires_at: float
-
-
-def _payload_cache_key(payload: dict) -> str:
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _is_retryable_error(error: Optional[str]) -> bool:
-    if not error:
-        return False
-    if error.startswith("HTTP 4"):
-        return False  # 客戶端錯誤不重試
-    return True
 
 
 class RankingClient:
-    """透過 bot.session 請求排名資料：semaphore + 重試 + 短 TTL 快取。"""
+    """透過 BeanfunClient 請求排名資料。"""
 
     def __init__(
         self,
-        session: aiohttp.ClientSession,
+        session,
         concurrency: int = 5,
         *,
         cache_ttl: float = _DEFAULT_CACHE_TTL,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
+        max_retries: int = 2,
+        http: Optional[BeanfunClient] = None,
     ):
-        self.session = session
-        self._sem = _API_SEMAPHORE if concurrency == 5 else asyncio.Semaphore(concurrency)
-        self._cache_ttl = max(0.0, float(cache_ttl))
-        self._max_retries = max(0, int(max_retries))
-        self._cache: dict[str, _CacheEntry] = {}
+        self._http = http or BeanfunClient(
+            session,
+            concurrency=concurrency,
+            cache_ttl=cache_ttl,
+            max_retries=max_retries,
+        )
+        self.session = self._http.session
 
     def clear_cache(self) -> None:
-        self._cache.clear()
-
-    def _get_cached(self, key: str) -> Optional[FetchResult]:
-        if self._cache_ttl <= 0:
-            return None
-        entry = self._cache.get(key)
-        if not entry:
-            return None
-        if time.monotonic() >= entry.expires_at:
-            self._cache.pop(key, None)
-            return None
-        cached = FetchResult(
-            ok=entry.result.ok,
-            players=list(entry.result.players),
-            error=entry.result.error,
-            from_cache=True,
-        )
-        return cached
-
-    def _store_cache(self, key: str, result: FetchResult) -> None:
-        if self._cache_ttl <= 0 or not result.ok:
-            return
-        self._cache[key] = _CacheEntry(
-            result=FetchResult(ok=True, players=list(result.players), error=None),
-            expires_at=time.monotonic() + self._cache_ttl,
-        )
-
-    async def _post_once(self, payload: dict, timeout: float) -> FetchResult:
-        async with self._sem:
-            try:
-                async with self.session.post(
-                    RANKING_API_URL, json=payload, headers=RANKING_HEADERS, timeout=timeout
-                ) as response:
-                    if response.status != 200:
-                        msg = f"HTTP {response.status}"
-                        logger.warning(f"Ranking API {msg} payload={payload}")
-                        return FetchResult(ok=False, error=msg)
-                    data = await response.json()
-                    if not isinstance(data, dict):
-                        msg = f"non-dict JSON type={type(data).__name__}"
-                        logger.error(f"Ranking API {msg} payload={payload}")
-                        return FetchResult(ok=False, error=msg)
-                    return FetchResult(ok=True, players=[data])
-            except asyncio.TimeoutError:
-                logger.error(f"Ranking API timeout payload={payload}")
-                return FetchResult(ok=False, error="timeout")
-            except aiohttp.ClientError as e:
-                logger.error(f"Ranking API client error: {e}")
-                return FetchResult(ok=False, error=str(e))
-            except (ValueError, TypeError) as e:
-                logger.error(f"Ranking API JSON parse error: {e}")
-                return FetchResult(ok=False, error=str(e))
+        self._http.clear_cache()
 
     async def _post_raw(self, payload: dict, timeout: float = 10) -> FetchResult:
-        """回傳 ok + 原始 dict（放在 players[0]）或錯誤；含快取與重試。"""
-        key = _payload_cache_key(payload)
-        cached = self._get_cached(key)
-        if cached is not None:
-            return cached
-
-        last = FetchResult(ok=False, error="no_attempt")
-        for attempt in range(self._max_retries + 1):
-            last = await self._post_once(payload, timeout)
-            if last.ok:
-                self._store_cache(key, last)
-                return last
-            if not _is_retryable_error(last.error):
-                return last
-            if attempt < self._max_retries:
-                delay = 0.4 * (2**attempt)
-                logger.info(
-                    f"Ranking API retry {attempt + 1}/{self._max_retries} "
-                    f"after {last.error} (sleep {delay:.1f}s)"
-                )
-                await asyncio.sleep(delay)
-        return last
+        return await self._http.post_json(
+            RANKING_API_URL,
+            payload,
+            headers=RANKING_HEADERS,
+            timeout=timeout,
+        )
 
     async def fetch_class(
         self, group_id: str, world_id: str, class_key: Optional[str], limit: int = 100
@@ -263,16 +167,16 @@ class RankingClient:
 
 
 def get_ranking_client(bot) -> RankingClient:
-    """取得或建立掛在 bot 上的 RankingClient。"""
+    """取得或建立掛在 bot 上的 RankingClient（共用 BeanfunClient）。"""
     client = getattr(bot, "ranking_client", None)
     if client is None:
-        import os
-
         ttl_raw = (os.getenv("RANKING_CACHE_TTL") or "").strip()
         try:
             ttl = float(ttl_raw) if ttl_raw else _DEFAULT_CACHE_TTL
         except ValueError:
             ttl = _DEFAULT_CACHE_TTL
-        client = RankingClient(bot.session, cache_ttl=ttl)
+        http = get_beanfun_client(bot)
+        # 與 beanfun 共用同一 cache／semaphore 實例
+        client = RankingClient(bot.session, cache_ttl=ttl, http=http)
         bot.ranking_client = client
     return client

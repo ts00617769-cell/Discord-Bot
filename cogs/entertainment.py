@@ -18,15 +18,10 @@ class Entertainment(commands.Cog):
     # 👇 新增這段 cog_load，讓機器人開機時就蓋好地基 👇
     # ==========================================
     async def cog_load(self):
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS horoscope_cache (
-                date TEXT,
-                sign TEXT,
-                content TEXT,
-                PRIMARY KEY (date, sign)
-            )
-        ''')
-        await self.bot.db.commit()
+        # 表結構由 db.schema migration v3 管理；reload 時再確認一次
+        from db import apply_migrations
+
+        await apply_migrations(self.bot.db)
     # ==========================================
     # 👆 新增到這裡結束 👆
     # ==========================================

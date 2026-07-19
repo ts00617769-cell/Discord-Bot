@@ -79,6 +79,15 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
+推送／PR 會跑 GitHub Actions（本機同款 `pytest`，不連 Discord／beanfun）。
+
+### 架構補充
+
+- `services/`：轉服／測速等純邏輯（可單測）
+- `cogs/beanfun_http.py`：聯賽／稅收／時空王／排名共用的 JSON POST（重試＋快取）
+- Schema v3 起含 quiz／星座快取表；勿在 cog 內自行 `CREATE TABLE`
+- 戰情室每週日 09:00（UTC+8）發送健康摘要；大量 DELETE 後請離線 `python cleanup_db.py`
+
 ## 授權與資料來源
 
 排名資料來源：[Wars of Prasia 官網](https://warsofprasia.beanfun.com/) Ranking API。本專案為非官方旅團輔助工具。

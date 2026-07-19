@@ -157,32 +157,10 @@ class QuizSystem(commands.Cog):
         self.auto_reveal_quiz.cancel()
 
     async def setup_database(self):
-        # 記錄出過的題目
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS quiz_history (
-                quiz_id TEXT PRIMARY KEY,
-                used_date TEXT
-            )
-        ''')
-        # 記錄正在進行的測驗狀態
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS active_quiz_status (
-                id INTEGER PRIMARY KEY,
-                is_active INTEGER,
-                quiz_id TEXT,
-                channel_id TEXT,
-                date_str TEXT
-            )
-        ''')
-        # 記錄成員的投票
-        await self.bot.db.execute('''
-            CREATE TABLE IF NOT EXISTS quiz_votes (
-                user_id TEXT PRIMARY KEY,
-                user_name TEXT,
-                choice TEXT
-            )
-        ''')
-        await self.bot.db.commit()
+        # 表結構由 db.schema migration v3 集中管理；此處僅確保遷移已套用（支援 !reload）
+        from db import apply_migrations
+
+        await apply_migrations(self.bot.db)
 
     async def check_active_quiz_resume(self):
         """重啟機器人時的斷電接關機制"""
