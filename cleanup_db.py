@@ -30,6 +30,11 @@ from dotenv import load_dotenv  # noqa: E402
 
 from db.connection import resolve_db_path  # noqa: E402
 from services.timeutil import taipei_cutoff_str  # noqa: E402
+from services.settings_prune import (  # noqa: E402
+    PRUNE_DEDUPE_SQL,
+    boss_reminder_prune_bound,
+    overspeed_prune_bound,
+)
 
 load_dotenv(ROOT / ".env")
 
@@ -152,6 +157,13 @@ def main() -> int:
         if args.wipe_history:
             exp_stale = exp_total
             transfer_stale = transfer_total
+            settings_stale = _count(
+                conn,
+                """
+                SELECT COUNT(*) FROM bot_settings
+                WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+                """,
+            )
             mode = "清空全部歷史"
         else:
             cutoff = taipei_cutoff_str(args.days)
@@ -171,23 +183,42 @@ def main() -> int:
                 """,
                 (cutoff,),
             )
+            settings_stale = _count(
+                conn,
+                """
+                SELECT COUNT(*) FROM bot_settings
+                WHERE (key LIKE 'overspeed:%' AND key < ?)
+                   OR (key LIKE 'boss_reminder:%' AND key < ?)
+                """,
+                (
+                    overspeed_prune_bound(cutoff),
+                    boss_reminder_prune_bound(cutoff[:10]),
+                ),
+            )
             mode = f"保留最近 {args.days} 天（截止 {cutoff} 台北）"
 
         print(f"模式：{mode}")
         print(f"exp_history：共 {exp_total:,} 筆，將刪 {exp_stale:,} 筆")
         print(f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆")
+        print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
 
         if args.dry_run:
             print("dry-run：未修改資料庫。")
             return 0
 
-        if exp_stale == 0 and transfer_stale == 0 and args.no_vacuum:
+        if exp_stale == 0 and transfer_stale == 0 and settings_stale == 0 and args.no_vacuum:
             print("沒有可刪資料，略過。")
             return 0
 
         if args.wipe_history:
             deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
             deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
+            deleted_settings = conn.execute(
+                """
+                DELETE FROM bot_settings
+                WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+                """
+            ).rowcount
         else:
             cutoff = taipei_cutoff_str(args.days)
             deleted_exp = conn.execute(
@@ -204,9 +235,20 @@ def main() -> int:
                 """,
                 (cutoff,),
             ).rowcount
+            deleted_settings = conn.execute(
+                PRUNE_DEDUPE_SQL,
+                (
+                    overspeed_prune_bound(cutoff),
+                    boss_reminder_prune_bound(cutoff[:10]),
+                ),
+            ).rowcount
 
         conn.commit()
-        print(f"已刪除：exp_history {deleted_exp:,}、transfer_alerts_log {deleted_transfer:,}")
+        print(
+            f"已刪除：exp_history {deleted_exp:,}、"
+            f"transfer_alerts_log {deleted_transfer:,}、"
+            f"bot_settings 去重 {deleted_settings:,}"
+        )
 
         if not args.no_vacuum:
             print("正在 checkpoint + VACUUM（大庫可能需數分鐘）…")

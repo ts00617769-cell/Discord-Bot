@@ -208,7 +208,7 @@ async def claim_command_once(ctx: commands.Context):
 
 @bot.event
 async def on_command_error(ctx, error):
-    """僅處理去重與冷卻等非戰情室錯誤；其餘交由 WarRoom cog。"""
+    """去重略過；WarRoom 在場時由其處理；否則在此回覆使用者。"""
     if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
         return
     if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
@@ -222,9 +222,37 @@ async def on_command_error(ctx, error):
             commands.UserInputError,
         ),
     ):
+        if bot.get_cog("WarRoom") is not None:
+            return
+        # WarRoom 未載入時仍給使用者簡短回覆
+        try:
+            if isinstance(error, commands.CommandOnCooldown):
+                await ctx.send(
+                    f"⏳ 指令冷卻中，請再等 **{error.retry_after:.0f}** 秒。",
+                    delete_after=10,
+                )
+            elif isinstance(error, commands.MaxConcurrencyReached):
+                await ctx.send(
+                    "⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10
+                )
+            else:
+                usage = getattr(ctx.command, "help", None) or "請檢查指令參數。"
+                await ctx.send(f"❌ 參數錯誤。{usage}", delete_after=15)
+        except discord.HTTPException:
+            pass
         return
-    # 其餘錯誤由 WarRoom.on_command_error 統一上報，此處不再重複 log
 
+    if bot.get_cog("WarRoom") is not None:
+        return
+
+    logger.error(
+        f"Command error in {getattr(ctx.command, 'name', '?')}: {error}",
+        exc_info=error,
+    )
+    try:
+        await ctx.send("❌ 指令執行失敗，已記錄。", delete_after=15)
+    except discord.HTTPException:
+        pass
 
 @bot.event
 async def on_ready():

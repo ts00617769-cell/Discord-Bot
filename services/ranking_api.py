@@ -124,7 +124,7 @@ class RankingClient:
         limit: int = 100,
         overall_only: bool = False,
     ) -> FetchResult:
-        """抓取單一伺服器玩家；overall_only 只打總榜（討伐排名用）。"""
+        """抓取單一伺服器玩家；overall_only 只打總榜（較快、樣本較窄）。"""
         if overall_only:
             result = await self.fetch_class(group_id, world_id, None, limit=limit)
             result.overall_ok = result.ok

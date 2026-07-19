@@ -6,7 +6,12 @@ import logging
 import sqlite3
 from services.error_handler import parse_env_channel_id
 
-from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str
+from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
+from services.settings_prune import (
+    PRUNE_DEDUPE_SQL,
+    boss_reminder_prune_bound,
+    overspeed_prune_bound,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +173,17 @@ class WarRoom(commands.Cog):
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
 
+            # 超速／Boss 去重 key：依字串前綴與截止時間比較清理
+            cutoff_date_only = cutoff[:10] if len(cutoff) >= 10 else today_taipei_str()
+            async with self.bot.db.execute(
+                PRUNE_DEDUPE_SQL,
+                (
+                    overspeed_prune_bound(cutoff),
+                    boss_reminder_prune_bound(cutoff_date_only),
+                ),
+            ) as cursor:
+                deleted_settings = cursor.rowcount or 0
+
             await self.bot.db.commit()
             try:
                 await self.bot.db.execute("PRAGMA optimize")
@@ -175,7 +191,9 @@ class WarRoom(commands.Cog):
                 logger.warning(f"PRAGMA optimize 略過: {e}")
 
             log_channel = self.bot.get_channel(self.log_channel_id)
-            if log_channel and (deleted_exp > 0 or deleted_transfer > 0):
+            if log_channel and (
+                deleted_exp > 0 or deleted_transfer > 0 or deleted_settings > 0
+            ):
                 vacuum_hint = ""
                 if deleted_exp >= 5000:
                     vacuum_hint = (
@@ -183,7 +201,8 @@ class WarRoom(commands.Cog):
                     )
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 清理 `exp_history` {deleted_exp} 筆、"
-                    f"`transfer_alerts_log` {deleted_transfer} 筆。"
+                    f"`transfer_alerts_log` {deleted_transfer} 筆、"
+                    f"`bot_settings` 去重 key {deleted_settings} 筆。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
                 )
 

@@ -17,7 +17,11 @@ class SubjugationCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="討伐排名", aliases=["討伐"], help="查詢全服前 100 名討伐等級排行")
+    @commands.command(
+        name="討伐排名",
+        aliases=["討伐"],
+        help="查詢全服討伐等級排行（各服職業榜合併後依討伐重排 TOP 100）",
+    )
     @commands.cooldown(1, 20, commands.BucketType.user)
     @commands.max_concurrency(2, commands.BucketType.default, wait=False)
     async def get_subjugation_ranking(self, ctx):
@@ -25,9 +29,8 @@ class SubjugationCog(commands.Cog):
 
         try:
             client = get_ranking_client(self.bot)
-            all_players, failed_servers = await client.fetch_all_servers(
-                SERVER_MAP, overall_only=True
-            )
+            # 打總榜+各職業榜再合併，避免只取經驗總榜前 100 漏掉高討伐玩家
+            all_players, failed_servers = await client.fetch_all_servers(SERVER_MAP)
 
             if not all_players:
                 return await processing_msg.edit(content="❌ 資料抓取異常，請確認官方 API 狀態。")
@@ -86,13 +89,15 @@ class SubjugationCog(commands.Cog):
                         color=0xFFA500,
                     )
                 )
-                embeds[-1].set_footer(text="系統：共用 RankingClient 極速雷達")
+                embeds[-1].set_footer(
+                    text="來源：各服總榜+職業榜合併後依討伐重排 | 系統：RankingClient"
+                )
 
             if failed_servers and embeds:
                 embeds[-1].set_footer(
                     text=(
                         f"部分缺資料：{len(failed_servers)}/{len(SERVER_MAP)} 服失敗 | "
-                        "系統：共用 RankingClient 極速雷達"
+                        "來源：各服總榜+職業榜合併後依討伐重排"
                     )
                 )
 

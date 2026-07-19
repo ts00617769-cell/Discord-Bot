@@ -219,6 +219,7 @@ class QuizSystem(commands.Cog):
                 logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
 
     async def get_unrepeated_quiz(self):
+        """抽出尚未用過的題目（不寫 history；成功發布後再 mark_quiz_used）。"""
         async with self.bot.db.execute("SELECT quiz_id FROM quiz_history") as cursor:
             used_ids = [row[0] for row in await cursor.fetchall()]
 
@@ -233,14 +234,15 @@ class QuizSystem(commands.Cog):
             logger.error("Quiz bank is empty; cannot pick a question")
             return None
 
-        question = random.choice(available)
+        return random.choice(available)
+
+    async def mark_quiz_used(self, question: dict) -> None:
         today_str = today_taipei_str()
         await self.bot.db.execute(
             "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)",
             (question["title"], today_str),
         )
         await self.bot.db.commit()
-        return question
 
     async def save_active_status(self, channel_id, date_str, question):
         await self.bot.db.execute("DELETE FROM quiz_votes")
@@ -266,6 +268,14 @@ class QuizSystem(commands.Cog):
             "data": question,
             "votes": {},
         }
+
+    def _reset_poll(self):
+        self.active_poll = _empty_poll()
+
+    async def _finalize_reveal(self) -> None:
+        """結束盲投（無論是否成功送到頻道）。"""
+        self._reset_poll()
+        await self.clear_active_status()
 
     def _build_reveal_embed(self, title: str, question: dict) -> discord.Embed:
         embed = discord.Embed(
@@ -309,9 +319,6 @@ class QuizSystem(commands.Cog):
                 logger.error("Skip auto-post quiz: empty quiz bank")
                 return
 
-            self._start_poll(channel.id, current_date, question)
-            await self.save_active_status(channel.id, current_date, question)
-
             reveal_label = self.reveal_time.strftime("%H:%M")
             embed = discord.Embed(
                 title=f"🕛 {self.post_time.strftime('%H:%M')} 每日深層心理測驗來囉",
@@ -319,7 +326,11 @@ class QuizSystem(commands.Cog):
                 color=0x3498DB,
             )
             embed.set_footer(text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 準時公開！")
+            # 先成功送出再標記 active，避免發送失敗後整天無法重試
             await channel.send(embed=embed, view=SecretQuizView(question))
+            self._start_poll(channel.id, current_date, question)
+            await self.mark_quiz_used(question)
+            await self.save_active_status(channel.id, current_date, question)
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
         except (discord.HTTPException, sqlite3.DatabaseError, OSError) as e:
@@ -336,17 +347,29 @@ class QuizSystem(commands.Cog):
 
         try:
             channel = self.bot.get_channel(self.active_poll["channel_id"])
-            if channel:
-                embed = self._build_reveal_embed("🕕 每日測驗開獎時間！", self.active_poll["data"])
+            if not channel:
+                logger.warning(
+                    f"Quiz reveal channel {self.active_poll['channel_id']} missing; "
+                    "clearing stuck active poll"
+                )
+                await self._finalize_reveal()
+                return
+
+            embed = self._build_reveal_embed("🕕 每日測驗開獎時間！", self.active_poll["data"])
+            try:
                 await channel.send(embed=embed)
-                self.active_poll["is_active"] = False
-                await self.clear_active_status()
+            except discord.HTTPException as e:
+                logger.error(f"Failed to send quiz reveal: {e}")
+            # 無論是否送達，結束本日盲投，避免整天卡住
+            await self._finalize_reveal()
         except KeyError as e:
             logger.error(f"Missing required field in active poll data: {e}")
+            await self._finalize_reveal()
         except AttributeError as e:
             logger.error(f"Quiz data structure error during reveal: {e}")
-        except (discord.HTTPException, sqlite3.DatabaseError) as e:
-            logger.error(f"Failed to auto-reveal quiz: {e}")
+            await self._finalize_reveal()
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Failed to auto-reveal quiz (db): {e}")
 
     @auto_reveal_quiz.before_loop
     async def before_auto_reveal_quiz(self):
@@ -381,9 +404,6 @@ class QuizSystem(commands.Cog):
             await ctx.send("❌ 無法抽出題目，請檢查題庫。")
             return
 
-        self._start_poll(ctx.channel.id, current_date, question)
-        await self.save_active_status(ctx.channel.id, current_date, question)
-
         reveal_label = self.reveal_time.strftime("%H:%M")
         embed = discord.Embed(
             title="🎲 手動觸發今日測驗", description=question["title"], color=0x3498DB
@@ -391,7 +411,16 @@ class QuizSystem(commands.Cog):
         embed.set_footer(
             text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 公開（可用 !測試開獎 提早結算）。"
         )
-        await ctx.send(embed=embed, view=SecretQuizView(question))
+        try:
+            await ctx.send(embed=embed, view=SecretQuizView(question))
+        except discord.HTTPException as e:
+            logger.error(f"force_post send failed: {e}")
+            await ctx.send("❌ 測驗訊息發送失敗，請稍後再試。")
+            return
+
+        self._start_poll(ctx.channel.id, current_date, question)
+        await self.mark_quiz_used(question)
+        await self.save_active_status(ctx.channel.id, current_date, question)
 
     @commands.command(name="測試開獎")
     @commands.is_owner()
@@ -401,9 +430,11 @@ class QuizSystem(commands.Cog):
             return
 
         embed = self._build_reveal_embed("🚨 強制提早開獎！", self.active_poll["data"])
-        await ctx.send(embed=embed)
-        self.active_poll["is_active"] = False
-        await self.clear_active_status()
+        try:
+            await ctx.send(embed=embed)
+        except discord.HTTPException as e:
+            logger.error(f"force_reveal send failed: {e}")
+        await self._finalize_reveal()
 
 
 async def setup(bot):
