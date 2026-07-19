@@ -92,6 +92,11 @@ class WarRoom(commands.Cog):
             f"{''.join(traceback.format_exception(type(error), error, error.__traceback__))}"
         )
 
+        try:
+            await ctx.send("❌ 指令執行失敗，已記錄。", delete_after=15)
+        except discord.HTTPException:
+            pass
+
         if not self.log_channel_id:
             return
 

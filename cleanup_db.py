@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DB = ROOT / "prasia_data.db"
 LOCK_PATH = ROOT / ".bot.lock"
 DEFAULT_DAYS = 60
 
@@ -27,7 +26,12 @@ DEFAULT_DAYS = 60
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv  # noqa: E402
+
+from db.connection import resolve_db_path  # noqa: E402
 from services.timeutil import taipei_cutoff_str  # noqa: E402
+
+load_dotenv(ROOT / ".env")
 
 
 def _fmt_bytes(n: int) -> str:
@@ -78,12 +82,13 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
 
 
 def main() -> int:
+    default_db = resolve_db_path(ROOT)
     parser = argparse.ArgumentParser(description="離線清理 prasia_data.db")
     parser.add_argument(
         "--db",
         type=Path,
-        default=DEFAULT_DB,
-        help=f"資料庫路徑（預設：{DEFAULT_DB.name}）",
+        default=None,
+        help=f"資料庫路徑（預設與 bot 相同：DB_PATH 或 {default_db.name}）",
     )
     parser.add_argument(
         "--days",
@@ -117,7 +122,7 @@ def main() -> int:
         print("錯誤：--days 必須 >= 1（或改用 --wipe-history）", file=sys.stderr)
         return 2
 
-    db_path: Path = args.db
+    db_path: Path = args.db if args.db is not None else default_db
     if not db_path.is_file():
         print(f"錯誤：找不到資料庫 {db_path}", file=sys.stderr)
         return 1

@@ -49,9 +49,12 @@ class LeagueTracker(commands.Cog):
         )
         processing_msg = await ctx.send(hint_msg)
 
+        season_padded = f"{season_int:02d}"
         payload = {
-            "season": f"UniverseLeague_TW_Live_Season0{season}",
-            "roundId": f"Live_CrossRealmRound_UniverseLeague_TW_S0{season}_R{round_num}",
+            "season": f"UniverseLeague_TW_Live_Season{season_padded}",
+            "roundId": (
+                f"Live_CrossRealmRound_UniverseLeague_TW_S{season_padded}_R{round_num}"
+            ),
             "leagueId": str(league_id),
         }
 

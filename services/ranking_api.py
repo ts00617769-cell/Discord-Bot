@@ -104,6 +104,7 @@ class RankingClient:
         results = await asyncio.gather(
             *[self.fetch_class(group_id, world_id, c, limit=limit) for c in class_list]
         )
+        ok_results = [r for r in results if r.ok]
         failed = [r for r in results if not r.ok]
         if failed:
             err = failed[0].error or "class_fetch_failed"
@@ -111,10 +112,11 @@ class RankingClient:
                 f"fetch_server incomplete group={group_id} world={world_id}: "
                 f"{len(failed)}/{len(results)} class endpoints failed ({err})"
             )
-            return FetchResult(ok=False, error=err)
+            if not ok_results:
+                return FetchResult(ok=False, error=err)
 
         unique_players: dict[str, Any] = {}
-        for res in results:
+        for res in ok_results:
             for p in res.players:
                 if not isinstance(p, dict):
                     continue

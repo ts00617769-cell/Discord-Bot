@@ -85,3 +85,36 @@ async def test_fetch_class_parses_gc():
     assert result.ok
     assert len(result.players) == 1
     assert result.players[0]["gc_name"] == "P1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_merges_partial_class_success():
+    """部分職業榜失敗時仍合併成功資料，不整服作廢。"""
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    client.fetch_class = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            FetchResult(ok=True, players=[{"gc_name": "A"}]),
+            FetchResult(ok=False, error="timeout"),
+            FetchResult(ok=True, players=[{"gc_name": "B"}, {"gc_name": "A"}]),
+        ]
+    )
+    result = await client.fetch_server(
+        "g", "w", classes=[None, "MirageBlade", "Enforcer"]
+    )
+    assert result.ok
+    names = {p["gc_name"] for p in result.players}
+    assert names == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_all_classes_fail():
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    client.fetch_class = AsyncMock(  # type: ignore[method-assign]
+        return_value=FetchResult(ok=False, error="HTTP 500")
+    )
+    result = await client.fetch_server("g", "w", classes=[None, "Enforcer"])
+    assert not result.ok
+    assert result.error == "HTTP 500"
+    assert result.players == []

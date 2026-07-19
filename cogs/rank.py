@@ -71,7 +71,10 @@ class RankTracker(commands.Cog):
                 all_players, failed_servers = await client.fetch_all_servers(SERVER_MAP)
             else:
                 result = await client.fetch_server(target_group_id, target_world_id)
-                all_players = result.players if result.ok else []
+                if not result.ok:
+                    err = result.error or "未知錯誤"
+                    return await processing_msg.edit(content=f"❌ 撈取失敗：{err}")
+                all_players = result.players
 
             if not all_players:
                 return await processing_msg.edit(content="❌ 撈取失敗，找不到資料。")
