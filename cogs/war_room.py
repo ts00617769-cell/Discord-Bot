@@ -4,7 +4,9 @@ import traceback
 import datetime
 import logging
 import sqlite3
-from .error_handler import parse_env_channel_id
+from services.error_handler import parse_env_channel_id
+
+from services.timeutil import TAIPEI, now_taipei
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +109,8 @@ class WarRoom(commands.Cog):
             except discord.HTTPException as e:
                 logger.error(f"Failed to send war room error report: {e}")
 
-    tz = datetime.timezone(datetime.timedelta(hours=8))
-    clean_time = datetime.time(hour=4, minute=0, tzinfo=tz)
-    # 每週日 09:00 健康摘要
-    health_time = datetime.time(hour=9, minute=0, tzinfo=tz)
+    clean_time = datetime.time(hour=4, minute=0, tzinfo=TAIPEI)
+    health_time = datetime.time(hour=9, minute=0, tzinfo=TAIPEI)
 
     async def _gather_health_stats(self) -> dict:
         stats = {
@@ -192,7 +192,7 @@ class WarRoom(commands.Cog):
     @tasks.loop(time=health_time)
     async def health_summary_task(self):
         """每週日發送資料庫／掃描健康摘要。"""
-        now = datetime.datetime.now(self.tz)
+        now = now_taipei()
         if now.weekday() != 6:  # Sunday
             return
         if not self.log_channel_id:

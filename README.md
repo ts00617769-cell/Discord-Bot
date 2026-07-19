@@ -83,10 +83,11 @@ pytest -q
 
 ### 架構補充
 
-- `services/`：轉服／測速等純邏輯（可單測）
-- `cogs/beanfun_http.py`：聯賽／稅收／時空王／排名共用的 JSON POST（重試＋快取）
+- `services/`：轉服／測速／HTTP／時區／顯示對齊等純邏輯（可單測）
 - Schema v3 起含 quiz／星座快取表；勿在 cog 內自行 `CREATE TABLE`
-- 戰情室每週日 09:00（UTC+8）發送健康摘要；大量 DELETE 後請離線 `python cleanup_db.py`
+- 時間一律以 `Asia/Taipei`（`services.timeutil`）為準
+- 戰情室每週日 09:00（台北）發送健康摘要；大量 DELETE 後請離線 `python cleanup_db.py`
+- CI：`ruff check` + `pytest`（不連 Discord／beanfun）
 
 ## 授權與資料來源
 

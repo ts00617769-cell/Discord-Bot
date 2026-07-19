@@ -10,7 +10,6 @@ from .beanfun_http import (
     DEFAULT_HEADERS,
     BeanfunClient,
     FetchResult,
-    _is_retryable_error,
     get_beanfun_client,
 )
 

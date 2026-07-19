@@ -1,0 +1,10 @@
+# 最小靜態檢查：unused import／明顯錯誤，避免風格大戰
+target-version = "py310"
+line-length = 100
+
+[lint]
+select = ["E9", "F63", "F7", "F82", "F401", "F841"]
+ignore = []
+
+[lint.per-file-ignores]
+"tests/*" = ["F401"]

@@ -1,6 +1,5 @@
 """天眼尋人 / 轉服掃描指令（匹配邏輯見 services.player_matching）。"""
 import asyncio
-import datetime
 import logging
 import sqlite3
 import traceback
@@ -10,7 +9,8 @@ import discord
 from discord.ext import commands
 
 from services import player_matching as match
-from .error_handler import require_allowed_channel, parse_env_channel_ids
+from services.error_handler import require_allowed_channel, parse_env_channel_ids
+from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
 
@@ -25,77 +25,6 @@ class PlayerSearch(commands.Cog):
     @property
     def TRANSFER_ALERT_CHANNEL_IDS(self):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
-
-    def _is_unknown_class(self, cls_name):
-        return match.is_unknown_class(cls_name)
-
-    def _class_compatible(self, t_cls, c_cls):
-        return match.class_compatible(t_cls, c_cls)
-
-    @staticmethod
-    def _gap_hours(anchor_str, point_str):
-        return match.gap_hours(anchor_str, point_str)
-
-    @staticmethod
-    def _observation_gap_hours(a_first, a_last, b_first, b_last):
-        return match.observation_gap_hours(a_first, a_last, b_first, b_last)
-
-    def _pick_soft_candidates(
-        self, soft_candidates, exclude_keys, per_direction=2, max_diff_over_best=2e10,
-    ):
-        return match.pick_soft_candidates(
-            soft_candidates,
-            exclude_keys,
-            per_direction=per_direction,
-            max_diff_over_best=max_diff_over_best,
-        )
-
-    @staticmethod
-    def _format_track_entry(idx, p, *, show_confidence=False):
-        return match.format_track_entry(idx, p, show_confidence=show_confidence)
-
-    def _build_track_embeds(
-        self, target_name, entries, *, header, title, color, footer, show_confidence=False,
-    ):
-        """將軌跡 entries 切成多個 Embed（description 約 3800 字切頁）。"""
-        embeds = []
-        desc = f"{header}```yaml\n"
-        for idx, p in enumerate(entries, 1):
-            entry = self._format_track_entry(idx, p, show_confidence=show_confidence)
-            if len(desc) + len(entry) > 3800:
-                desc += "```"
-                embeds.append(discord.Embed(title=title, description=desc, color=color))
-                desc = "```yaml\n" + entry
-            else:
-                desc += entry
-        if desc != "```yaml\n":
-            desc += "```"
-            embeds.append(discord.Embed(title=title, description=desc, color=color))
-        if embeds:
-            embeds[-1].set_footer(text=footer)
-        return embeds
-
-    def _confidence(self, t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server):
-        return match.confidence(
-            t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server
-        )
-
-    def _score(
-        self, t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl, same_server,
-        forward=True,
-    ):
-        return match.score(
-            t_cls,
-            t_sub,
-            t_lvl,
-            exp_diff,
-            gap_hours,
-            c_cls,
-            c_sub,
-            c_lvl,
-            same_server,
-            forward=forward,
-        )
 
     async def _fetch_name_profiles(self, player_name, server_name=None):
         """依玩家名取履歷；可選 server_name 則回傳單筆（或 None）。"""
@@ -189,7 +118,7 @@ class PlayerSearch(commands.Cog):
         正確做法：先用經驗窗粗篩 (name, server)，再對完整履歷聚合後過濾。
         """
         t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub = profile
-        unknown_cls = self._is_unknown_class(t_cls)
+        unknown_cls = match.is_unknown_class(t_cls)
         candidates = []
 
         early_min = await self._early_window_min_exp(t_name, t_server, t_first, days=7)
@@ -254,7 +183,7 @@ class PlayerSearch(commands.Cog):
             if exp_diff < 0:
                 continue
             same_server = c_server == t_server
-            gap_hours = self._gap_hours(t_last, c_first)
+            gap_hours = match.gap_hours(t_last, c_first)
             label = "✏️ 疑似同服改名" if same_server else "✈️ 疑似轉服/改名後"
             candidates.append({
                 "direction": "forward",
@@ -263,11 +192,11 @@ class PlayerSearch(commands.Cog):
                 "match_type": label,
                 "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
                 "exp_diff": exp_diff,
-                "score": self._score(
+                "score": match.score(
                     t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
                     same_server, forward=True,
                 ),
-                "confidence": self._confidence(
+                "confidence": match.confidence(
                     t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
                 ),
             })
@@ -277,7 +206,7 @@ class PlayerSearch(commands.Cog):
             raw_diff = t_min_exp - c_max
             exp_diff = abs(raw_diff)
             same_server = c_server == t_server
-            gap_hours = self._gap_hours(t_first, c_last)
+            gap_hours = match.gap_hours(t_first, c_last)
             if raw_diff >= 0:
                 diff_text = f"空窗偷練 +{raw_diff/100000000:,.0f} 億"
             else:
@@ -290,11 +219,11 @@ class PlayerSearch(commands.Cog):
                 "match_type": label,
                 "diff_text": diff_text,
                 "exp_diff": exp_diff,
-                "score": self._score(
+                "score": match.score(
                     t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
                     same_server, forward=False,
                 ),
-                "confidence": self._confidence(
+                "confidence": match.confidence(
                     t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
                 ),
             })
@@ -332,9 +261,9 @@ class PlayerSearch(commands.Cog):
                 exp_diff = c_min - t_max_exp
                 if exp_diff < 0:
                     continue
-                gap_hours = self._gap_hours(t_last, c_first)
+                gap_hours = match.gap_hours(t_last, c_first)
                 same_server = c_server == t_server
-                if self._confidence(
+                if match.confidence(
                     t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
                 ) != "high":
                     continue
@@ -554,10 +483,10 @@ class PlayerSearch(commands.Cog):
                                 if last_seen <= t_first and t_sub_grade < sub_grade:
                                     continue
                             # 觀測區間完全無重疊且間隔 > 30 天：不進主軌 BFS，改列 soft
-                            obs_gap = self._observation_gap_hours(
+                            obs_gap = match.observation_gap_hours(
                                 t_first, t_last, first_seen, last_seen,
                             )
-                            class_ok = self._class_compatible(t_cls, cls_name)
+                            class_ok = match.class_compatible(t_cls, cls_name)
                             if obs_gap > 30 * 24 or not class_ok:
                                 soft_candidates.append({
                                     "direction": "forward" if first_seen >= t_last else "backward",
@@ -631,7 +560,7 @@ class PlayerSearch(commands.Cog):
                 target_last_exp = max(p[6] for p in target_profiles)
 
                 if not has_linked:
-                    soft_unique = self._pick_soft_candidates(soft_candidates, seen)
+                    soft_unique = match.pick_soft_candidates(soft_candidates, seen)
 
                     if soft_unique and only_self:
                         embeds = self._build_track_embeds(
@@ -803,14 +732,14 @@ class PlayerSearch(commands.Cog):
                         ):
                             continue
                         earlier, later = (a, b) if a["last"] <= b["first"] else (b, a)
-                        gap = self._observation_gap_hours(
+                        gap = match.observation_gap_hours(
                             earlier["first"], earlier["last"],
                             later["first"], later["last"],
                         )
                         if gap > 30 * 24:
                             continue
                         a_cls, b_cls = a.get("cls"), b.get("cls")
-                        if not self._class_compatible(a_cls, b_cls):
+                        if not match.class_compatible(a_cls, b_cls):
                             continue
                         pairs.append((earlier, later, gap))
                 return pairs
@@ -897,7 +826,7 @@ class PlayerSearch(commands.Cog):
         if not channels:
             return
 
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         embed = discord.Embed(
             title="【波拉西亞戰記】轉移/旅團變動警報 (測試)",
             description=(

@@ -1,11 +1,11 @@
 import discord
 from discord.ext import commands
 import aiohttp
-import unicodedata
 import logging
 import asyncio
-from . import error_handler
-from .beanfun_http import get_beanfun_client
+from services import error_handler
+from services.beanfun_http import get_beanfun_client
+from services.text_display import pad_text
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +15,6 @@ LEAGUE_API_URL = "https://warsofprasia.beanfun.com/api/UniverseLeague/Ranking"
 class LeagueTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    def pad_text(self, text, target_width):
-        text_str = str(text)
-        current_width = sum(
-            2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text_str
-        )
-        return text_str + " " * max(0, target_width - current_width)
 
     @commands.command(name="聯賽", help="查詢宇宙聯賽分數。格式: !聯賽 [季] [回合] [級別] (預設: 3 3 1)")
     @commands.cooldown(1, 15, commands.BucketType.user)
@@ -106,7 +99,7 @@ class LeagueTracker(commands.Cog):
                         territory = member.get("territory_name", "無據點")
 
                         guild_display = f"[{world}] {guild}"
-                        guild_padded = self.pad_text(guild_display, 22)
+                        guild_padded = pad_text(guild_display, 22)
 
                         description += f"   {icon} {guild_padded} | {score:>5}分 | {territory}\n"
 

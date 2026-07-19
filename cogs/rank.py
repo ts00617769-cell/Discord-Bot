@@ -1,16 +1,15 @@
 import asyncio
 import logging
-import unicodedata
 
 import aiohttp
 import discord
 from discord.ext import commands
 
 from game_data import SERVER_MAP
+from services import error_handler
+from services.error_handler import require_allowed_channel
 from services.member_registry import get_member_tag
-from . import error_handler
-from .error_handler import require_allowed_channel
-from .ranking_api import get_ranking_client
+from services.ranking_api import get_ranking_client
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +169,7 @@ class RankTracker(commands.Cog):
                     embed = discord.Embed(
                         title=f"🏆 {display_title} (續)",
                         description=description,
-                        color=0xffd700,
+                        color=0xFFD700,
                     )
                     await ctx.send(embed=embed)
                     description = "```yaml\n"
@@ -178,7 +177,7 @@ class RankTracker(commands.Cog):
 
             description += "```"
             embed = discord.Embed(
-                title=f"🏆 {display_title}", description=description, color=0xffd700
+                title=f"🏆 {display_title}", description=description, color=0xFFD700
             )
             embed.set_footer(text="單位：兆經驗值 | 系統：即時雷達過濾引擎")
 
@@ -201,7 +200,9 @@ class RankTracker(commands.Cog):
             logger.error("Processing message was deleted before we could edit it")
         except discord.HTTPException as e:
             error_handler.log_command_error(ctx, "排名", e)
-            await error_handler.handle_api_error(ctx, f"Discord 發送失敗：{type(e).__name__}", str(e))
+            await error_handler.handle_api_error(
+                ctx, f"Discord 發送失敗：{type(e).__name__}", str(e)
+            )
 
 
 async def setup(bot):

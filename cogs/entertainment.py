@@ -1,38 +1,35 @@
-import discord
-from discord.ext import commands
-import random
-import datetime
-import pytz
+"""鍊成、塔羅、星座運勢。"""
+from __future__ import annotations
+
 import asyncio
-import aiohttp
-from bs4 import BeautifulSoup
 import logging
-# ✨ 移除了 import sqlite3，全面改用 bot.db
+import random
+
+import aiohttp
+import discord
+from bs4 import BeautifulSoup
+from discord.ext import commands
+
+from db import apply_migrations
+from services.timeutil import today_taipei_str
 
 logger = logging.getLogger(__name__)
+
 
 class Entertainment(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-    # ==========================================
-    # 👇 新增這段 cog_load，讓機器人開機時就蓋好地基 👇
-    # ==========================================
+
     async def cog_load(self):
-        # 表結構由 db.schema migration v3 管理；reload 時再確認一次
-        from db import apply_migrations
-
         await apply_migrations(self.bot.db)
-    # ==========================================
-    # 👆 新增到這裡結束 👆
-    # ==========================================
 
-
-    # --- 9. 指令：鍊成系統 ---
     @commands.command(name="鍊成", help="模擬四合一鍊成。")
     async def alchemy(self, ctx, rarity: str):
         tiers = {"一般": "高級", "高級": "稀有", "稀有": "英雄", "英雄": "傳說", "傳說": "神話"}
         if rarity not in tiers:
-            await ctx.send(f"❌ {ctx.author.mention} 請輸入正確的階級：一般、高級、稀有、英雄、傳說")
+            await ctx.send(
+                f"❌ {ctx.author.mention} 請輸入正確的階級：一般、高級、稀有、英雄、傳說"
+            )
             return
 
         target_rarity = tiers[rarity]
@@ -49,25 +46,34 @@ class Entertainment(commands.Cog):
                 break
 
         if total_success:
-            rarity_colors = {"神話": 0xffd700, "傳說": 0xa335ee, "英雄": 0xff0000, "稀有": 0x0070dd, "高級": 0x1eff00}
+            rarity_colors = {
+                "神話": 0xFFD700,
+                "傳說": 0xA335EE,
+                "英雄": 0xFF0000,
+                "稀有": 0x0070DD,
+                "高級": 0x1EFF00,
+            }
             description = "\n".join(results) + f"\n\n🎊 **恭喜！鍊成成功！**\n獲得：**{target_rarity}** 品質"
 
             if target_rarity in ["英雄", "傳說", "神話"]:
-                embed = discord.Embed(title="✨ 鍊成進階成功！", description=description, color=rarity_colors.get(target_rarity, 0xffffff))
+                embed = discord.Embed(
+                    title="✨ 鍊成進階成功！",
+                    description=description,
+                    color=rarity_colors.get(target_rarity, 0xFFFFFF),
+                )
                 await ctx.send(embed=embed)
             else:
                 await ctx.send(f"✅ {ctx.author.mention} 鍊成成功！獲得：**{target_rarity}**")
         else:
-            fail_msg = "\n".join(results) + f"\n\n崩了... 鍊成失敗，素材已消失。"
+            fail_msg = "\n".join(results) + "\n\n崩了... 鍊成失敗，素材已消失。"
             await ctx.send(f"💀 {ctx.author.mention} {fail_msg}")
 
-    # --- 10. 指令：今日塔羅運勢 ---
     @commands.command(name="塔羅", help="抽取今日專屬的大阿爾克那塔羅牌。")
     async def daily_tarot(self, ctx):
-        today_str = datetime.datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y%m%d')
+        today_str = today_taipei_str().replace("-", "")
         seed = f"tarot_{ctx.author.id}_{today_str}"
         rng = random.Random(seed)
-        
+
         tarot_cards = {
             "🃏 0. 愚者 (The Fool)": "正位：放下得失心，適合隨手單抽，常有意外驚喜。\n逆位：切忌上頭！絕對不要把留著保底的鑽石拿去亂抽。",
             "✨ 1. 魔術師 (The Magician)": "正位：創造力爆發！鍊成系統成功率體感大增，四柱連過不是夢。\n逆位：素材準備不足，建議先囤貨，不要輕易點鍊成。",
@@ -90,18 +96,18 @@ class Entertainment(commands.Cog):
             "🌙 18. 月亮 (The Moon)": "正位：充滿未知與不安，官方機率今天似乎特別詭異，建議觀望。\n逆位：迷霧散去，終於看清官方的套路，今天是當免費仔的好日子。",
             "☀️ 19. 太陽 (The Sun)": "正位：極吉！陽光普照，充滿歐洲人的氣息，想抽什麼就抽什麼！\n逆位：雖然熱情減退，依然有小收穫，適合抽個 10 抽試試手氣。",
             "🎺 20. 審判 (Judgement)": "正位：過去的累積迎來回報，之前的非氣將一次洗刷，準備迎接紫光。\n逆位：還債時刻，之前太歐的話，今天可能會遇到連續保底的懲罰。",
-            "🌍 21. 世界 (The World)": "正位：完美圓滿！心想事成，缺什麼裝備今天就能打到或抽到！\n逆位：距離目標只差最後一哩路，鍊成卡在最後一柱，請保持平常心。"
+            "🌍 21. 世界 (The World)": "正位：完美圓滿！心想事成，缺什麼裝備今天就能打到或抽到！\n逆位：距離目標只差最後一哩路，鍊成卡在最後一柱，請保持平常心。",
         }
-        
+
         drawn_card = rng.choice(list(tarot_cards.keys()))
         interpretation_full = tarot_cards[drawn_card]
-        
+
         parts = interpretation_full.split("\n逆位：")
         upright_text = parts[0].replace("正位：", "").strip()
         reversed_text = parts[1].strip() if len(parts) > 1 else "無逆位解釋"
 
         is_upright = rng.choice([True, False])
-        
+
         if is_upright:
             final_title = f"**{drawn_card} (正位)**"
             final_desc = upright_text
@@ -112,62 +118,69 @@ class Entertainment(commands.Cog):
         embed = discord.Embed(
             title="🔮 塔羅神諭 - 今日遊戲運勢",
             description=f"{ctx.author.mention} 抽出的命運之牌是：",
-            color=discord.Color.dark_purple()
+            color=discord.Color.dark_purple(),
         )
         embed.add_field(name=final_title, value=final_desc, inline=False)
         embed.set_footer(text="※ 命運掌握在自己手中，塔羅僅指引方向。")
-        
+
         await ctx.send(embed=embed)
 
-    # --- 11. 指令：真實星座運勢 (含資料庫快取機制) ---
     @commands.command(name="星座", aliases=["運勢"])
     async def horoscope(self, ctx, sign: str):
         zodiac_map = {
-            "牡羊座": 0, "金牛座": 1, "雙子座": 2, "巨蟹座": 3,
-            "獅子座": 4, "處女座": 5, "天秤座": 6, "天蠍座": 7,
-            "射手座": 8, "摩羯座": 9, "水瓶座": 10, "雙魚座": 11
+            "牡羊座": 0,
+            "金牛座": 1,
+            "雙子座": 2,
+            "巨蟹座": 3,
+            "獅子座": 4,
+            "處女座": 5,
+            "天秤座": 6,
+            "天蠍座": 7,
+            "射手座": 8,
+            "摩羯座": 9,
+            "水瓶座": 10,
+            "雙魚座": 11,
         }
 
         sign_id = zodiac_map.get(sign)
         if sign_id is None:
             return await ctx.send("❌ 請輸入正確的星座名稱（例如：!星座 牡羊座）")
 
-        tz = datetime.timezone(datetime.timedelta(hours=8))
-        today_str = datetime.datetime.now(tz).strftime('%Y-%m-%d')
+        today_str = today_taipei_str()
 
-        # 🔍 核心邏輯：先找快取
-        async with self.bot.db.execute("SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?", (today_str, sign)) as cursor:
+        async with self.bot.db.execute(
+            "SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?",
+            (today_str, sign),
+        ) as cursor:
             cached_result = await cursor.fetchone()
 
-        # ✨ 補上這一行：順手清理不是今天的過期垃圾！
-        await self.bot.db.execute("DELETE FROM horoscope_cache WHERE date != ?", (today_str,))
+        await self.bot.db.execute(
+            "DELETE FROM horoscope_cache WHERE date != ?", (today_str,)
+        )
         await self.bot.db.commit()
 
         if cached_result:
-            # 🟢 【快取命中】
             fortune_text = cached_result[0]
             footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
         else:
-            # 🔴 【沒有快取】啟動爬蟲
             loading_msg = None
             try:
                 loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
                 url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
                 async with self.bot.session.get(url, timeout=10) as response:
-                    response.raise_for_status() 
+                    response.raise_for_status()
                     html_bytes = await response.read()
-                    html = html_bytes.decode('utf-8', errors='ignore')
+                    html = html_bytes.decode("utf-8", errors="ignore")
 
-                soup = BeautifulSoup(html, 'html.parser')
+                soup = BeautifulSoup(html, "html.parser")
                 today_content = (
-                    soup.find('div', class_='TODAY_CONTENT')
-                    or soup.find('div', id='TODAY_CONTENT')
-                    or soup.select_one('.TODAY_CONTENT, #dailyStar, .daily_content, .fortune')
+                    soup.find("div", class_="TODAY_CONTENT")
+                    or soup.find("div", id="TODAY_CONTENT")
+                    or soup.select_one(".TODAY_CONTENT, #dailyStar, .daily_content, .fortune")
                 )
 
                 if not today_content:
-                    # 備援：抓取含「整體運勢」的最大文字區塊
-                    for tag in soup.find_all(['div', 'section', 'article']):
+                    for tag in soup.find_all(["div", "section", "article"]):
                         txt = tag.get_text(" ", strip=True)
                         if "整體運勢" in txt and len(txt) > 40:
                             today_content = tag
@@ -190,10 +203,10 @@ class Entertainment(commands.Cog):
                     await self.bot.db.commit()
                 else:
                     fortune_text = (
-                        "⚠️ 星象儀受干擾：外部網站版面可能已改版，無法解析今日運勢。\n"
-                        "請稍後再試，或改用其他來源。"
+                        "⚠️ 目前無法取得今日運勢（外部網站版面可能已改版）。\n"
+                        "請稍後再試。"
                     )
-                    footer_text = "※ 抓取失敗（HTML 結構未命中）"
+                    footer_text = "※ 抓取失敗（已降級提示）"
                     logger.warning(f"Horoscope parse miss for {sign}; url={url}")
 
                 if loading_msg:
@@ -201,34 +214,35 @@ class Entertainment(commands.Cog):
 
             except asyncio.TimeoutError as e:
                 logger.error(f"爬蟲逾時: {e}")
+                msg = "❌ 目前無法取得今日運勢（連線逾時），請稍後再試。"
                 if loading_msg:
                     try:
-                        await loading_msg.edit(content="❌ 連線外部星象資料庫逾時，請稍後再試。")
+                        await loading_msg.edit(content=msg)
                     except discord.HTTPException:
-                        await ctx.send("❌ 連線外部星象資料庫逾時，請稍後再試。")
+                        await ctx.send(msg)
                 else:
-                    await ctx.send("❌ 連線外部星象資料庫逾時，請稍後再試。")
+                    await ctx.send(msg)
                 return
             except (aiohttp.ClientError, OSError, ValueError) as e:
                 logger.error(f"爬蟲報錯: {e}")
+                msg = "❌ 目前無法取得今日運勢（網路異常），請稍後再試。"
                 if loading_msg:
                     try:
-                        await loading_msg.edit(content="❌ 連線外部星象資料庫失敗，請確認網路狀態。")
+                        await loading_msg.edit(content=msg)
                     except discord.HTTPException:
-                        await ctx.send("❌ 連線外部星象資料庫失敗，請確認網路狀態。")
+                        await ctx.send(msg)
                 else:
-                    await ctx.send("❌ 連線外部星象資料庫失敗，請確認網路狀態。")
+                    await ctx.send(msg)
                 return
 
-        # 4. 發送最終報表
         embed = discord.Embed(
             title=f"🌌 今日真實運勢 - {sign}",
-            description=fortune_text[:4000], 
-            color=discord.Color.dark_blue()
+            description=fortune_text[:4000],
+            color=discord.Color.dark_blue(),
         )
         embed.set_footer(text=footer_text)
         await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
 
-# setup 必須放在最外層 (貼齊最左邊，沒有縮排)
+
 async def setup(bot):
     await bot.add_cog(Entertainment(bot))

@@ -1,7 +1,7 @@
 """頻道白名單與環境變數解析。"""
 from __future__ import annotations
 
-from cogs.error_handler import (
+from services.error_handler import (
     get_allowed_command_channels,
     is_allowed_command_channel,
     parse_env_channel_ids,

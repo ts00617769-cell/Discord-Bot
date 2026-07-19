@@ -4,7 +4,7 @@ import asyncio
 import aiohttp
 import logging
 
-from .beanfun_http import get_beanfun_client
+from services.beanfun_http import get_beanfun_client
 
 logger = logging.getLogger(__name__)
 
@@ -124,15 +124,6 @@ class TimeCrevice(commands.Cog):
         )
         embed.set_footer(text="資料來源: 波拉西亞戰記官網")
 
-        class_map = {
-            "mirageblade": "幻影劍士",
-            "enforcer": "執行官",
-            "runescribe": "咒文刻印使",
-            "incensearcher": "香射手",
-            "abyssrevenant": "黯墓人",
-            "solarsentinel": "太陽監視者",
-        }
-
         raid_info.sort(key=lambda x: x.get("date_clear", ""), reverse=True)
 
         for raid in raid_info[:4]:
@@ -152,9 +143,6 @@ class TimeCrevice(commands.Cog):
             for mvp in mvp_list:
                 m_type = mvp.get("mvp_type", "")
                 name = mvp.get("gc_name", "")
-                cls = class_map.get(
-                    mvp.get("gc_class", "").lower(), mvp.get("gc_class", "")
-                )
 
                 if m_type.startswith("damage_ranking"):
                     val = mvp.get("damage", "0")

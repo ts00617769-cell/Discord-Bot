@@ -2,11 +2,11 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
-import unicodedata
 from game_data import SERVER_MAP
 import logging
 
-from .beanfun_http import get_beanfun_client
+from services.beanfun_http import get_beanfun_client
+from services.text_display import pad_text
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +18,6 @@ TERRITORY_API_URL = (
 class CastleTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    def get_display_width(self, text):
-        return sum(
-            2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in str(text)
-        )
-
-    def pad_text(self, text, target_width):
-        text_str = str(text)
-        current_width = self.get_display_width(text_str)
-        return text_str + " " * max(0, target_width - current_width)
 
     async def fetch_territory_data(self, server_name, group_id, world_id):
         payload = {
@@ -116,8 +106,8 @@ class CastleTracker(commands.Cog):
 
                 full_name = f"{server_prefix}{t_name} ({t_grade})"
 
-                name_padded = self.pad_text(full_name, 32)
-                guild_padded = self.pad_text(f"佔領: {guild}", 20)
+                name_padded = pad_text(full_name, 32)
+                guild_padded = pad_text(f"佔領: {guild}", 20)
 
                 line = (
                     f"{idx:02d}. {name_padded} | {guild_padded} | "

@@ -1,7 +1,7 @@
 """轉服偵測：SQL 片段與純邏輯過濾／排序。"""
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 # 同名 margin 1000 億；異名（僅同職）100 億
 NAME_MARGIN = 1000 * 100_000_000

@@ -3,7 +3,6 @@ import datetime
 import logging
 import sqlite3
 import traceback
-import unicodedata
 
 import discord
 from discord.ext import commands, tasks
@@ -15,7 +14,10 @@ from services.exp_speed import (
     collect_speed_ranking,
     pick_interval_baseline,
 )
+from services.exp_snapshots import EXP_HISTORY_INSERT_SQL, players_to_insert_batch
 from services.member_registry import get_member_tag
+from services.text_display import pad_text
+from services.timeutil import now_naive_taipei, today_taipei_str
 from services.transfer_detect import (
     CLASS_MARGIN,
     NAME_MARGIN,
@@ -24,13 +26,14 @@ from services.transfer_detect import (
     format_exp_diff,
     rank_transfer_candidates,
 )
-from .error_handler import (
+from services.error_handler import (
+    handle_db_error,
     min_complete_snapshot_servers,
     parse_env_channel_ids,
     parse_env_float,
     require_allowed_channel,
 )
-from .ranking_api import get_ranking_client
+from services.ranking_api import get_ranking_client
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +155,7 @@ class ExpTracker(commands.Cog):
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
         try:
-            now_time = datetime.datetime.now().replace(second=0, microsecond=0)
+            now_time = now_naive_taipei().replace(second=0, microsecond=0)
             logger.info(f"[{now_time.strftime('%H:%M:%S')}] 哨兵出動：掃描全服前100名...")
             client = get_ranking_client(self.bot)
 
@@ -169,32 +172,14 @@ class ExpTracker(commands.Cog):
                         )
                         continue
 
-                    insert_batch = []
-                    for p in result.players:
-                        name = p.get("gc_name")
-                        if not name:
-                            continue
-                        grade_val = (p.get("string_map") or {}).get("grade", "0")
-                        try:
-                            grade = int(grade_val)
-                        except (ValueError, TypeError):
-                            grade = 0
-                        insert_batch.append((
-                            now_time,
-                            server_name,
-                            name,
-                            p.get("gc_level"),
-                            p.get("gc_exp", 0),
-                            p.get("class_name", "未知"),
-                            grade,
-                        ))
+                    insert_batch = players_to_insert_batch(
+                        now_time, server_name, result.players
+                    )
 
                     if insert_batch:
-                        await self.bot.db.executemany('''
-                            INSERT OR IGNORE INTO exp_history
-                            (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ''', insert_batch)
+                        await self.bot.db.executemany(
+                            EXP_HISTORY_INSERT_SQL, insert_batch
+                        )
                         await self.bot.db.commit()
                     servers_ok.append(server_name)
                 except sqlite3.DatabaseError as e:
@@ -292,10 +277,7 @@ class ExpTracker(commands.Cog):
                             desc += f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** 的前 {len(alert_list)} 名玩家：\n"
                         desc += "```yaml\n"
                         for p in chunk:
-                            name_width = sum(
-                                2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in p["name"]
-                            )
-                            name_padded = p["name"] + " " * max(0, 14 - name_width)
+                            name_padded = pad_text(p["name"], 14)
                             desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
                         desc += "```"
                         embed.description = desc
@@ -457,7 +439,7 @@ class ExpTracker(commands.Cog):
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):
         await self.bot.wait_until_ready()
-        now = datetime.datetime.now()
+        now = now_naive_taipei()
         next_run = now.replace(
             minute=(now.minute // 10) * 10, second=30, microsecond=0
         ) + datetime.timedelta(minutes=10)
@@ -590,10 +572,7 @@ class ExpTracker(commands.Cog):
             desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]} (約 {int(minutes_diff)} 分鐘)**\n```yaml\n"
             embeds = []
             for idx, p in enumerate(top_list, 1):
-                name_width = sum(
-                    2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in str(p["name"])
-                )
-                name_padded = str(p["name"]) + " " * max(0, 14 - name_width)
+                name_padded = pad_text(str(p["name"]), 14)
                 srv_info = f"({p['server']})" if is_global else ""
                 line = (
                     f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | "
@@ -654,8 +633,7 @@ class ExpTracker(commands.Cog):
         if not await require_allowed_channel(ctx):
             return
         count = 100
-        tz = datetime.timezone(datetime.timedelta(hours=8))
-        date_str = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+        date_str = today_taipei_str()
         target_server = "全服"
         target_class = None
         
@@ -724,10 +702,7 @@ class ExpTracker(commands.Cog):
                 name, server, level, exp, class_name = r
                 tag = await self.get_member_info(name)
                 display_name = f"{name}{tag}"
-                name_width = sum(
-                    2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in display_name
-                )
-                name_padded = display_name + " " * max(0, 16 - name_width)
+                name_padded = pad_text(display_name, 16)
                 srv_info = f"({server})" if is_global else ""
                 exp_zhao = exp / 1000000000000
                 line = (
@@ -763,7 +738,7 @@ class ExpTracker(commands.Cog):
 
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error historical ranking: {e}")
-            await processing_msg.edit(content="❌ 資料庫查詢失敗")
+            await handle_db_error(ctx, "歷史排名查詢失敗", e)
         except asyncio.TimeoutError:
             await processing_msg.edit(content="❌ 資料庫查詢逾時，請重試")
         except (ValueError, TypeError) as e:

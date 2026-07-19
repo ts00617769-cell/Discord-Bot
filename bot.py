@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import aiohttp
 import logging
 
-from cogs.ranking_api import get_ranking_client
+from services.ranking_api import get_ranking_client
 from db import apply_migrations, connect_db
 from db.connection import resolve_db_path
 
@@ -151,11 +151,7 @@ class PrasiaBot(commands.Bot):
             cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
             cog_files = sorted(
                 f for f in os.listdir(cogs_dir)
-                if (
-                    f.endswith(".py")
-                    and not f.startswith("__")
-                    and f not in ("error_handler.py", "ranking_api.py", "beanfun_http.py")
-                )
+                if f.endswith(".py") and not f.startswith("__")
             )
             for filename in cog_files:
                 ext_name = f"cogs.{filename[:-3]}"
@@ -166,6 +162,10 @@ class PrasiaBot(commands.Bot):
                     logger.info(f"⏳ 正在掛載模組 {filename}...")
                     await self.load_extension(ext_name)
                     logger.info(f"✅ 模組 {filename} 已成功掛載！")
+                except commands.ExtensionFailed as e:
+                    logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
+                except (commands.NoEntryPointError, commands.ExtensionError) as e:
+                    logger.warning(f"⏭️ 略過模組 {filename}: {e}")
                 except Exception as e:
                     logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
             logger.info(f"✅ setup_hook 完成，已掛載 {len(self.extensions)} 個模組")

@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cogs.beanfun_http import BeanfunClient, FetchResult, _is_retryable_error
-from cogs.ranking_api import RankingClient
+from services.beanfun_http import BeanfunClient, FetchResult, _is_retryable_error
+from services.ranking_api import RankingClient
 
 
 def test_retryable_errors():

@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from .error_handler import require_allowed_channel
+from services.error_handler import require_allowed_channel
 
 
 class HelpCog(commands.Cog):
