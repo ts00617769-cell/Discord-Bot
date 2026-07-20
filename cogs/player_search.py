@@ -6,296 +6,67 @@ import traceback
 from collections import deque
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from services import player_matching as match
-from services.error_handler import require_allowed_channel, parse_env_channel_ids
-from services.text_display import escape_like
+from services.error_handler import allowed_channel, parse_env_channel_ids
+from services.game_event_windows import (
+    allow_class_mismatch_high,
+    class_change_label,
+    realm_transfer_label,
+)
+from services.player_search_db import PlayerSearchStore
 from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
-
-_PROFILE_SELECT = match.PROFILE_SELECT
-_PROFILE_CTE = match.PROFILE_CTE
 
 
 class PlayerSearch(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.store = PlayerSearchStore(bot.db)
 
     @property
     def TRANSFER_ALERT_CHANNEL_IDS(self):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     async def _fetch_name_profiles(self, player_name, server_name=None):
-        """依玩家名取履歷；可選 server_name 則回傳單筆（或 None）。"""
-        if server_name is None:
-            sql = f"""
-                SELECT {_PROFILE_SELECT}
-                FROM exp_history e
-                WHERE e.player_name = ?
-                GROUP BY e.player_name, e.server_name
-            """
-            async with self.bot.db.execute(sql, (player_name,)) as cursor:
-                return await cursor.fetchall()
-        sql = f"""
-            SELECT {_PROFILE_SELECT}
-            FROM exp_history e
-            WHERE e.player_name = ? AND e.server_name = ?
-            GROUP BY e.player_name, e.server_name
-        """
-        async with self.bot.db.execute(sql, (player_name, server_name)) as cursor:
-            return await cursor.fetchone()
+        return await self.store._fetch_name_profiles(player_name, server_name)
 
     async def _fetch_single_profile(self, player_name, server_name):
-        return await self._fetch_name_profiles(player_name, server_name)
+        return await self.store._fetch_single_profile(player_name, server_name)
 
     async def _fetch_profiles_by_names(self, names):
-        name_list = list(names)
-        if not name_list:
-            return []
-        placeholders = ",".join("?" for _ in name_list)
-        sql = f'''
-            SELECT {_PROFILE_SELECT}
-            FROM exp_history e
-            WHERE e.player_name IN ({placeholders})
-            GROUP BY e.player_name, e.server_name
-        '''
-        async with self.bot.db.execute(sql, tuple(name_list)) as cursor:
-            return await cursor.fetchall()
-
-    @staticmethod
-    def _escape_like(value: str) -> str:
-        """跳脫 LIKE 萬用字元 % / _ 與跳脫符本身。"""
-        return escape_like(value)
+        return await self.store._fetch_profiles_by_names(names)
 
     async def _get_related_names(self, target_name):
-        """定向查詢別名群組，避免全表掃描 member_registry。"""
-        names = {target_name}
-        like = f"%{self._escape_like(target_name)}%"
-        async with self.bot.db.execute(
-            '''
-            SELECT player_name, original_identity FROM member_registry
-            WHERE player_name = ?
-               OR original_identity = ?
-               OR original_identity LIKE ? ESCAPE '\\'
-            ''',
-            (target_name, target_name, like),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        for player_name, identity in rows:
-            aliases = [x.strip() for x in (identity or "").split(",") if x.strip()]
-            group = {player_name, *aliases}
-            if target_name in group:
-                names.update(group)
-        return names
+        return await self.store._get_related_names(target_name)
 
     async def _recent_exp_anchors(self, player_name, server_name, limit=8):
-        async with self.bot.db.execute(
-            '''
-            SELECT exp FROM exp_history
-            WHERE player_name = ? AND server_name = ?
-            GROUP BY exp
-            ORDER BY MAX(record_time) DESC
-            LIMIT ?
-            ''',
-            (player_name, server_name, limit),
-        ) as cursor:
-            return [row[0] for row in await cursor.fetchall()]
+        return await self.store._recent_exp_anchors(player_name, server_name, limit=limit)
+
+    async def _early_exp_anchors(self, player_name, server_name, first_seen, days=7, limit=8):
+        return await self.store._early_exp_anchors(
+            player_name, server_name, first_seen, days=days, limit=limit
+        )
 
     async def _early_window_min_exp(self, player_name, server_name, first_seen, days=7):
-        """觀測前 N 天內的最小 EXP（避免終生 MIN 撞早期路人）。"""
-        async with self.bot.db.execute(
-            '''
-            SELECT MIN(exp) FROM exp_history
-            WHERE player_name = ? AND server_name = ?
-              AND record_time <= datetime(?, ?)
-            ''',
-            (player_name, server_name, first_seen, f'+{int(days)} days'),
-        ) as cursor:
-            row = await cursor.fetchone()
-        return row[0] if row and row[0] is not None else None
+        return await self.store._early_window_min_exp(
+            player_name, server_name, first_seen, days=days
+        )
 
     async def _find_seamless_candidates(self, profile, exp_margin, window_days=30, limit=8):
-        """無縫接軌候選。
-
-        重要：不可用 WHERE exp BETWEEN … GROUP BY 直接算 MIN/MAX(exp)/時間。
-        那樣會變成「經驗窗內切片」，把持續練等的路人誤判成轉服/前身。
-        正確做法：先用經驗窗粗篩 (name, server)，再對完整履歷聚合後過濾。
-        """
-        t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub = profile
-        unknown_cls = match.is_unknown_class(t_cls)
-        candidates = []
-
-        early_min = await self._early_window_min_exp(t_name, t_server, t_first, days=7)
-        if early_min is not None:
-            t_min_exp = early_min
-
-        cls_filter = "" if unknown_cls else "AND cls = ?"
-        cls_params = [] if unknown_cls else [t_cls]
-
-        # 完整履歷聚合：hit 只負責粗篩，prof 才是真實 first/last/min/max
-        sql_fwd = f'''
-            {_PROFILE_CTE}
-            WHERE min_exp >= ? AND min_exp <= ?
-              AND first_seen >= datetime(?, '-1 days')
-              AND first_seen <= datetime(?, '+{int(window_days)} days')
-              AND lvl >= ?
-              AND (sub_grade >= ? OR sub_grade IS NULL OR ? IS NULL)
-              {cls_filter}
-            ORDER BY (min_exp - ?) ASC
-            LIMIT 40
-        '''
-        params_fwd = (
-            t_name, t_server, t_max_exp, t_max_exp + exp_margin,
-            t_max_exp, t_max_exp + exp_margin,
-            t_last, t_last, t_lvl, t_sub, t_sub,
-            *cls_params, t_max_exp,
+        return await self.store._find_seamless_candidates(
+            profile, exp_margin, window_days=window_days, limit=limit
         )
-
-        # 前身：允許 max_exp 略高於 t_min（榜單取樣誤差），用絕對差 <= margin
-        back_lo = max(0, t_min_exp - exp_margin)
-        back_hi = t_min_exp + exp_margin
-        sql_back = f'''
-            {_PROFILE_CTE}
-            WHERE ABS(max_exp - ?) <= ?
-              AND last_seen >= datetime(?, '-{int(window_days)} days')
-              AND last_seen <= datetime(?, '+1 days')
-              AND lvl <= ?
-              AND (sub_grade <= ? OR sub_grade IS NULL OR ? IS NULL)
-              {cls_filter}
-            ORDER BY ABS(max_exp - ?) ASC
-            LIMIT 40
-        '''
-        params_back = (
-            t_name, t_server, back_lo, back_hi,
-            t_min_exp, exp_margin,
-            t_first, t_first, t_lvl, t_sub, t_sub,
-            *cls_params, t_min_exp,
-        )
-
-        async def _fetch(sql, params):
-            async with self.bot.db.execute(sql, params) as cursor:
-                return await cursor.fetchall()
-
-        fwd_rows, back_rows = await asyncio.gather(
-            _fetch(sql_fwd, params_fwd),
-            _fetch(sql_back, params_back),
-        )
-
-        for row in fwd_rows:
-            c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
-            exp_diff = c_min - t_max_exp
-            if exp_diff < 0:
-                continue
-            same_server = c_server == t_server
-            gap_hours = match.gap_hours(t_last, c_first)
-            label = "✏️ 疑似同服改名" if same_server else "✈️ 疑似轉服/改名後"
-            candidates.append({
-                "direction": "forward",
-                "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
-                "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
-                "match_type": label,
-                "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
-                "exp_diff": exp_diff,
-                "score": match.score(
-                    t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
-                    same_server, forward=True,
-                ),
-                "confidence": match.confidence(
-                    t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
-                ),
-            })
-
-        for row in back_rows:
-            c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
-            raw_diff = t_min_exp - c_max
-            exp_diff = abs(raw_diff)
-            same_server = c_server == t_server
-            gap_hours = match.gap_hours(t_first, c_last)
-            if raw_diff >= 0:
-                diff_text = f"空窗偷練 +{raw_diff/100000000:,.0f} 億"
-            else:
-                diff_text = f"特徵接近 (回差 {exp_diff/100000000:,.0f} 億)"
-            label = "✏️ 疑似同服改名前身" if same_server else "🔍 疑似前身"
-            candidates.append({
-                "direction": "backward",
-                "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
-                "first": c_first, "last": c_last, "exp_val": c_max, "sub_grade": c_sub,
-                "match_type": label,
-                "diff_text": diff_text,
-                "exp_diff": exp_diff,
-                "score": match.score(
-                    t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
-                    same_server, forward=False,
-                ),
-                "confidence": match.confidence(
-                    t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
-                ),
-            })
-
-        # near 救援：僅在 forward 無任何 high 時才跑，避免每 hop 多一次重 CTE
-        has_fwd_high = any(
-            c["direction"] == "forward" and c["confidence"] == "high" for c in candidates
-        )
-        if not has_fwd_high:
-            near_margin = 1e8
-            sql_near = f'''
-                {_PROFILE_CTE}
-                WHERE min_exp >= ? AND min_exp <= ?
-                  AND first_seen >= datetime(?, '-1 days')
-                  AND first_seen <= datetime(?, '+7 days')
-                  AND (sub_grade >= ? OR sub_grade IS NULL OR ? IS NULL)
-                  {cls_filter}
-                ORDER BY (min_exp - ?) ASC
-                LIMIT 15
-            '''
-            near_rows = await _fetch(
-                sql_near,
-                (
-                    t_name, t_server, t_max_exp, t_max_exp + near_margin,
-                    t_max_exp, t_max_exp + near_margin,
-                    t_last, t_last, t_sub, t_sub,
-                    *cls_params, t_max_exp,
-                ),
-            )
-            existing = {(c["name"], c["server"]) for c in candidates}
-            for row in near_rows:
-                c_name, c_server, c_lvl, c_cls, c_first, c_last, c_min, c_max, c_sub = row
-                if (c_name, c_server) in existing:
-                    continue
-                exp_diff = c_min - t_max_exp
-                if exp_diff < 0:
-                    continue
-                gap_hours = match.gap_hours(t_last, c_first)
-                same_server = c_server == t_server
-                if match.confidence(
-                    t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
-                ) != "high":
-                    continue
-                candidates.append({
-                    "direction": "forward",
-                    "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
-                    "first": c_first, "last": c_last, "exp_val": c_min, "sub_grade": c_sub,
-                    "match_type": "✈️ 疑似轉服/改名後",
-                    "diff_text": f"空窗偷練 +{exp_diff/100000000:,.0f} 億",
-                    "exp_diff": exp_diff,
-                    "score": exp_diff + gap_hours * 1e8 - 1e12,
-                    "confidence": "high",
-                })
-
-        candidates.sort(key=lambda x: x["score"])
-        forward = [c for c in candidates if c["direction"] == "forward"][:limit]
-        backward = [c for c in candidates if c["direction"] == "backward"][:limit]
-        return forward + backward
 
     @commands.command(
         name="尋人回報",
         help="手動標記玩家前身身分。用法: !尋人回報 驕傲o 某某某 艾雲o 或 !尋人回報 驕傲o 清除",
     )
+    @allowed_channel()
     async def report_identity(self, ctx, *args):
-        if not await require_allowed_channel(ctx):
-            return
         args_list = [arg for arg in args if arg.strip()]
         if len(args_list) < 2:
             return await ctx.send(
@@ -356,15 +127,18 @@ class PlayerSearch(commands.Cog):
             logger.error(f"Error updating member info for '{current_name}': {e}")
             await ctx.send("❌ 標記失敗（資料庫錯誤）")
 
-    @commands.command(name="尋人", help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o")
+    @commands.hybrid_command(
+        name="尋人",
+        help="利用經驗值特徵，精準追蹤改名或轉服的玩家。用法: !尋人 驕傲o",
+    )
+    @app_commands.describe(target_name="玩家名稱")
     @commands.cooldown(1, 15, commands.BucketType.user)
     @commands.max_concurrency(2, commands.BucketType.user, wait=False)
-    async def track_player(self, ctx, *, target_name: str):
+    @allowed_channel()
+    async def track_player(self, ctx: commands.Context, *, target_name: str):
         target_name = (target_name or "").strip()
         if not target_name:
             await ctx.send("❌ 請輸入玩家名稱。用法：`!尋人 小碎冰`")
-            return
-        if not await require_allowed_channel(ctx):
             return
 
         logger.info(
@@ -373,17 +147,24 @@ class PlayerSearch(commands.Cog):
         )
 
         # 立刻給可見回饋（表情 + 回覆），避免長查詢看起來像沒反應
-        try:
-            await ctx.message.add_reaction("🔍")
-        except discord.HTTPException:
-            pass
+        if ctx.message is not None:
+            try:
+                await ctx.message.add_reaction("🔍")
+            except discord.HTTPException:
+                pass
 
         try:
-            processing_msg = await ctx.reply(
-                f"🔍 **天眼啟動**，正在掃描「**{target_name}**」…\n"
-                f"⏳ 比對經驗特徵中，請稍候（通常數秒～數十秒）。",
-                mention_author=False,
-            )
+            if ctx.interaction is not None:
+                processing_msg = await ctx.send(
+                    f"🔍 **天眼啟動**，正在掃描「**{target_name}**」…\n"
+                    f"⏳ 比對經驗特徵中，請稍候（通常數秒～數十秒）。"
+                )
+            else:
+                processing_msg = await ctx.reply(
+                    f"🔍 **天眼啟動**，正在掃描「**{target_name}**」…\n"
+                    f"⏳ 比對經驗特徵中，請稍候（通常數秒～數十秒）。",
+                    mention_author=False,
+                )
         except discord.HTTPException as e:
             logger.error(f"!尋人 無法在頻道 {ctx.channel.id} 發送訊息: {e}")
             return
@@ -457,6 +238,12 @@ class PlayerSearch(commands.Cog):
                             pass
 
                     anchors = await self._recent_exp_anchors(t_name, t_server, limit=8)
+                    early = await self._early_exp_anchors(
+                        t_name, t_server, t_first, days=7, limit=8
+                    )
+                    for exp in early:
+                        if exp not in anchors:
+                            anchors.append(exp)
                     if t_min_exp not in anchors:
                         anchors.append(t_min_exp)
                     if t_max_exp not in anchors:
@@ -493,6 +280,41 @@ class PlayerSearch(commands.Cog):
                                 t_first, t_last, first_seen, last_seen,
                             )
                             class_ok = match.class_compatible(t_cls, cls_name)
+                            # 銜接端點：較早觀測的 last ↔ 較晚觀測的 first
+                            if first_seen >= t_last:
+                                bridge_a, bridge_b = t_last, first_seen
+                            else:
+                                bridge_a, bridge_b = last_seen, t_first
+
+                            # EXP 完全一致 + 觀測銜接緊密 + 職業不符 → 疑似轉職（可進主軌）
+                            if (
+                                not class_ok
+                                and allow_class_mismatch_high(
+                                    bridge_a,
+                                    bridge_b,
+                                    obs_gap_hours=obs_gap,
+                                    exact_exp=True,
+                                )
+                            ):
+                                notes = [
+                                    x
+                                    for x in (
+                                        class_change_label(bridge_a, bridge_b),
+                                        realm_transfer_label(bridge_a, bridge_b),
+                                    )
+                                    if x
+                                ]
+                                note = f"（{'・'.join(notes)}）" if notes else ""
+                                await add_to_queue(
+                                    p_name,
+                                    s_name,
+                                    f"🔄 絕對經驗值碰撞（疑似轉職）{note}",
+                                    "EXP 完全一致・職業已變更",
+                                    exp,
+                                    confidence="high",
+                                )
+                                continue
+
                             if obs_gap > 30 * 24 or not class_ok:
                                 soft_candidates.append({
                                     "direction": "forward" if first_seen >= t_last else "backward",
@@ -599,9 +421,9 @@ class PlayerSearch(commands.Cog):
                     target_name,
                     unique_entries,
                     header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
-                    title=f"👁️ 天眼追蹤系統 (V5.2) - {target_name}",
+                    title=f"👁️ 天眼追蹤系統 (V5.3) - {target_name}",
                     color=0xff0000,
-                    footer="V5.2：主軌需職業相容・絕對碰撞需銜接・medium 不混入",
+                    footer="V5.3：轉職可進主軌・早期 EXP 錨點雙向・公告視窗放寬",
                 )
                 await self._deliver_embeds(ctx, processing_msg, embeds)
 
@@ -721,9 +543,8 @@ class PlayerSearch(commands.Cog):
     )
     @commands.cooldown(1, 30, commands.BucketType.guild)
     @commands.max_concurrency(1, commands.BucketType.default, wait=False)
+    @allowed_channel()
     async def global_transfer_scan(self, ctx):
-        if not await require_allowed_channel(ctx):
-            return
         processing_msg = await ctx.send("📡 正在進行全資料庫特徵碰撞比對，這可能需要幾秒鐘...")
 
         try:
@@ -862,9 +683,8 @@ class PlayerSearch(commands.Cog):
                 pass
 
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
+    @allowed_channel()
     async def test_transfer_alert(self, ctx):
-        if not await require_allowed_channel(ctx):
-            return
         channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
         if not channel_ids:
             return await ctx.send(

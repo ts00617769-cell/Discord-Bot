@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Optional
 
-
 # 履歷聚合 SELECT（fetch profile 用）
 PROFILE_SELECT = """
     e.player_name, e.server_name,
@@ -64,6 +63,8 @@ def class_compatible(t_cls: Optional[str], c_cls: Optional[str]) -> bool:
 
 
 def gap_hours(anchor_str: Optional[str], point_str: Optional[str]) -> float:
+    if not anchor_str or not point_str:
+        return 9999.0
     try:
         fmt = "%Y-%m-%d %H:%M:%S"
         return abs(
@@ -72,7 +73,7 @@ def gap_hours(anchor_str: Optional[str], point_str: Optional[str]) -> float:
                 - datetime.datetime.strptime(anchor_str, fmt)
             ).total_seconds()
         ) / 3600
-    except (TypeError, ValueError):
+    except ValueError:
         return 9999.0
 
 
@@ -83,13 +84,15 @@ def observation_gap_hours(
     b_last: Optional[str],
 ) -> float:
     """兩段觀測區間若不重疊，回傳最近端點的小時差；重疊則 0。"""
+    if not a_first or not a_last or not b_first or not b_last:
+        return 9999.0
     try:
         fmt = "%Y-%m-%d %H:%M:%S"
         af = datetime.datetime.strptime(a_first, fmt)
         al = datetime.datetime.strptime(a_last, fmt)
         bf = datetime.datetime.strptime(b_first, fmt)
         bl = datetime.datetime.strptime(b_last, fmt)
-    except (TypeError, ValueError):
+    except ValueError:
         return 9999.0
     if al < bf:
         return (bf - al).total_seconds() / 3600
@@ -121,15 +124,15 @@ def pick_soft_candidates(
 
         picked: list[dict[str, Any]] = []
         for cand in dir_cands:
-            key = (cand["name"], cand["server"])
-            if key in soft_seen:
+            name_server = (cand["name"], cand["server"])
+            if name_server in soft_seen:
                 continue
             if picked:
                 best_diff = picked[0].get("exp_diff", 0)
                 cand_diff = cand.get("exp_diff", best_diff)
                 if cand_diff > best_diff + max_diff_over_best:
                     continue
-            soft_seen.add(key)
+            soft_seen.add(name_server)
             picked.append(cand)
             if len(picked) >= per_direction:
                 break
@@ -146,9 +149,22 @@ def confidence(
     c_sub,
     gap_h: float,
     same_server: bool,
+    *,
+    a_last: Optional[str] = None,
+    b_first: Optional[str] = None,
 ) -> str:
     class_ok = class_compatible(t_cls, c_cls)
     sub_ok = c_sub is None or t_sub is None or c_sub == t_sub
+
+    # 經驗極近 + 職業不符：銜接緊密（或落在官方變更職業視窗）→ high
+    if not class_ok and exp_diff <= 1e8 and sub_ok:
+        from services.game_event_windows import allow_class_mismatch_high
+
+        if allow_class_mismatch_high(
+            a_last, b_first, obs_gap_hours=gap_h, exact_exp=True
+        ):
+            return "high"
+
     if class_ok and exp_diff <= 1e8 and gap_h <= 72 and sub_ok:
         return "high"
     if same_server:
