@@ -120,6 +120,43 @@ def test_realm_transfer_26th_matches_screenshot_bridge():
     )
 
 
+def test_realm_transfer_delayed_login_two_days():
+    """窗內消失（例如週五夜），兩天後才登入新服上榜。"""
+    from services.game_event_windows import (
+        allow_delayed_transfer_high,
+        match_realm_transfer,
+    )
+
+    # 第26次：06/03 12:00 ~ 06/07 23:59；06/07 23:50 消失 → 06/09 21:00 才出現
+    assert (
+        match_realm_transfer("2026-06-07 23:50:00", "2026-06-09 21:00:00")
+        == "第26次領域轉移"
+    )
+    assert allow_delayed_transfer_high(
+        "2026-06-07 23:50:00",
+        "2026-06-09 21:00:00",
+        obs_gap_hours=45.0,
+        exact_exp=True,
+    )
+
+
+def test_confidence_delayed_transfer_same_class_is_high():
+    assert (
+        confidence(
+            "香射手",
+            10,
+            "香射手",
+            0,
+            10,
+            48.0,
+            False,
+            a_last="2026-06-07 23:50:00",
+            b_first="2026-06-09 21:00:00",
+        )
+        == "high"
+    )
+
+
 def test_score_prefers_same_class():
     same = score("A", 5, 60, 1e8, 1.0, "A", 5, 60, False, forward=True)
     other = score("A", 5, 60, 1e8, 1.0, "B", 5, 60, False, forward=True)

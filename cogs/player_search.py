@@ -13,6 +13,7 @@ from services import player_matching as match
 from services.error_handler import allowed_channel, parse_env_channel_ids
 from services.game_event_windows import (
     allow_class_mismatch_high,
+    allow_delayed_transfer_high,
     class_change_label,
     realm_transfer_label,
 )
@@ -315,6 +316,24 @@ class PlayerSearch(commands.Cog):
                                 )
                                 continue
 
+                            # 同職／異職：領域轉移後延遲登入（消失數日才上新服榜）
+                            delayed = allow_delayed_transfer_high(
+                                bridge_a,
+                                bridge_b,
+                                obs_gap_hours=obs_gap,
+                                exact_exp=True,
+                            )
+                            if delayed and class_ok:
+                                await add_to_queue(
+                                    p_name,
+                                    s_name,
+                                    f"✈️ 絕對經驗值碰撞（{delayed}・延遲登入）",
+                                    f"EXP 完全一致（觀測間隔 {obs_gap/24:.1f} 天）",
+                                    exp,
+                                    confidence="high",
+                                )
+                                continue
+
                             if obs_gap > 30 * 24 or not class_ok:
                                 soft_candidates.append({
                                     "direction": "forward" if first_seen >= t_last else "backward",
@@ -336,6 +355,7 @@ class PlayerSearch(commands.Cog):
                                 })
                                 continue
                             # 觀測窗需銜接（重疊或間隔 ≤ 72h）才進 high 主軌
+                            # （延遲登入已在上方用領域轉移窗放行）
                             if obs_gap > 72:
                                 soft_candidates.append({
                                     "direction": "forward" if first_seen >= t_last else "backward",
@@ -421,9 +441,9 @@ class PlayerSearch(commands.Cog):
                     target_name,
                     unique_entries,
                     header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
-                    title=f"👁️ 天眼追蹤系統 (V5.3) - {target_name}",
+                    title=f"👁️ 天眼追蹤系統 (V5.4) - {target_name}",
                     color=0xff0000,
-                    footer="V5.3：轉職可進主軌・早期 EXP 錨點雙向・公告視窗放寬",
+                    footer="V5.4：轉職／轉移延遲登入・早期 EXP 錨點・公告視窗",
                 )
                 await self._deliver_embeds(ctx, processing_msg, embeds)
 

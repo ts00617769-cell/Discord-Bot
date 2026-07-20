@@ -156,7 +156,7 @@ def confidence(
     class_ok = class_compatible(t_cls, c_cls)
     sub_ok = c_sub is None or t_sub is None or c_sub == t_sub
 
-    # 經驗極近 + 職業不符：銜接緊密（或落在官方變更職業視窗）→ high
+    # 經驗極近 + 職業不符：銜接緊密／轉職窗／轉移延遲登入 → high
     if not class_ok and exp_diff <= 1e8 and sub_ok:
         from services.game_event_windows import allow_class_mismatch_high
 
@@ -165,8 +165,17 @@ def confidence(
         ):
             return "high"
 
-    if class_ok and exp_diff <= 1e8 and gap_h <= 72 and sub_ok:
-        return "high"
+    # 同職極近：一般 ≤72h；或領域轉移後延遲登入
+    if class_ok and exp_diff <= 1e8 and sub_ok:
+        if gap_h <= 72:
+            return "high"
+        from services.game_event_windows import allow_delayed_transfer_high
+
+        if allow_delayed_transfer_high(
+            a_last, b_first, obs_gap_hours=gap_h, exact_exp=True
+        ):
+            return "high"
+
     if same_server:
         if (
             class_ok

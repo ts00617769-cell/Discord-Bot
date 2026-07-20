@@ -3,6 +3,9 @@
 來源：https://warsofprasia.beanfun.com/News
 細節 API：POST /api/EventAD/GetEventAD?eventAdId=…
 銜接點落在視窗內時，尋人可放寬「職業不符」並標註疑似轉職／轉服。
+
+領域轉移特別注意：玩家可能在窗內（例如 23:50）完成轉移後數日才登入，
+榜上會「消失 → 隔 N 天才在新服出現」，觀測間隔遠大於實際轉移時刻。
 """
 from __future__ import annotations
 
@@ -34,6 +37,11 @@ CLASS_CHANGE_WINDOWS: list[tuple[str, str, str]] = [
     ("2026-02-04 05:00:00", "2026-02-18 04:59:59", "EP.6 自由職業變更"),
     ("2026-06-10 05:00:00", "2026-06-24 05:00:00", "2週年自由職業變更"),
 ]
+
+# 轉移後延遲登入寬限：窗結束後仍可能隔 N 天才首次出現在新服榜
+TRANSFER_LOGIN_GRACE_DAYS = 5
+# 舊服最後上榜可略早於窗開始（申請前仍短暫留在榜上）
+TRANSFER_DISAPPEAR_PRE_HOURS = 24
 
 _FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -81,12 +89,61 @@ def _gap_crosses_window(
     return _in_windows(a_last, windows) or _in_windows(b_first, windows)
 
 
+def match_realm_transfer(
+    a_last: Optional[str],
+    b_first: Optional[str],
+    *,
+    grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+) -> Optional[str]:
+    """判定是否符合「轉移窗內消失、之後才登入新服」的銜接。
+
+    - 舊服最後觀測：窗開始前 PRE_HOURS ～ 窗結束
+    - 新服首次觀測：不早於舊服最後觀測，且不晚於窗結束 + grace_days
+      （含窗內立刻上榜，或隔 2～5 天才登入）
+    """
+    a = _parse(a_last)
+    b = _parse(b_first)
+    if a is None or b is None:
+        return None
+    earlier, later = (a, b) if a <= b else (b, a)
+    pre = datetime.timedelta(hours=TRANSFER_DISAPPEAR_PRE_HOURS)
+    grace = datetime.timedelta(days=int(grace_days))
+    for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        disappear_ok = (start - pre) <= earlier <= end
+        appear_ok = earlier <= later <= (end + grace)
+        if disappear_ok and appear_ok:
+            return label
+    return None
+
+
 def realm_transfer_label(a_last: Optional[str], b_first: Optional[str]) -> Optional[str]:
-    return _gap_crosses_window(a_last, b_first, REALM_TRANSFER_WINDOWS)
+    """優先用延遲登入規則；否則退回中點是否落在窗內。"""
+    return match_realm_transfer(a_last, b_first) or _gap_crosses_window(
+        a_last, b_first, REALM_TRANSFER_WINDOWS
+    )
 
 
 def class_change_label(a_last: Optional[str], b_first: Optional[str]) -> Optional[str]:
     return _gap_crosses_window(a_last, b_first, CLASS_CHANGE_WINDOWS)
+
+
+def allow_delayed_transfer_high(
+    a_last: Optional[str],
+    b_first: Optional[str],
+    *,
+    obs_gap_hours: float,
+    exact_exp: bool,
+) -> Optional[str]:
+    """EXP 一致／極近時，若符合領域轉移延遲登入，回傳場次 label。"""
+    if not exact_exp:
+        return None
+    # 過長空窗（遠超 grace）不放行；match 內已用窗結束+grace 卡住
+    if obs_gap_hours > (14 + TRANSFER_LOGIN_GRACE_DAYS) * 24:
+        return None
+    return match_realm_transfer(a_last, b_first)
 
 
 def allow_class_mismatch_high(
@@ -98,12 +155,16 @@ def allow_class_mismatch_high(
 ) -> bool:
     """EXP 完全一致且觀測銜接緊密 → 允許職業不符進主軌（疑似轉職）。
 
-    落在官方自由職業變更視窗時，可再放寬到 7 天內。
+    落在官方自由職業變更視窗、或領域轉移延遲登入時，可再放寬。
     """
     if not exact_exp:
         return False
     if obs_gap_hours <= 72:
         return True
     if class_change_label(a_last, b_first) and obs_gap_hours <= 7 * 24:
+        return True
+    if allow_delayed_transfer_high(
+        a_last, b_first, obs_gap_hours=obs_gap_hours, exact_exp=True
+    ):
         return True
     return False
