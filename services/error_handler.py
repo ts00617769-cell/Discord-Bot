@@ -1,18 +1,27 @@
 """
 例外處理、頻道權限與共用工具。
 """
+from __future__ import annotations
+
 import logging
 import os
 import sqlite3
 import traceback
+from typing import Optional
 
 import discord
+from discord.ext import commands
+
 from game_data import SERVER_MAP
 
 logger = logging.getLogger(__name__)
 
+CHANNEL_DENIED = "channel_denied"
 
-def parse_env_channel_ids(env_name: str = None, env_value: str = None) -> list:
+
+def parse_env_channel_ids(
+    env_name: Optional[str] = None, env_value: Optional[str] = None
+) -> list[int]:
     """解析逗號分隔的頻道 ID；空白或非數字一律略過，避免 int('') 崩潰。"""
     raw = env_value if env_value is not None else os.getenv(env_name or "", "")
     return [int(x.strip()) for x in (raw or "").split(",") if x.strip().isdigit()]
@@ -24,12 +33,12 @@ def parse_env_channel_id(env_name: str, default: int = 0) -> int:
     return ids[0] if ids else default
 
 
-def get_allowed_command_channels() -> list:
+def get_allowed_command_channels() -> list[int]:
     """每次從環境變數熱讀白名單（改 .env 後不必重載 cog）。"""
     return parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")
 
 
-def resolve_command_channel_ids(channel) -> list:
+def resolve_command_channel_ids(channel) -> list[int]:
     """回傳要檢查的頻道 ID（含討論串 / 論壇貼文的 parent）。"""
     ids = [getattr(channel, "id", None)]
     parent_id = getattr(channel, "parent_id", None)
@@ -45,7 +54,9 @@ def resolve_command_channel_ids(channel) -> list:
     return [i for i in ids if isinstance(i, int)]
 
 
-def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list = None) -> bool:
+def is_allowed_command_channel(
+    channel_id: int, allowed_channel_ids: Optional[list[int]] = None
+) -> bool:
     """fail-closed：未設定白名單時拒絕機密指令；有設定時僅允許列表內頻道。"""
     if allowed_channel_ids is None:
         allowed_channel_ids = get_allowed_command_channels()
@@ -54,12 +65,8 @@ def is_allowed_command_channel(channel_id: int, allowed_channel_ids: list = None
     return channel_id in allowed_channel_ids
 
 
-async def require_allowed_channel(ctx) -> bool:
-    """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。"""
+async def _send_channel_deny(ctx) -> None:
     allowed = get_allowed_command_channels()
-    candidates = resolve_command_channel_ids(ctx.channel)
-    if any(is_allowed_command_channel(cid, allowed) for cid in candidates):
-        return True
     try:
         if not allowed:
             await ctx.send(
@@ -79,7 +86,27 @@ async def require_allowed_channel(ctx) -> bool:
             )
     except discord.HTTPException as e:
         logger.warning(f"Failed to send channel-deny message: {e}")
+
+
+async def require_allowed_channel(ctx) -> bool:
+    """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。"""
+    allowed = get_allowed_command_channels()
+    candidates = resolve_command_channel_ids(ctx.channel)
+    if any(is_allowed_command_channel(cid, allowed) for cid in candidates):
+        return True
+    await _send_channel_deny(ctx)
     return False
+
+
+def allowed_channel():
+    """機密指令 decorator；拒絕時已送提示並拋 CheckFailure（WarRoom 靜默略過）。"""
+
+    async def predicate(ctx: commands.Context) -> bool:
+        if await require_allowed_channel(ctx):
+            return True
+        raise commands.CheckFailure(CHANNEL_DENIED)
+
+    return commands.check(predicate)
 
 
 def min_complete_snapshot_servers() -> int:
