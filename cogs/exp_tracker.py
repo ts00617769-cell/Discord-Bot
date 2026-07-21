@@ -7,15 +7,21 @@ import traceback
 import discord
 from discord.ext import commands, tasks
 
-from game_data import SERVER_MAP
 from db import ensure_search_indexes
-from services.exp_speed import (
-    collect_overspeed,
-    collect_speed_ranking,
-    pick_interval_baseline,
+from game_data import SERVER_MAP
+from services.error_handler import (
+    min_complete_snapshot_servers,
+    min_snapshot_players,
+    parse_env_channel_ids,
+    parse_env_float,
 )
 from services.exp_snapshots import EXP_HISTORY_INSERT_SQL, players_to_insert_batch
+from services.exp_speed import (
+    collect_overspeed,
+    pick_interval_baseline,
+)
 from services.member_registry import get_member_tag
+from services.ranking_api import get_ranking_client
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
 from services.transfer_detect import (
@@ -27,14 +33,6 @@ from services.transfer_detect import (
     pick_unique_pairs,
     rank_transfer_candidates,
 )
-from services.error_handler import (
-    min_complete_snapshot_servers,
-    min_snapshot_players,
-    parse_env_channel_ids,
-    parse_env_float,
-    require_allowed_channel,
-)
-from services.ranking_api import get_ranking_client
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +82,9 @@ class ExpTracker(commands.Cog):
                 try:
                     self.alert_count = max(1, min(100, int(rows["alert_count"])))
                 except ValueError:
-                    pass
+                    logger.warning(
+                        f"忽略無效 alert_count={rows['alert_count']!r}，沿用 {self.alert_count}"
+                    )
             if "alert_server" in rows and rows["alert_server"]:
                 self.alert_server = rows["alert_server"]
             logger.info(
@@ -246,14 +246,14 @@ class ExpTracker(commands.Cog):
 
     async def check_for_alerts(self, current_time, *, run_transfers: bool = True):
         min_servers = min_complete_snapshot_servers()
-        sql_times = f'''
+        sql_times = """
             SELECT record_time
             FROM exp_history
             GROUP BY record_time
-            HAVING COUNT(DISTINCT server_name) >= {min_servers}
+            HAVING COUNT(DISTINCT server_name) >= ?
             ORDER BY record_time DESC LIMIT 10
-        '''
-        async with self.bot.db.execute(sql_times) as cursor:
+        """
+        async with self.bot.db.execute(sql_times, (min_servers,)) as cursor:
             times = await cursor.fetchall()
 
         if len(times) < 2:
@@ -487,212 +487,6 @@ class ExpTracker(commands.Cog):
         if seconds_to_wait > 0:
             logger.info(f"等待 {seconds_to_wait:.1f} 秒以對齊官方每 10 分鐘更新時間...")
             await asyncio.sleep(seconds_to_wait)
-
-    @commands.command(name="警報", help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)")
-    async def toggle_alerts(self, ctx, *args):
-        if not await require_allowed_channel(ctx):
-            return
-        args_list = [arg for arg in args if arg.strip()]
-        if not args_list:
-            current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
-            return await ctx.send(
-                f"目前警報狀態為：**{current_state}** "
-                f"（{self.alert_server}、前 {self.alert_count} 名）\n"
-                f"👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。"
-            )
-
-        state = args_list.pop(0)
-        if state in ["關", "off"]:
-            self.alerts_enabled = False
-            await self._save_alert_settings()
-            return await ctx.send("🔕 **【自動超速警報】已關閉！**（設定已持久化）")
-
-        if state in ["開", "on"]:
-            if args_list and args_list[0].isdigit():
-                temp_alert_count = int(args_list.pop(0))
-            else:
-                temp_alert_count = 30
-            temp_alert_count = max(1, min(100, temp_alert_count))
-
-            target_server = "".join(args_list) if args_list else "全服"
-            if target_server not in ["全服", "全部", "global"] and target_server not in SERVER_MAP:
-                return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
-
-            self.alerts_enabled = True
-            self.alert_count = temp_alert_count
-            self.alert_server = (
-                "全服" if target_server in ["全服", "全部", "global"] else target_server
-            )
-            await self._save_alert_settings()
-            return await ctx.send(
-                f"🚨 **【自動測速警報】已開啟！** "
-                f"(設定: {self.alert_server}、門檻 ≥{self.SPEED_LIMIT:,.0f}億、前 {self.alert_count} 名、每 {self.alert_interval_minutes} 分鐘)\n"
-                f"💾 設定已寫入資料庫，重啟後仍會保持開啟。"
-            )
-
-        current_state = "🟢 開啟中" if self.alerts_enabled else "🔴 關閉中"
-        await ctx.send(
-            f"目前警報狀態為：**{current_state}**\n👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。"
-        )
-
-    @commands.command(name="測速", help="用法: !測速 全服 或 !測速 50 萊涅01")
-    @commands.cooldown(1, 15, commands.BucketType.user)
-    @commands.max_concurrency(2, commands.BucketType.default, wait=False)
-    async def check_exp_speed(self, ctx, *args):
-        if not await require_allowed_channel(ctx):
-            return
-        count = 15 
-        args_list = [arg for arg in args if arg.strip()]
-        if args_list and args_list[0].isdigit():
-            count = int(args_list.pop(0))
-        count = max(1, min(100, count))
-
-        target_server = "".join(args_list) if args_list else "全服"
-        is_global = target_server in ["全服", "全部", "global"]
-        if not is_global and target_server not in SERVER_MAP:
-            return await ctx.send(f"❌ 找不到伺服器「{target_server}」。")
-
-        processing_msg = await ctx.send(
-            f"📡 正在調閱測速照相機，計算 {'全台服' if is_global else target_server} 練功時速 TOP {count}..."
-        )
-
-        try:
-            min_servers = min_complete_snapshot_servers()
-            if is_global:
-                sql_times = f'''
-                    SELECT record_time
-                    FROM exp_history
-                    GROUP BY record_time
-                    HAVING COUNT(DISTINCT server_name) >= {min_servers}
-                    ORDER BY record_time DESC LIMIT 2
-                '''
-                params_times = []
-            else:
-                sql_times = (
-                    "SELECT DISTINCT record_time FROM exp_history "
-                    "WHERE server_name = ? ORDER BY record_time DESC LIMIT 2"
-                )
-                params_times = [target_server]
-
-            async with self.bot.db.execute(sql_times, tuple(params_times)) as cursor:
-                times = await cursor.fetchall()
-
-            if len(times) < 2:
-                return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")
-
-            time_now, time_prev = times[0][0], times[1][0]
-            fmt = "%Y-%m-%d %H:%M:%S"
-            t1 = datetime.datetime.strptime(time_now, fmt)
-            t2 = datetime.datetime.strptime(time_prev, fmt)
-            minutes_diff = (t1 - t2).total_seconds() / 60
-            if minutes_diff <= 0:
-                minutes_diff = 10
-
-            sql = '''
-                SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                FROM exp_history t1
-                JOIN exp_history t2
-                  ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                WHERE t1.record_time = ? AND t2.record_time = ?
-            '''
-            params = [time_now, time_prev]
-            if not is_global:
-                sql += " AND t1.server_name = ?"
-                params.append(target_server)
-
-            async with self.bot.db.execute(sql, tuple(params)) as cursor:
-                speed_records = await cursor.fetchall()
-
-            top_list = collect_speed_ranking(speed_records, minutes_diff)[:count]
-            if not top_list:
-                return await processing_msg.edit(content="💤 大家都沒在練功，或資料抓取空隙中。")
-
-            desc = f"**區間：{time_prev[11:16]} ➡️ {time_now[11:16]} (約 {int(minutes_diff)} 分鐘)**\n```yaml\n"
-            embeds = []
-            for idx, p in enumerate(top_list, 1):
-                name_padded = pad_text(str(p["name"]), 14)
-                srv_info = f"({p['server']})" if is_global else ""
-                line = (
-                    f"{idx:02d}. {name_padded} | Lv.{p['level']:<2} | "
-                    f"時速:{p['speed']/100000000:>6.2f}億 {srv_info}\n"
-                )
-                if len(desc) + len(line) > 1900:
-                    desc += "```"
-                    embeds.append(
-                        discord.Embed(
-                            title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 (續)",
-                            description=desc,
-                            color=0x00ff00,
-                        )
-                    )
-                    desc = "```yaml\n"
-                desc += line
-
-            if desc != "```yaml\n":
-                desc += "```"
-                embeds.append(
-                    discord.Embed(
-                        title=f"🏎️ {'全台服' if is_global else target_server} 練功時速 TOP {count}",
-                        description=desc,
-                        color=0x00ff00,
-                    )
-                )
-                embeds[-1].set_footer(text="系統：全自動經驗值測速雷達")
-
-            await processing_msg.delete()
-            for e in embeds:
-                await ctx.send(embed=e)
-
-        except sqlite3.DatabaseError as e:
-            logger.error(f"Database error while checking exp speed: {e}")
-            try:
-                await processing_msg.edit(content="❌ 資料庫錯誤，請聯絡管理員。")
-            except discord.NotFound:
-                pass
-        except asyncio.TimeoutError:
-            try:
-                await processing_msg.edit(content="❌ 測速查詢逾時，請重試")
-            except discord.NotFound:
-                pass
-        except (ValueError, TypeError) as e:
-            logger.error(f"Value error in exp speed: {e}")
-            try:
-                await processing_msg.edit(content="❌ 測速資料格式異常")
-            except discord.NotFound:
-                pass
-
-    @commands.command(
-        name="伺服器檢查",
-        aliases=["檢查伺服器", "validate_servers"],
-        help="對 SERVER_MAP 打官網 Ranking API 探活（維護用）",
-    )
-    @commands.is_owner()
-    async def validate_servers(self, ctx):
-        """資料來源與官網 https://warsofprasia.beanfun.com/ 即時戰況相同 API。"""
-        msg = await ctx.send("🔎 正在對官網 Ranking API 探活 SERVER_MAP...")
-        client = get_ranking_client(self.bot)
-        results = await client.validate_server_map(SERVER_MAP)
-        lines = []
-        ok_n = 0
-        for name, r in results.items():
-            if r.get("ok"):
-                ok_n += 1
-                wn = r.get("world_name") or "?"
-                sample = r.get("sample_name") or "?"
-                lines.append(f"✅ {name} → API世界「{wn}」樣例:{sample}")
-            else:
-                lines.append(
-                    f"❌ {name} → 無資料 ({r.get('group_id')}/{r.get('world_id')})"
-                )
-        body = "\n".join(lines)
-        await msg.edit(
-            content=(
-                f"**伺服器探活結果**（{ok_n}/{len(results)} 通過）\n"
-                f"來源：`PostLiveapiGCRanking`（與官網即時戰況同源）\n"
-                f"```yaml\n{body}\n```"
-            )
-        )
-
 
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))

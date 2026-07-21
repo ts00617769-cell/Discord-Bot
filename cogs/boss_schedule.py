@@ -1,8 +1,10 @@
-import discord
-from discord.ext import commands, tasks
 import datetime
 import logging
 import sqlite3
+
+import discord
+from discord.ext import commands, tasks
+
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
 from services.error_handler import parse_env_channel_id
 from services.timeutil import now_taipei, today_taipei_str

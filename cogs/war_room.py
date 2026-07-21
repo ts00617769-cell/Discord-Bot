@@ -1,17 +1,18 @@
-import discord
-from discord.ext import commands, tasks
-import traceback
 import datetime
 import logging
 import sqlite3
-from services.error_handler import parse_env_channel_id
+import traceback
 
-from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
+import discord
+from discord.ext import commands, tasks
+
+from services.error_handler import parse_env_channel_id
 from services.settings_prune import (
     PRUNE_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
+from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,10 @@ class WarRoom(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
-        if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
+        if isinstance(error, commands.CheckFailure) and str(error) in (
+            "duplicate_invoke",
+            "channel_denied",
+        ):
             return
 
         if isinstance(error, commands.CommandOnCooldown):

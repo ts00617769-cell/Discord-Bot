@@ -167,7 +167,25 @@ async def _set_schema_version(db, version: int) -> None:
     )
 
 
+_PRAGMA_TABLE_ALLOWLIST = frozenset(
+    {
+        "exp_history",
+        "member_registry",
+        "transfer_alerts_log",
+        "bot_settings",
+        "cmd_dedupe",
+        "schema_meta",
+        "quiz_history",
+        "active_quiz_status",
+        "quiz_votes",
+        "horoscope_cache",
+    }
+)
+
+
 async def _table_columns(db, table: str) -> set[str]:
+    if table not in _PRAGMA_TABLE_ALLOWLIST:
+        raise ValueError(f"PRAGMA table_info refused for table={table!r}")
     async with db.execute(f"PRAGMA table_info({table})") as cursor:
         rows = await cursor.fetchall()
     return {row[1] for row in rows}

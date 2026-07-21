@@ -124,7 +124,10 @@ class BeanfunClient:
         async with self._sem:
             try:
                 async with self.session.post(
-                    url, json=payload, headers=headers, timeout=timeout
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as response:
                     if response.status != 200:
                         msg = f"HTTP {response.status}"

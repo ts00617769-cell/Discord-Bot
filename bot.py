@@ -1,19 +1,20 @@
-import discord
-from discord.ext import commands
-import os
-import sys
 import atexit
+import logging
+import os
 import socket
 import sqlite3
+import sys
 from collections import Counter
-from dotenv import load_dotenv
-import aiohttp
-import logging
 
-from services.ranking_api import get_ranking_client
-from services.timeutil import now_naive_taipei, taipei_cutoff_str
+import aiohttp
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+
 from db import apply_migrations, connect_db
 from db.connection import resolve_db_path
+from services.ranking_api import get_ranking_client
+from services.timeutil import now_naive_taipei, taipei_cutoff_str
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -183,6 +184,7 @@ class PrasiaBot(commands.Bot):
 
 
 bot = PrasiaBot()
+_app_commands_synced = False
 
 
 @bot.before_invoke
@@ -203,13 +205,16 @@ async def claim_command_once(ctx: commands.Context):
             f"⚠️ 略過重複指令: msg={ctx.message.id} cmd={getattr(ctx.command, 'name', '?')} "
             f"pid={os.getpid()} host={host}"
         )
-        raise commands.CheckFailure("duplicate_invoke")
+        raise commands.CheckFailure("duplicate_invoke") from None
 
 
 @bot.event
 async def on_command_error(ctx, error):
     """去重略過；WarRoom 在場時由其處理；否則在此回覆使用者。"""
-    if isinstance(error, commands.CheckFailure) and str(error) == "duplicate_invoke":
+    if isinstance(error, commands.CheckFailure) and str(error) in (
+        "duplicate_invoke",
+        "channel_denied",
+    ):
         return
     if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
         return
@@ -254,8 +259,10 @@ async def on_command_error(ctx, error):
     except discord.HTTPException:
         pass
 
+
 @bot.event
 async def on_ready():
+    global _app_commands_synced
     host = socket.gethostname()
     logger.info(
         f"🤖 {bot.user} 已成功登入 Discord 並準備就緒！ (PID {os.getpid()} @ {host})"
@@ -266,6 +273,14 @@ async def on_ready():
         logger.error(f"❌ 偵測到重複註冊的指令（會造成雙重回覆）: {dupes}")
     else:
         logger.info(f"✅ 指令註冊正常，共 {len(bot.commands)} 個指令")
+
+    if not _app_commands_synced:
+        try:
+            synced = await bot.tree.sync()
+            _app_commands_synced = True
+            logger.info(f"✅ 已同步 {len(synced)} 個應用程式指令（slash / hybrid）")
+        except discord.HTTPException as e:
+            logger.warning(f"應用程式指令同步失敗: {e}")
 
     try:
         await bot.change_presence(
@@ -283,7 +298,6 @@ async def on_ready():
         await bot.db.commit()
     except sqlite3.DatabaseError as e:
         logger.warning(f"清理 cmd_dedupe 失敗: {e}")
-
 
 @bot.command(name="reload", hidden=True)
 @commands.is_owner()

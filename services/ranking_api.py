@@ -101,8 +101,9 @@ class RankingClient:
             return FetchResult(ok=False, error=raw.error, from_cache=raw.from_cache)
         data = raw.players[0] if raw.players else {}
         body = data.get("data")
+        gc: list = []
         if body is None:
-            gc = []
+            pass
         elif isinstance(body, dict):
             gc = body.get("gc") or []
         else:
@@ -179,7 +180,7 @@ class RankingClient:
         results = await asyncio.gather(*tasks)
         all_players = []
         failed: list[str] = []
-        for name, r in zip(names, results):
+        for name, r in zip(names, results, strict=False):
             if r.ok:
                 all_players.extend(r.players)
             else:

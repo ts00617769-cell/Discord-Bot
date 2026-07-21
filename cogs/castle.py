@@ -8,6 +8,7 @@ from discord.ext import commands
 from game_data import SERVER_MAP
 from services import error_handler
 from services.beanfun_http import get_beanfun_client
+from services.command_args import parse_count_server
 from services.text_display import pad_text
 
 logger = logging.getLogger(__name__)
@@ -44,29 +45,15 @@ class CastleTracker(commands.Cog):
     @commands.cooldown(1, 15, commands.BucketType.user)
     @commands.max_concurrency(2, commands.BucketType.default, wait=False)
     async def get_castle_tax(self, ctx, *args):
-        count = 15
-        args_list = [arg for arg in args if arg.strip()]
-        if len(args_list) > 0 and args_list[0].isdigit():
-            count = int(args_list.pop(0))
+        cs = parse_count_server(args, default_count=15, max_count=50)
+        count = cs.count
+        target_server = cs.server
+        is_global = cs.is_global
 
-        if count > 50:
-            count = 50
-        if count < 1:
-            count = 10
-
-        target_server = "".join(args_list) if args_list else "全服"
-
-        is_global = False
-        if target_server in ["全服", "全部", ""]:
-            is_global = True
+        if is_global:
             display_title = f"全伺服器 據點稅收 TOP {count}"
+            target_group_id = target_world_id = None
         else:
-            if target_server not in SERVER_MAP:
-                valid_list = "、".join(SERVER_MAP.keys())
-                return await ctx.send(
-                    f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服"
-                )
-
             target_group_id, target_world_id = SERVER_MAP[target_server]
             display_title = f"【{target_server}】 據點稅收 TOP {count}"
 
@@ -82,7 +69,7 @@ class CastleTracker(commands.Cog):
                     for s_name, (g_id, w_id) in SERVER_MAP.items()
                 ]
                 results = await asyncio.gather(*tasks)
-                for s_name, (territories, err) in zip(server_names, results):
+                for s_name, (territories, err) in zip(server_names, results, strict=True):
                     if err:
                         failed_servers.append(s_name)
                     else:

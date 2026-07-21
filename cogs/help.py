@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
-from services.error_handler import require_allowed_channel
+
+from services.error_handler import allowed_channel
 
 
 class HelpCog(commands.Cog):
@@ -8,10 +9,8 @@ class HelpCog(commands.Cog):
         self.bot = bot
 
     @commands.command(name="機密指令", help="戰情室專屬的進階指令手冊")
+    @allowed_channel()
     async def secret_help(self, ctx):
-        if not await require_allowed_channel(ctx):
-            return
-
         embed = discord.Embed(
             title="🚨 戰情室專屬：進階雷達操作手冊",
             description="以下指令會調用系統深層資料庫，僅限戰情室頻道。",
@@ -19,12 +18,12 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(
             name="🏆 即時排名",
-            value="`!排名 [數量] [伺服器] [職業]`\n例：`!排名 50 萊涅01` 或 `!排名 幻影劍士`",
+            value="`!排名` / `/排名` `[數量] [伺服器] [職業]`\n例：`!排名 50 萊涅01` 或 `!排名 幻影劍士`",
             inline=False,
         )
         embed.add_field(
             name="🏎️ 練功測速",
-            value="`!測速 [數量] [伺服器]`\n例：`!測速 30 全服`",
+            value="`!測速` / `/測速` `[數量] [伺服器]`\n例：`!測速 30 全服`",
             inline=False,
         )
         embed.add_field(
@@ -34,7 +33,7 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(
             name="🕵️ 尋人",
-            value="`!尋人 [玩家名稱]`\n例：`!尋人 驕傲o`",
+            value="`!尋人` / `/尋人` `[玩家名稱]`\n例：`!尋人 驕傲o`",
             inline=False,
         )
         embed.add_field(

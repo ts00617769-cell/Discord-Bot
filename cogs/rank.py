@@ -3,11 +3,13 @@ import logging
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from game_data import SERVER_MAP
 from services import error_handler
-from services.error_handler import require_allowed_channel
+from services.command_args import parse_rank_args, parse_rank_filters
+from services.error_handler import allowed_channel
 from services.member_registry import get_member_tag
 from services.ranking_api import get_ranking_client, resolve_class_key
 
@@ -21,44 +23,26 @@ class RankTracker(commands.Cog):
     async def get_member_info(self, name):
         return await get_member_tag(self.bot.db, name)
 
-    @commands.command(name="排名", help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使")
+    @commands.hybrid_command(
+        name="排名",
+        help="例如: !排名 幻影劍士, !排名 25 萊涅01 咒文刻印使",
+    )
+    @app_commands.describe(args="例如：25 萊涅01 或 幻影劍士")
     @commands.cooldown(1, 20, commands.BucketType.user)
     @commands.max_concurrency(2, commands.BucketType.default, wait=False)
-    async def get_ranking(self, ctx, *args):
-        if not await require_allowed_channel(ctx):
-            return
+    @allowed_channel()
+    async def get_ranking(self, ctx: commands.Context, *, args: str = ""):
+        parts = args.split() if args.strip() else []
+        count_server, target_class = parse_rank_args(parts)
+        count = count_server.count
+        target_server = count_server.server
+        is_global = count_server.is_global
 
-        count = 10
-        args_list = [arg for arg in args if arg.strip()]
-
-        if args_list and args_list[0].isdigit():
-            count = int(args_list.pop(0))
-        count = max(1, min(100, count))
-
-        target_server = "全服"
-        target_class = None
-        class_parts = []
-
-        for arg in args_list:
-            if arg in SERVER_MAP or arg in ["全服", "全部", "global"]:
-                target_server = arg
-            else:
-                class_parts.append(arg)
-
-        if class_parts:
-            target_class = "".join(class_parts)
-
-        is_global = target_server in ["全服", "全部", "global"]
         filter_msg = f"【{target_class}】" if target_class else " "
         if is_global:
             display_title = f"全伺服器{filter_msg}TOP {count}"
             target_group_id = target_world_id = None
         else:
-            if target_server not in SERVER_MAP:
-                valid_list = "、".join(SERVER_MAP.keys())
-                return await ctx.send(
-                    f"❌ 找不到伺服器「{target_server}」。支援：{valid_list} 或 全服"
-                )
             target_group_id, target_world_id = SERVER_MAP[target_server]
             display_title = f"【{target_server}】{filter_msg}TOP {count}"
 
@@ -68,42 +52,10 @@ class RankTracker(commands.Cog):
             client = get_ranking_client(self.bot)
             failed_servers: list[str] = []
 
-            # 先解析職業篩選：能對應 API key 時只打該職業榜（較快）
-            class_filter = ""
-            grade_filter = 0
-            level_filter = 0
-            if target_class:
-                filters = target_class.split("+")
-                for f in filters:
-                    if f.startswith("職業"):
-                        class_filter = f[2:]
-                    elif f.startswith("討伐"):
-                        try:
-                            grade_filter = int(f[2:])
-                        except ValueError:
-                            pass
-                    elif f.startswith("等級"):
-                        try:
-                            level_filter = int(f[2:])
-                        except ValueError:
-                            pass
-                    elif f.lower().startswith("lv."):
-                        try:
-                            level_filter = int(f[3:])
-                        except ValueError:
-                            pass
-                    elif f.lower().startswith("lv"):
-                        try:
-                            level_filter = int(f[2:])
-                        except ValueError:
-                            pass
-                    elif (
-                        not class_filter
-                        and not f.startswith("討伐")
-                        and not f.startswith("等級")
-                        and not f.lower().startswith("lv")
-                    ):
-                        class_filter = f
+            filters = parse_rank_filters(target_class)
+            class_filter = filters.class_filter
+            grade_filter = filters.grade_filter
+            level_filter = filters.level_filter
 
             class_key = resolve_class_key(class_filter) if class_filter else None
             fetch_kwargs = {}
@@ -137,7 +89,6 @@ class RankTracker(commands.Cog):
                 filtered_players = []
                 for p in all_players:
                     match = True
-                    # 已用 API class key 抓取時不必再字串比對；模糊關鍵字仍 client-side 篩
                     if class_filter and not class_key:
                         if class_filter not in str(p.get("class_name", "")):
                             match = False

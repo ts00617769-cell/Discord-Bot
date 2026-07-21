@@ -1,8 +1,9 @@
+import asyncio
+import logging
+
+import aiohttp
 import discord
 from discord.ext import commands
-import asyncio
-import aiohttp
-import logging
 
 from services.beanfun_http import get_beanfun_client
 

@@ -1,10 +1,11 @@
+import asyncio
+import json
+import logging
+import os
+import random
+
 import discord
 from discord.ext import commands
-import random
-import json
-import asyncio
-import os
-import logging
 
 logger = logging.getLogger(__name__)
 
