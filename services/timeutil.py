@@ -1,10 +1,16 @@
-"""台北時區單一來源（zoneinfo Asia/Taipei）。"""
+"""台北時區單一來源（優先 zoneinfo Asia/Taipei）。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 
-TAIPEI = ZoneInfo("Asia/Taipei")
+try:
+    from zoneinfo import ZoneInfo
+
+    TAIPEI = ZoneInfo("Asia/Taipei")
+except ImportError:  # Python < 3.9 或精簡環境（如部分 NAS）
+    # 台灣無夏令時間，固定 UTC+8 足夠
+    TAIPEI = timezone(timedelta(hours=8))
+
 FMT_SQL = "%Y-%m-%d %H:%M:%S"
 FMT_DATE = "%Y-%m-%d"
 
