@@ -155,9 +155,12 @@ ruff check .
 python cleanup_db.py
 python cleanup_db.py --days 30 --dry-run
 python cleanup_db.py --for-search --dry-run   # 尋人導向：近7天 ∪ 領域轉移窗～結束後5天
-python cleanup_db.py --for-search             # 實際刪除並 VACUUM
+python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引
+python cleanup_db.py --build-indexes          # 僅離線建索引（大庫啟動時會略過）
 python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 ```
+
+> `exp_history` 超過約 5 萬筆時，bot 啟動**不會**自動建索引（避免鎖庫）。清庫後務必跑 `--for-search` 或 `--build-indexes`，否則 `!尋人` 仍會全表掃描而很慢。
 
 ### HTTP／Ranking
 

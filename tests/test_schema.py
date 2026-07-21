@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from db.schema import SCHEMA_VERSION, apply_migrations, ensure_search_indexes
+from db.schema import (
+    SCHEMA_VERSION,
+    apply_migrations,
+    build_search_indexes_sync,
+    ensure_search_indexes,
+    list_missing_search_indexes,
+)
 
 
 @pytest.mark.asyncio
@@ -40,6 +46,36 @@ async def test_apply_migrations_fresh_db(tmp_path):
     finally:
         await db.close()
 
+
+def test_build_search_indexes_sync(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "sync.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE exp_history (
+                record_time TIMESTAMP,
+                server_name TEXT,
+                player_name TEXT,
+                level INTEGER,
+                exp REAL,
+                class_name TEXT,
+                subjugation_grade INTEGER
+            )
+            """
+        )
+        conn.commit()
+        missing = list_missing_search_indexes(conn)
+        assert "idx_exp" in missing
+        assert "idx_player_server" in missing
+        created = build_search_indexes_sync(conn)
+        assert "idx_exp" in created
+        assert list_missing_search_indexes(conn) == []
+        assert build_search_indexes_sync(conn) == []
+    finally:
+        conn.close()
 
 @pytest.mark.asyncio
 async def test_legacy_column_backfill(tmp_path):

@@ -232,6 +232,49 @@ async def apply_migrations(db) -> int:
     return current
 
 
+def list_missing_search_indexes(conn: sqlite3.Connection) -> list[str]:
+    """回傳尚未建立的尋人索引名稱。"""
+    existing = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    return [name for name, _ in _SEARCH_INDEXES if name not in existing]
+
+
+def build_search_indexes_sync(
+    conn: sqlite3.Connection,
+    *,
+    index_names: Iterable[str] | None = None,
+) -> list[str]:
+    """離線建立尋人索引（無列數上限；供 cleanup_db 使用）。
+
+    回傳本次新建的索引名稱列表。
+    """
+    wanted = list(_SEARCH_INDEXES)
+    if index_names is not None:
+        allow = set(index_names)
+        wanted = [item for item in wanted if item[0] in allow]
+
+    existing = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    created: list[str] = []
+    for name, ddl in wanted:
+        if name in existing:
+            continue
+        logger.info("⏳ 離線建立資料庫索引 %s...", name)
+        try:
+            conn.execute(ddl)
+            conn.commit()
+            created.append(name)
+            existing.add(name)
+            logger.info("✅ 索引 %s 建立完成", name)
+        except sqlite3.DatabaseError as e:
+            logger.warning("⚠️ 無法建立索引 %s: %s", name, e)
+    return created
+
+
 async def ensure_search_indexes(
     db,
     *,
@@ -267,7 +310,7 @@ async def ensure_search_indexes(
         names = ", ".join(n for n, _ in missing)
         logger.warning(
             f"⚠️ exp_history 約 {row_count} 筆，略過啟動時建立索引: {names}。"
-            " 可離線執行 cleanup 後再以較小庫重建，或調高門檻。"
+            " 請停 bot 後執行 `python cleanup_db.py --build-indexes`。"
         )
         return []
 

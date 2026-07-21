@@ -9,6 +9,7 @@
   python cleanup_db.py --days 30 --dry-run
   python cleanup_db.py --for-search
   python cleanup_db.py --for-search --dry-run
+  python cleanup_db.py --build-indexes   # 離線建立尋人索引（大庫必做）
   python cleanup_db.py --wipe-history
 """
 
@@ -28,6 +29,10 @@ DEFAULT_DAYS = 60
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from db.schema import (  # noqa: E402
+    build_search_indexes_sync,
+    list_missing_search_indexes,
+)
 from services.retention_windows import (  # noqa: E402
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
@@ -165,11 +170,19 @@ def main() -> int:
         action="store_true",
         help="刪除後不做 VACUUM（檔案不會立刻變小）",
     )
+    parser.add_argument(
+        "--build-indexes",
+        action="store_true",
+        help="離線建立尋人索引（大表啟動時會略過；建議清庫後執行）",
+    )
     args = parser.parse_args()
 
     if args.wipe_history and args.for_search:
         print("錯誤：--wipe-history 與 --for-search 不可同時使用", file=sys.stderr)
         return 2
+    indexes_only = bool(args.build_indexes) and not (
+        args.wipe_history or args.for_search or "--days" in sys.argv
+    )
     if args.for_search:
         if args.recent_days < 0:
             print("錯誤：--recent-days 必須 >= 0", file=sys.stderr)
@@ -177,8 +190,11 @@ def main() -> int:
         if args.transfer_pad_days < 0:
             print("錯誤：--transfer-pad-days 必須 >= 0", file=sys.stderr)
             return 2
-    elif args.days < 1 and not args.wipe_history:
-        print("錯誤：--days 必須 >= 1（或改用 --wipe-history / --for-search）", file=sys.stderr)
+    elif not indexes_only and args.days < 1 and not args.wipe_history:
+        print(
+            "錯誤：--days 必須 >= 1（或改用 --wipe-history / --for-search / --build-indexes）",
+            file=sys.stderr,
+        )
         return 2
 
     db_path: Path = args.db if args.db is not None else default_db
@@ -208,6 +224,20 @@ def main() -> int:
         has_exp = _table_exists(conn, "exp_history")
         has_transfer = _table_exists(conn, "transfer_alerts_log")
         has_settings = _table_exists(conn, "bot_settings")
+
+        if indexes_only:
+            if args.dry_run:
+                missing = list_missing_search_indexes(conn)
+                print("模式：僅檢查尋人索引（dry-run）")
+                print(f"將建立：{', '.join(missing) if missing else '（已齊全）'}")
+                return 0
+            print("模式：僅建立尋人索引")
+            created = build_search_indexes_sync(conn)
+            print(
+                f"索引：新建 {len(created)} 個"
+                + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
+            )
+            return 0
 
         exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
         transfer_total = (
@@ -419,6 +449,15 @@ def main() -> int:
             print("VACUUM 完成。")
         else:
             print("已跳過 VACUUM（檔案大小可能尚未縮小）。")
+
+        # 清庫後預設建索引；也可用 --build-indexes 強制再跑一次
+        if args.build_indexes or args.for_search:
+            print("正在建立尋人索引（大庫可能需數分鐘）…")
+            created = build_search_indexes_sync(conn)
+            print(
+                f"索引：新建 {len(created)} 個"
+                + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
+            )
     finally:
         conn.close()
 
