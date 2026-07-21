@@ -7,6 +7,7 @@ from services import player_matching as match
 from services.text_display import escape_like
 
 _PROFILE_SELECT = match.PROFILE_SELECT
+_PROFILE_FROM = match.PROFILE_FROM
 _PROFILE_CTE = match.PROFILE_CTE
 
 
@@ -19,7 +20,7 @@ class PlayerSearchStore:
         if server_name is None:
             sql = f"""
                 SELECT {_PROFILE_SELECT}
-                FROM exp_history e
+                {_PROFILE_FROM}
                 WHERE e.player_name = ?
                 GROUP BY e.player_name, e.server_name
             """
@@ -27,7 +28,7 @@ class PlayerSearchStore:
                 return await cursor.fetchall()
         sql = f"""
             SELECT {_PROFILE_SELECT}
-            FROM exp_history e
+            {_PROFILE_FROM}
             WHERE e.player_name = ? AND e.server_name = ?
             GROUP BY e.player_name, e.server_name
         """
@@ -44,7 +45,7 @@ class PlayerSearchStore:
         placeholders = ",".join("?" for _ in name_list)
         sql = f'''
             SELECT {_PROFILE_SELECT}
-            FROM exp_history e
+            {_PROFILE_FROM}
             WHERE e.player_name IN ({placeholders})
             GROUP BY e.player_name, e.server_name
         '''

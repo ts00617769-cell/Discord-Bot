@@ -1,7 +1,7 @@
 """EXP snapshot helpers."""
 from __future__ import annotations
 
-from services.exp_snapshots import players_to_insert_batch
+from services.exp_snapshots import players_to_insert_batch, profiles_from_insert_batch
 
 
 def test_players_to_insert_batch_skips_nameless():
@@ -30,6 +30,11 @@ def test_players_to_insert_batch_skips_nameless():
     assert batch[0][6] == 10
     assert batch[1][2] == "BadGrade"
     assert batch[1][6] == 0
+
+    profiles = profiles_from_insert_batch(batch)
+    by_name = {p[0]: p for p in profiles}
+    assert by_name["Hero"][2] == "太陽監視者"
+    assert by_name["BadGrade"][2] == "未知"
 
 
 def test_pad_and_timeutil():

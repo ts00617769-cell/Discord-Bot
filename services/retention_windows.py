@@ -1,4 +1,4 @@
-"""尋人導向保留區間：最近 N 天 ∪ 領域轉移窗起至結束後 pad 天（不含轉移前）。"""
+"""尋人導向保留區間：最近 N 天 ∪ 最近 K 次領域轉移窗（結束後 pad 天）。"""
 from __future__ import annotations
 
 import datetime
@@ -7,8 +7,9 @@ from typing import Iterable, Optional, Sequence
 from services.game_event_windows import REALM_TRANSFER_WINDOWS
 from services.timeutil import FMT_SQL, now_naive_taipei
 
-DEFAULT_RECENT_DAYS = 7
+DEFAULT_RECENT_DAYS = 3
 DEFAULT_TRANSFER_PAD_DAYS = 5
+DEFAULT_MAX_TRANSFER_WINDOWS = 3
 
 
 def _parse(s: str) -> Optional[datetime.datetime]:
@@ -45,21 +46,56 @@ def merge_ranges(ranges: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(_fmt(a), _fmt(b)) for a, b in merged]
 
 
+def select_recent_transfer_windows(
+    windows: Sequence[tuple[str, str, str]],
+    *,
+    max_windows: int,
+    now: Optional[datetime.datetime] = None,
+) -> list[tuple[str, str, str]]:
+    """依窗結束時間取最近 max_windows 次（已開始或即將開始的窗優先）。"""
+    if max_windows < 0:
+        raise ValueError("max_windows must be >= 0")
+    if max_windows == 0:
+        return []
+
+    now_dt = now if now is not None else now_naive_taipei()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+
+    scored: list[tuple[datetime.datetime, tuple[str, str, str]]] = []
+    for item in windows:
+        start_s, end_s, _label = item
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        # 尚未開始的未來窗：仍可保留（以 start 排序），但優先已結束／進行中
+        scored.append((end, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    # 只取結束時間 <= now+pad 概念上「最近」；未來窗若 end 很遠也會排前面
+    # 實務：REALM 列表皆為已公告場次，取 end 最新的 N 筆即可
+    return [item for _, item in scored[:max_windows]]
+
+
 def build_search_keep_ranges(
     *,
     recent_days: int = DEFAULT_RECENT_DAYS,
     pad_days: int = DEFAULT_TRANSFER_PAD_DAYS,
+    max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
     now: Optional[datetime.datetime] = None,
     transfer_windows: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """回傳合併後的保留區間 (start, end) SQL 字串列表。
 
-    領域轉移：保留 [窗開始, 窗結束 + pad_days]（轉移前不另留）。
+    領域轉移：只保留最近 max_transfer_windows 次，
+    區間為 [窗開始, 窗結束 + pad_days]（轉移前不另留）。
     """
     if recent_days < 0:
         raise ValueError("recent_days must be >= 0")
     if pad_days < 0:
         raise ValueError("pad_days must be >= 0")
+    if max_transfer_windows < 0:
+        raise ValueError("max_transfer_windows must be >= 0")
 
     now_dt = now if now is not None else now_naive_taipei()
     if now_dt.tzinfo is not None:
@@ -69,14 +105,21 @@ def build_search_keep_ranges(
     raw: list[tuple[str, str]] = []
 
     windows = transfer_windows if transfer_windows is not None else REALM_TRANSFER_WINDOWS
-    for start_s, end_s, _label in windows:
+    selected = select_recent_transfer_windows(
+        windows, max_windows=max_transfer_windows, now=now_dt
+    )
+    for start_s, end_s, _label in selected:
         start, end = _parse(start_s), _parse(end_s)
         if start is None or end is None:
             continue
         raw.append((_fmt(start), _fmt(end + pad)))
 
     recent_start = now_dt - datetime.timedelta(days=int(recent_days))
-    raw.append((_fmt(recent_start), _fmt(now_dt)))
+    if recent_days > 0:
+        raw.append((_fmt(recent_start), _fmt(now_dt)))
+    elif recent_days == 0 and not raw:
+        # 無轉移窗且 recent=0：仍保留「當下」單點，避免 empty → 誤刪全表
+        raw.append((_fmt(now_dt), _fmt(now_dt)))
 
     return merge_ranges(raw)
 

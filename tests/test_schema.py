@@ -38,6 +38,8 @@ async def test_apply_migrations_fresh_db(tmp_path):
         ver2 = await apply_migrations(db)
         assert ver2 == SCHEMA_VERSION
 
+        assert "player_profile" in tables
+
         created = await ensure_search_indexes(db, skip_if_rows_above=1_000_000)
         assert "idx_exp" in created or created == []
         # 再跑一次應無新建

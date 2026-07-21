@@ -9,7 +9,7 @@
   python cleanup_db.py --days 30 --dry-run
   python cleanup_db.py --for-search
   python cleanup_db.py --for-search --dry-run
-  python cleanup_db.py --build-indexes   # 離線建立尋人索引（大庫必做）
+  python cleanup_db.py --build-indexes   # 離線建立尋人索引 + player_profile（大庫必做）
   python cleanup_db.py --wipe-history
 """
 
@@ -32,8 +32,10 @@ if str(ROOT) not in sys.path:
 from db.schema import (  # noqa: E402
     build_search_indexes_sync,
     list_missing_search_indexes,
+    rebuild_player_profiles_sync,
 )
 from services.retention_windows import (  # noqa: E402
+    DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
@@ -136,7 +138,10 @@ def main() -> int:
     parser.add_argument(
         "--for-search",
         action="store_true",
-        help="尋人導向：保留最近 N 天 ∪ 領域轉移窗起至結束後 pad 天，其餘刪除",
+        help=(
+            "尋人導向：保留最近 N 天 ∪ 最近 K 次領域轉移窗"
+            "（窗開始～結束後 pad 天），其餘刪除"
+        ),
     )
     parser.add_argument(
         "--recent-days",
@@ -149,6 +154,15 @@ def main() -> int:
         type=int,
         default=DEFAULT_TRANSFER_PAD_DAYS,
         help=f"--for-search 時領域轉移結束後再保留天數（預設 {DEFAULT_TRANSFER_PAD_DAYS}）",
+    )
+    parser.add_argument(
+        "--max-transfer-windows",
+        type=int,
+        default=DEFAULT_MAX_TRANSFER_WINDOWS,
+        help=(
+            f"--for-search 時只保留最近幾次領域轉移窗"
+            f"（預設 {DEFAULT_MAX_TRANSFER_WINDOWS}）"
+        ),
     )
     parser.add_argument(
         "--wipe-history",
@@ -189,6 +203,9 @@ def main() -> int:
             return 2
         if args.transfer_pad_days < 0:
             print("錯誤：--transfer-pad-days 必須 >= 0", file=sys.stderr)
+            return 2
+        if args.max_transfer_windows < 0:
+            print("錯誤：--max-transfer-windows 必須 >= 0", file=sys.stderr)
             return 2
     elif not indexes_only and args.days < 1 and not args.wipe_history:
         print(
@@ -237,6 +254,10 @@ def main() -> int:
                 f"索引：新建 {len(created)} 個"
                 + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
             )
+            if has_exp:
+                print("正在重建 player_profile…")
+                n_prof = rebuild_player_profiles_sync(conn)
+                print(f"player_profile：{n_prof:,} 筆")
             return 0
 
         exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
@@ -268,6 +289,7 @@ def main() -> int:
             keep_ranges = build_search_keep_ranges(
                 recent_days=args.recent_days,
                 pad_days=args.transfer_pad_days,
+                max_transfer_windows=args.max_transfer_windows,
             )
             count_sql, count_params = exp_history_outside_keep_sql(keep_ranges)
             exp_delete_sql, exp_delete_params = exp_history_outside_keep_sql(
@@ -306,7 +328,8 @@ def main() -> int:
             )
             mode = (
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
-                f"領域轉移結束後+{args.transfer_pad_days} 天）"
+                f"最近 {args.max_transfer_windows} 次轉移窗"
+                f"～結束後+{args.transfer_pad_days} 天）"
             )
         else:
             cutoff = taipei_cutoff_str(args.days)
@@ -458,6 +481,11 @@ def main() -> int:
                 f"索引：新建 {len(created)} 個"
                 + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
             )
+
+        if has_exp:
+            print("正在重建 player_profile…")
+            n_prof = rebuild_player_profiles_sync(conn)
+            print(f"player_profile：{n_prof:,} 筆")
     finally:
         conn.close()
 

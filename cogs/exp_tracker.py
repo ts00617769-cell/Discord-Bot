@@ -15,7 +15,12 @@ from services.error_handler import (
     parse_env_channel_ids,
     parse_env_float,
 )
-from services.exp_snapshots import EXP_HISTORY_INSERT_SQL, players_to_insert_batch
+from services.exp_snapshots import (
+    EXP_HISTORY_INSERT_SQL,
+    PLAYER_PROFILE_UPSERT_SQL,
+    players_to_insert_batch,
+    profiles_from_insert_batch,
+)
 from services.exp_speed import (
     collect_overspeed,
     pick_interval_baseline,
@@ -198,6 +203,11 @@ class ExpTracker(commands.Cog):
                         await self.bot.db.executemany(
                             EXP_HISTORY_INSERT_SQL, insert_batch
                         )
+                        profile_batch = profiles_from_insert_batch(insert_batch)
+                        if profile_batch:
+                            await self.bot.db.executemany(
+                                PLAYER_PROFILE_UPSERT_SQL, profile_batch
+                            )
                         await self.bot.db.commit()
 
                     # 總榜成功且人數達標才算完整服；薄名冊仍寫入但不計入轉服門檻

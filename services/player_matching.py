@@ -4,15 +4,20 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Optional
 
-# 履歷聚合 SELECT（fetch profile 用）
+# 履歷聚合 SELECT（fetch profile 用；職業來自 player_profile，避免相關子查詢）
 PROFILE_SELECT = """
     e.player_name, e.server_name,
     MAX(e.level), MIN(e.record_time), MAX(e.record_time),
     MIN(e.exp), MAX(e.exp),
-    (SELECT e2.class_name FROM exp_history e2
-     WHERE e2.player_name = e.player_name AND e2.server_name = e.server_name
-     ORDER BY e2.record_time DESC LIMIT 1) AS class_name,
+    COALESCE(MAX(pp.class_name), '未知') AS class_name,
     MAX(e.subjugation_grade)
+"""
+
+PROFILE_FROM = """
+    FROM exp_history e
+    LEFT JOIN player_profile pp
+      ON pp.player_name = e.player_name
+     AND pp.server_name = e.server_name
 """
 
 # 無縫查詢共用 CTE：hit 粗篩 + prof 完整履歷聚合；fwd/back/near 只差 WHERE
@@ -31,21 +36,20 @@ PROFILE_CTE = """
                MIN(e.exp) AS min_exp,
                MAX(e.exp) AS max_exp,
                MAX(e.subjugation_grade) AS sub_grade,
-               (SELECT e2.class_name FROM exp_history e2
-                WHERE e2.player_name = e.player_name
-                  AND e2.server_name = e.server_name
-                ORDER BY e2.record_time DESC LIMIT 1) AS cls
+               COALESCE(MAX(pp.class_name), '未知') AS cls
         FROM exp_history e
         INNER JOIN hit
           ON hit.player_name = e.player_name
          AND hit.server_name = e.server_name
+        LEFT JOIN player_profile pp
+          ON pp.player_name = e.player_name
+         AND pp.server_name = e.server_name
         GROUP BY e.player_name, e.server_name
     )
     SELECT player_name, server_name, lvl, cls,
            first_seen, last_seen, min_exp, max_exp, sub_grade
     FROM prof
 """
-
 
 def is_unknown_class(cls_name: Optional[str]) -> bool:
     return cls_name in (None, "", "None", "未知")

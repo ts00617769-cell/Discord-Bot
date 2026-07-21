@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -101,6 +101,21 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        4,
+        "player_profile for search class lookup",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS player_profile (
+                player_name TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                class_name TEXT NOT NULL DEFAULT '未知',
+                updated_at TIMESTAMP,
+                PRIMARY KEY (player_name, server_name)
+            )
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -170,6 +185,7 @@ async def _set_schema_version(db, version: int) -> None:
 _PRAGMA_TABLE_ALLOWLIST = frozenset(
     {
         "exp_history",
+        "player_profile",
         "member_registry",
         "transfer_alerts_log",
         "bot_settings",
@@ -325,3 +341,37 @@ async def ensure_search_indexes(
         except sqlite3.DatabaseError as e:
             logger.warning(f"⚠️ 無法建立索引 {name}: {e}")
     return created
+
+
+def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
+    """離線重建 player_profile（每人每服取最新一筆職業）。回傳寫入列數。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS player_profile (
+            player_name TEXT NOT NULL,
+            server_name TEXT NOT NULL,
+            class_name TEXT NOT NULL DEFAULT '未知',
+            updated_at TIMESTAMP,
+            PRIMARY KEY (player_name, server_name)
+        )
+        """
+    )
+    conn.execute("DELETE FROM player_profile")
+    conn.execute(
+        """
+        INSERT INTO player_profile (player_name, server_name, class_name, updated_at)
+        SELECT player_name, server_name, class_name, record_time
+        FROM (
+            SELECT player_name, server_name, class_name, record_time,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY player_name, server_name
+                       ORDER BY record_time DESC
+                   ) AS rn
+            FROM exp_history
+        )
+        WHERE rn = 1
+        """
+    )
+    conn.commit()
+    row = conn.execute("SELECT COUNT(*) FROM player_profile").fetchone()
+    return int(row[0]) if row and row[0] is not None else 0

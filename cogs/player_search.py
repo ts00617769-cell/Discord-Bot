@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 import traceback
 from collections import deque
 
@@ -21,6 +22,14 @@ from services.player_search_db import PlayerSearchStore
 from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
+
+# 同名短時間內快取完整回覆內容，避免連點重算
+_SEARCH_RESULT_TTL_SEC = 180.0
+_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
+
+BFS_LIMIT = 15
+BFS_IDLE_STOP = 3  # 連續幾 hop 沒擴出新 high 就停
+PROGRESS_EVERY = 10
 
 
 class PlayerSearch(commands.Cog):
@@ -172,6 +181,16 @@ class PlayerSearch(commands.Cog):
 
         try:
             async with ctx.typing():
+                cache_key = target_name.casefold()
+                cached = _SEARCH_CACHE.get(cache_key)
+                if cached and (time.monotonic() - cached[0]) < _SEARCH_RESULT_TTL_SEC:
+                    payload = cached[1]
+                    if payload.get("kind") == "embeds":
+                        await self._deliver_embeds(ctx, processing_msg, payload["embeds"])
+                        return
+                    if payload.get("kind") == "text":
+                        return await processing_msg.edit(content=payload["content"])
+
                 related_names = await self._get_related_names(target_name)
                 target_profiles = await self._fetch_profiles_by_names(related_names)
 
@@ -188,14 +207,14 @@ class PlayerSearch(commands.Cog):
 
                 async def add_to_queue(
                     p_name, p_server, m_type, d_text, e_val, profile=None, confidence="high"
-                ):
+                ) -> bool:
                     if (p_name, p_server) in seen_profiles:
-                        return
+                        return False
                     seen_profiles.add((p_name, p_server))
                     if profile is None:
                         profile = await self._fetch_single_profile(p_name, p_server)
                     if not profile:
-                        return
+                        return False
                     queue.append({
                         "profile": profile,
                         "match_type": m_type,
@@ -203,13 +222,15 @@ class PlayerSearch(commands.Cog):
                         "exp_val": e_val,
                         "confidence": confidence,
                     })
+                    return True
 
                 for tp in target_profiles:
                     label = "🎯 查詢目標" if tp[0] == target_name else "🏷️ 登錄別名"
                     await add_to_queue(tp[0], tp[1], label, "", tp[6], profile=tp)
 
-                bfs_limit = 30
+                bfs_limit = BFS_LIMIT
                 hops = 0
+                idle_hops = 0
 
                 while queue and hops < bfs_limit:
                     current = queue.popleft()
@@ -226,7 +247,7 @@ class PlayerSearch(commands.Cog):
                         "confidence": current.get("confidence", "high"),
                     })
 
-                    if hops == 0 or hops % 5 == 0:
+                    if hops == 0 or hops % PROGRESS_EVERY == 0:
                         try:
                             await processing_msg.edit(
                                 content=(
@@ -250,19 +271,21 @@ class PlayerSearch(commands.Cog):
                     if t_max_exp not in anchors:
                         anchors.append(t_max_exp)
 
+                    exact_added = False
                     if anchors:
                         placeholders = ",".join("?" for _ in anchors)
                         sql_exact = f'''
-                            SELECT exp, player_name, server_name, MAX(level),
-                                   (SELECT e2.class_name FROM exp_history e2
-                                    WHERE e2.player_name = exp_history.player_name
-                                      AND e2.server_name = exp_history.server_name
-                                    ORDER BY e2.record_time DESC LIMIT 1),
-                                   MIN(record_time), MAX(record_time), MAX(subjugation_grade)
-                            FROM exp_history
-                            WHERE exp IN ({placeholders})
-                              AND NOT (player_name = ? AND server_name = ?)
-                            GROUP BY exp, player_name, server_name
+                            SELECT e.exp, e.player_name, e.server_name, MAX(e.level),
+                                   COALESCE(MAX(pp.class_name), '未知'),
+                                   MIN(e.record_time), MAX(e.record_time),
+                                   MAX(e.subjugation_grade)
+                            FROM exp_history e
+                            LEFT JOIN player_profile pp
+                              ON pp.player_name = e.player_name
+                             AND pp.server_name = e.server_name
+                            WHERE e.exp IN ({placeholders})
+                              AND NOT (e.player_name = ? AND e.server_name = ?)
+                            GROUP BY e.exp, e.player_name, e.server_name
                             LIMIT 30
                         '''
                         async with self.bot.db.execute(
@@ -306,14 +329,15 @@ class PlayerSearch(commands.Cog):
                                     if x
                                 ]
                                 note = f"（{'・'.join(notes)}）" if notes else ""
-                                await add_to_queue(
+                                if await add_to_queue(
                                     p_name,
                                     s_name,
                                     f"🔄 絕對經驗值碰撞（疑似轉職）{note}",
                                     "EXP 完全一致・職業已變更",
                                     exp,
                                     confidence="high",
-                                )
+                                ):
+                                    exact_added = True
                                 continue
 
                             # 同職／異職：領域轉移後延遲登入（消失數日才上新服榜）
@@ -324,14 +348,15 @@ class PlayerSearch(commands.Cog):
                                 exact_exp=True,
                             )
                             if delayed and class_ok:
-                                await add_to_queue(
+                                if await add_to_queue(
                                     p_name,
                                     s_name,
                                     f"✈️ 絕對經驗值碰撞（{delayed}・延遲登入）",
                                     f"EXP 完全一致（觀測間隔 {obs_gap/24:.1f} 天）",
                                     exp,
                                     confidence="high",
-                                )
+                                ):
+                                    exact_added = True
                                 continue
 
                             if obs_gap > 30 * 24 or not class_ok:
@@ -369,22 +394,33 @@ class PlayerSearch(commands.Cog):
                                     "confidence": "medium",
                                 })
                                 continue
-                            await add_to_queue(
+                            if await add_to_queue(
                                 p_name, s_name, "🔗 絕對經驗值碰撞", "EXP 完全一致", exp,
                                 confidence="high",
-                            )
+                            ):
+                                exact_added = True
 
-                    seamless = await self._find_seamless_candidates(
-                        profile, EXP_MARGIN, window_days=30, limit=5
-                    )
-                    for cand in seamless:
-                        soft_candidates.append(cand)
-                        if cand["confidence"] == "high":
-                            await add_to_queue(
-                                cand["name"], cand["server"], cand["match_type"],
-                                cand["diff_text"], cand["exp_val"], confidence="high",
-                            )
+                    hop_added = exact_added
+                    # Exact 已擴出 high 時略過 seamless，大幅減少重 CTE
+                    if not exact_added:
+                        seamless = await self._find_seamless_candidates(
+                            profile, EXP_MARGIN, window_days=30, limit=5
+                        )
+                        for cand in seamless:
+                            soft_candidates.append(cand)
+                            if cand["confidence"] == "high":
+                                if await add_to_queue(
+                                    cand["name"], cand["server"], cand["match_type"],
+                                    cand["diff_text"], cand["exp_val"], confidence="high",
+                                ):
+                                    hop_added = True
                     hops += 1
+                    if hop_added:
+                        idle_hops = 0
+                    else:
+                        idle_hops += 1
+                        if idle_hops >= BFS_IDLE_STOP:
+                            break
 
                 unique_entries = []
                 seen = set()
@@ -422,6 +458,10 @@ class PlayerSearch(commands.Cog):
                             footer="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度",
                             show_confidence=True,
                         )
+                        _SEARCH_CACHE[cache_key] = (
+                            time.monotonic(),
+                            {"kind": "embeds", "embeds": embeds},
+                        )
                         await self._deliver_embeds(ctx, processing_msg, embeds)
                         return
 
@@ -429,21 +469,28 @@ class PlayerSearch(commands.Cog):
                         tip = ""
                         if any(p[0] == target_name for p in target_profiles):
                             tip = "\n（若目標仍持續出現在原服榜上，可能尚未轉服/改名。）"
-                        return await processing_msg.edit(
-                            content=(
-                                f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n"
-                                f"雙引擎未找到符合條件的轉服/改名軌跡。{tip}\n"
-                                f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
-                            )
+                        content = (
+                            f"⚠️ 目標最後紀錄為 {target_last_exp/1000000000000:.2f} 兆。\n"
+                            f"雙引擎未找到符合條件的轉服/改名軌跡。{tip}\n"
+                            f"提示：可用 `!尋人回報 {target_name} 前身名` 手動標記後再查。"
                         )
+                        _SEARCH_CACHE[cache_key] = (
+                            time.monotonic(),
+                            {"kind": "text", "content": content},
+                        )
+                        return await processing_msg.edit(content=content)
 
                 embeds = self._build_track_embeds(
                     target_name,
                     unique_entries,
                     header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
-                    title=f"👁️ 天眼追蹤系統 (V5.4) - {target_name}",
+                    title=f"👁️ 天眼追蹤系統 (V5.5) - {target_name}",
                     color=0xff0000,
-                    footer="V5.4：轉職／轉移延遲登入・早期 EXP 錨點・公告視窗",
+                    footer="V5.5：early-stop・lazy seamless・player_profile",
+                )
+                _SEARCH_CACHE[cache_key] = (
+                    time.monotonic(),
+                    {"kind": "embeds", "embeds": embeds},
                 )
                 await self._deliver_embeds(ctx, processing_msg, embeds)
 
@@ -591,18 +638,18 @@ class PlayerSearch(commands.Cog):
 
             async with self.bot.db.execute(
                 f'''
-                SELECT exp, player_name, server_name,
-                       MIN(record_time), MAX(record_time),
-                       MAX(level),
-                       (SELECT e2.class_name FROM exp_history e2
-                        WHERE e2.player_name = exp_history.player_name
-                          AND e2.server_name = exp_history.server_name
-                        ORDER BY e2.record_time DESC LIMIT 1),
-                       MAX(subjugation_grade)
-                FROM exp_history
-                WHERE exp IN ({placeholders})
-                GROUP BY exp, player_name, server_name
-                ORDER BY exp DESC, MIN(record_time) ASC
+                SELECT e.exp, e.player_name, e.server_name,
+                       MIN(e.record_time), MAX(e.record_time),
+                       MAX(e.level),
+                       COALESCE(MAX(pp.class_name), '未知'),
+                       MAX(e.subjugation_grade)
+                FROM exp_history e
+                LEFT JOIN player_profile pp
+                  ON pp.player_name = e.player_name
+                 AND pp.server_name = e.server_name
+                WHERE e.exp IN ({placeholders})
+                GROUP BY e.exp, e.player_name, e.server_name
+                ORDER BY e.exp DESC, MIN(e.record_time) ASC
                 ''',
                 tuple(exp_list),
             ) as cursor:

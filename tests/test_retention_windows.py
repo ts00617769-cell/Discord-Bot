@@ -5,6 +5,7 @@ from services.retention_windows import (
     build_search_keep_ranges,
     exp_history_outside_keep_sql,
     merge_ranges,
+    select_recent_transfer_windows,
 )
 
 
@@ -31,6 +32,7 @@ def test_transfer_pad_after_only():
     ranges = build_search_keep_ranges(
         recent_days=0,
         pad_days=5,
+        max_transfer_windows=3,
         now=datetime(2026, 6, 7, 23, 59, 59),
         transfer_windows=windows,
     )
@@ -40,20 +42,21 @@ def test_transfer_pad_after_only():
 
 
 def test_defaults_transfer_and_recent_may_gap():
-    """預設 轉移後5 / 近7：第27次與最近區間中間可能留空洞。"""
+    """預設 轉移後5 / 近3：第27次與最近區間中間可能留空洞。"""
     windows = [
         ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ]
-    # transfer: 07-01 12:00 ~ 07-10 23:59；recent7 from 07-21 04:00 → 07-14 04:00
+    # transfer: 07-01 12:00 ~ 07-10 23:59；recent3 from 07-21 04:00 → 07-18 04:00
     ranges = build_search_keep_ranges(
-        recent_days=7,
+        recent_days=3,
         pad_days=5,
+        max_transfer_windows=3,
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
     assert ranges == [
         ("2026-07-01 12:00:00", "2026-07-10 23:59:59"),
-        ("2026-07-14 04:00:00", "2026-07-21 04:00:00"),
+        ("2026-07-18 04:00:00", "2026-07-21 04:00:00"),
     ]
 
 
@@ -65,12 +68,40 @@ def test_recent_and_transfer_merge_when_overlap():
     ranges = build_search_keep_ranges(
         recent_days=14,
         pad_days=10,
+        max_transfer_windows=3,
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
     assert len(ranges) == 1
     assert ranges[0][0] == "2026-07-01 12:00:00"
     assert ranges[0][1] == "2026-07-21 04:00:00"
+
+
+def test_only_last_n_transfer_windows():
+    windows = [
+        ("2026-05-06 12:00:00", "2026-05-10 23:59:59", "第25次"),
+        ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次"),
+        ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次"),
+        ("2026-04-01 12:00:00", "2026-04-05 23:59:59", "第24次"),
+    ]
+    selected = select_recent_transfer_windows(
+        windows, max_windows=3, now=datetime(2026, 7, 21, 4, 0, 0)
+    )
+    labels = [w[2] for w in selected]
+    assert labels == ["第27次", "第26次", "第25次"]
+
+    ranges = build_search_keep_ranges(
+        recent_days=0,
+        pad_days=0,
+        max_transfer_windows=3,
+        now=datetime(2026, 7, 21, 4, 0, 0),
+        transfer_windows=windows,
+    )
+    assert ranges == [
+        ("2026-05-06 12:00:00", "2026-05-10 23:59:59"),
+        ("2026-06-03 12:00:00", "2026-06-07 23:59:59"),
+        ("2026-07-01 12:00:00", "2026-07-05 23:59:59"),
+    ]
 
 
 def test_outside_keep_sql_params_match_ranges():
