@@ -11,6 +11,7 @@ venv/
 *.pyc
 _boot_out.txt
 _q_out2.txt
+_tmp_events/
 
 # Google Sheets API 服務帳號金鑰
 service_account.json
