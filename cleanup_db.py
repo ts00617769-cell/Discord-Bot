@@ -7,6 +7,8 @@
   python cleanup_db.py
   python cleanup_db.py --days 60
   python cleanup_db.py --days 30 --dry-run
+  python cleanup_db.py --for-search
+  python cleanup_db.py --for-search --dry-run
   python cleanup_db.py --wipe-history
 """
 
@@ -29,12 +31,18 @@ if str(ROOT) not in sys.path:
 from dotenv import load_dotenv  # noqa: E402
 
 from db.connection import resolve_db_path  # noqa: E402
-from services.timeutil import taipei_cutoff_str  # noqa: E402
+from services.retention_windows import (  # noqa: E402
+    DEFAULT_RECENT_DAYS,
+    DEFAULT_TRANSFER_PAD_DAYS,
+    build_search_keep_ranges,
+    exp_history_outside_keep_sql,
+)
 from services.settings_prune import (  # noqa: E402
     PRUNE_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
+from services.timeutil import taipei_cutoff_str  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
@@ -86,6 +94,14 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
 def main() -> int:
     default_db = resolve_db_path(ROOT)
     parser = argparse.ArgumentParser(description="離線清理 prasia_data.db")
@@ -99,12 +115,29 @@ def main() -> int:
         "--days",
         type=int,
         default=DEFAULT_DAYS,
-        help=f"保留天數（預設 {DEFAULT_DAYS}）",
+        help=f"保留天數（預設 {DEFAULT_DAYS}；與 --for-search 互斥）",
+    )
+    parser.add_argument(
+        "--for-search",
+        action="store_true",
+        help="尋人導向：保留最近 N 天 ∪ 領域轉移窗起至結束後 pad 天，其餘刪除",
+    )
+    parser.add_argument(
+        "--recent-days",
+        type=int,
+        default=DEFAULT_RECENT_DAYS,
+        help=f"--for-search 時保留最近天數（預設 {DEFAULT_RECENT_DAYS}）",
+    )
+    parser.add_argument(
+        "--transfer-pad-days",
+        type=int,
+        default=DEFAULT_TRANSFER_PAD_DAYS,
+        help=f"--for-search 時領域轉移結束後再保留天數（預設 {DEFAULT_TRANSFER_PAD_DAYS}）",
     )
     parser.add_argument(
         "--wipe-history",
         action="store_true",
-        help="清空整張 exp_history 與 transfer_alerts_log（忽略 --days）",
+        help="清空整張 exp_history 與 transfer_alerts_log（忽略 --days / --for-search）",
     )
     parser.add_argument(
         "--dry-run",
@@ -123,8 +156,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.days < 1 and not args.wipe_history:
-        print("錯誤：--days 必須 >= 1（或改用 --wipe-history）", file=sys.stderr)
+    if args.wipe_history and args.for_search:
+        print("錯誤：--wipe-history 與 --for-search 不可同時使用", file=sys.stderr)
+        return 2
+    if args.for_search:
+        if args.recent_days < 0:
+            print("錯誤：--recent-days 必須 >= 0", file=sys.stderr)
+            return 2
+        if args.transfer_pad_days < 0:
+            print("錯誤：--transfer-pad-days 必須 >= 0", file=sys.stderr)
+            return 2
+    elif args.days < 1 and not args.wipe_history:
+        print("錯誤：--days 必須 >= 1（或改用 --wipe-history / --for-search）", file=sys.stderr)
         return 2
 
     db_path: Path = args.db if args.db is not None else default_db
@@ -151,56 +194,135 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path), timeout=30)
     try:
         conn.execute("PRAGMA busy_timeout=30000")
-        exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history")
-        transfer_total = _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log")
+        has_exp = _table_exists(conn, "exp_history")
+        has_transfer = _table_exists(conn, "transfer_alerts_log")
+        has_settings = _table_exists(conn, "bot_settings")
+
+        exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
+        transfer_total = (
+            _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log") if has_transfer else 0
+        )
+
+        keep_ranges: list[tuple[str, str]] = []
+        exp_delete_sql = ""
+        exp_delete_params: tuple[str, ...] = ()
+        settings_cutoff: str | None = None
 
         if args.wipe_history:
             exp_stale = exp_total
             transfer_stale = transfer_total
-            settings_stale = _count(
-                conn,
-                """
-                SELECT COUNT(*) FROM bot_settings
-                WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
-                """,
+            settings_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM bot_settings
+                    WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+                    """,
+                )
+                if has_settings
+                else 0
             )
             mode = "清空全部歷史"
+        elif args.for_search:
+            keep_ranges = build_search_keep_ranges(
+                recent_days=args.recent_days,
+                pad_days=args.transfer_pad_days,
+            )
+            count_sql, count_params = exp_history_outside_keep_sql(keep_ranges)
+            exp_delete_sql, exp_delete_params = exp_history_outside_keep_sql(
+                keep_ranges, for_delete=True
+            )
+            exp_stale = _count(conn, count_sql, count_params) if has_exp else 0
+            # transfer / settings：與「最近 N 天」對齊
+            settings_cutoff = taipei_cutoff_str(args.recent_days)
+            transfer_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM transfer_alerts_log
+                    WHERE alert_time < ?
+                    """,
+                    (settings_cutoff,),
+                )
+                if has_transfer
+                else 0
+            )
+            settings_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM bot_settings
+                    WHERE (key LIKE 'overspeed:%' AND key < ?)
+                       OR (key LIKE 'boss_reminder:%' AND key < ?)
+                    """,
+                    (
+                        overspeed_prune_bound(settings_cutoff),
+                        boss_reminder_prune_bound(settings_cutoff[:10]),
+                    ),
+                )
+                if has_settings
+                else 0
+            )
+            mode = (
+                f"尋人導向（最近 {args.recent_days} 天 ∪ "
+                f"領域轉移結束後+{args.transfer_pad_days} 天）"
+            )
         else:
             cutoff = taipei_cutoff_str(args.days)
-            exp_stale = _count(
-                conn,
-                """
-                SELECT COUNT(*) FROM exp_history
-                WHERE record_time < ?
-                """,
-                (cutoff,),
+            settings_cutoff = cutoff
+            exp_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM exp_history
+                    WHERE record_time < ?
+                    """,
+                    (cutoff,),
+                )
+                if has_exp
+                else 0
             )
-            transfer_stale = _count(
-                conn,
-                """
-                SELECT COUNT(*) FROM transfer_alerts_log
-                WHERE alert_time < ?
-                """,
-                (cutoff,),
+            transfer_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM transfer_alerts_log
+                    WHERE alert_time < ?
+                    """,
+                    (cutoff,),
+                )
+                if has_transfer
+                else 0
             )
-            settings_stale = _count(
-                conn,
-                """
-                SELECT COUNT(*) FROM bot_settings
-                WHERE (key LIKE 'overspeed:%' AND key < ?)
-                   OR (key LIKE 'boss_reminder:%' AND key < ?)
-                """,
-                (
-                    overspeed_prune_bound(cutoff),
-                    boss_reminder_prune_bound(cutoff[:10]),
-                ),
+            settings_stale = (
+                _count(
+                    conn,
+                    """
+                    SELECT COUNT(*) FROM bot_settings
+                    WHERE (key LIKE 'overspeed:%' AND key < ?)
+                       OR (key LIKE 'boss_reminder:%' AND key < ?)
+                    """,
+                    (
+                        overspeed_prune_bound(cutoff),
+                        boss_reminder_prune_bound(cutoff[:10]),
+                    ),
+                )
+                if has_settings
+                else 0
             )
             mode = f"保留最近 {args.days} 天（截止 {cutoff} 台北）"
 
         print(f"模式：{mode}")
+        if keep_ranges:
+            print("保留區間：")
+            for start, end in keep_ranges:
+                print(f"  {start}  ~  {end}")
         print(f"exp_history：共 {exp_total:,} 筆，將刪 {exp_stale:,} 筆")
         print(f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆")
-        print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
+        if has_settings:
+            print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
+        else:
+            print("bot_settings：表不存在，略過")
 
         if args.dry_run:
             print("dry-run：未修改資料庫。")
@@ -210,38 +332,67 @@ def main() -> int:
             print("沒有可刪資料，略過。")
             return 0
 
+        deleted_exp = 0
+        deleted_transfer = 0
+        deleted_settings = 0
         if args.wipe_history:
-            deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
-            deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
-            deleted_settings = conn.execute(
-                """
-                DELETE FROM bot_settings
-                WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
-                """
-            ).rowcount
+            if has_exp:
+                deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
+            if has_transfer:
+                deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
+            if has_settings:
+                deleted_settings = conn.execute(
+                    """
+                    DELETE FROM bot_settings
+                    WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+                    """
+                ).rowcount
+        elif args.for_search:
+            if has_exp and exp_delete_sql:
+                deleted_exp = conn.execute(exp_delete_sql, exp_delete_params).rowcount
+            assert settings_cutoff is not None
+            if has_transfer:
+                deleted_transfer = conn.execute(
+                    """
+                    DELETE FROM transfer_alerts_log
+                    WHERE alert_time < ?
+                    """,
+                    (settings_cutoff,),
+                ).rowcount
+            if has_settings:
+                deleted_settings = conn.execute(
+                    PRUNE_DEDUPE_SQL,
+                    (
+                        overspeed_prune_bound(settings_cutoff),
+                        boss_reminder_prune_bound(settings_cutoff[:10]),
+                    ),
+                ).rowcount
         else:
             cutoff = taipei_cutoff_str(args.days)
-            deleted_exp = conn.execute(
-                """
-                DELETE FROM exp_history
-                WHERE record_time < ?
-                """,
-                (cutoff,),
-            ).rowcount
-            deleted_transfer = conn.execute(
-                """
-                DELETE FROM transfer_alerts_log
-                WHERE alert_time < ?
-                """,
-                (cutoff,),
-            ).rowcount
-            deleted_settings = conn.execute(
-                PRUNE_DEDUPE_SQL,
-                (
-                    overspeed_prune_bound(cutoff),
-                    boss_reminder_prune_bound(cutoff[:10]),
-                ),
-            ).rowcount
+            if has_exp:
+                deleted_exp = conn.execute(
+                    """
+                    DELETE FROM exp_history
+                    WHERE record_time < ?
+                    """,
+                    (cutoff,),
+                ).rowcount
+            if has_transfer:
+                deleted_transfer = conn.execute(
+                    """
+                    DELETE FROM transfer_alerts_log
+                    WHERE alert_time < ?
+                    """,
+                    (cutoff,),
+                ).rowcount
+            if has_settings:
+                deleted_settings = conn.execute(
+                    PRUNE_DEDUPE_SQL,
+                    (
+                        overspeed_prune_bound(cutoff),
+                        boss_reminder_prune_bound(cutoff[:10]),
+                    ),
+                ).rowcount
 
         conn.commit()
         print(

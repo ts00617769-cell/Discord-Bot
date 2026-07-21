@@ -74,7 +74,7 @@ ruff check .
 
 ## 指令一覽
 
-前綴皆為 `!`。遊戲內可用 `!指令`／`!機密指令` 查看。
+前綴皆為 `!`；`尋人`／`排名`／`測速` 另支援 hybrid slash。遊戲內可用 `!指令`／`!機密指令` 查看。
 
 ### 公開（任何頻道）
 
@@ -154,6 +154,8 @@ ruff check .
 ```bash
 python cleanup_db.py
 python cleanup_db.py --days 30 --dry-run
+python cleanup_db.py --for-search --dry-run   # 尋人導向：近7天 ∪ 領域轉移窗～結束後5天
+python cleanup_db.py --for-search             # 實際刪除並 VACUUM
 python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 ```
 
@@ -170,9 +172,10 @@ python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 ```bash
 pytest -q
 ruff check .
+python -X utf8 -m mypy services db
 ```
 
-推送／PR 會跑 GitHub Actions：本機同款 `ruff` + `pytest`（不連 Discord／beanfun）。
+推送／PR 會跑 GitHub Actions：本機同款 `ruff` + `pytest` + `mypy`（不連 Discord／beanfun）。
 
 ---
 
