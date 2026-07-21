@@ -81,15 +81,18 @@ def _file_size(path: Path) -> int:
         return 0
 
 
-def _bot_appears_running() -> bool:
-    """Best-effort：.bot.lock 存在且內容是數字 PID 時視為可能仍在跑。"""
-    if not LOCK_PATH.exists():
-        return False
+def _pid_cmdline(pid: int) -> str:
+    """讀取 Linux /proc 指令列；失敗回空字串。"""
     try:
-        raw = LOCK_PATH.read_text(encoding="utf-8").strip()
-        if not raw.isdigit():
-            return False
-        pid = int(raw)
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def _pid_looks_like_bot(pid: int) -> bool:
+    """PID 存活且指令列像本專案 bot（避免 Docker 容器 PID 撞上 host 無關行程）。"""
+    try:
         if sys.platform == "win32":
             import ctypes
 
@@ -97,13 +100,68 @@ def _bot_appears_running() -> bool:
             handle = ctypes.windll.kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            # Windows 難可靠讀 cmdline；有行程就算可疑，交由 --force 覆寫
+            return True
         os.kill(pid, 0)
-        return True
-    except (OSError, ValueError, PermissionError):
+    except OSError:
+        return False
+    cmd = _pid_cmdline(pid).lower()
+    if not cmd:
+        return False
+    markers = ("bot.py", "dc_bot", "prasia", "discord")
+    return any(m in cmd for m in markers)
+
+
+def _bot_appears_running() -> bool:
+    """是否真有 bot 佔用 .bot.lock。
+
+    優先試 OS 檔案鎖（與 bot.py 相同）：容器已停時 flock 會釋放，
+    即使殘留 PID 文字也不應擋清理。PID 檢查僅作備援，且須像本 bot。
+    """
+    if not LOCK_PATH.exists():
+        return False
+
+    try:
+        with open(LOCK_PATH, "a+", encoding="utf-8") as fp:
+            if sys.platform == "win32":
+                import msvcrt
+
+                fp.seek(0)
+                try:
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    return True
+                try:
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                return False
+
+            import fcntl
+
+            try:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            try:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            # 鎖得下來＝沒人佔用；殘留 PID 視為過期
+            return False
+    except OSError:
+        pass
+
+    # flock 不可用時才看 PID
+    try:
+        raw = LOCK_PATH.read_text(encoding="utf-8").strip()
+        if not raw.isdigit():
+            return False
+        return _pid_looks_like_bot(int(raw))
+    except (OSError, ValueError):
         return False
 
 
@@ -221,8 +279,9 @@ def main() -> int:
 
     if _bot_appears_running() and not args.force:
         print(
-            f"錯誤：偵測到 bot 可能仍在執行（{LOCK_PATH.name}）。\n"
-            "請先停止 bot，或確認已停後加 --force。",
+            f"錯誤：偵測到 bot 仍佔用 {LOCK_PATH.name}（檔案鎖）。\n"
+            "請先在 Docker 停止 prasia-bot-final，或確認已停後加 --force。\n"
+            "（若容器已停仍出現此訊息，多半是舊版誤判殘留 PID；請 git pull 後重試。）",
             file=sys.stderr,
         )
         return 1
