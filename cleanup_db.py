@@ -28,9 +28,6 @@ DEFAULT_DAYS = 60
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dotenv import load_dotenv  # noqa: E402
-
-from db.connection import resolve_db_path  # noqa: E402
 from services.retention_windows import (  # noqa: E402
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
@@ -44,7 +41,21 @@ from services.settings_prune import (  # noqa: E402
 )
 from services.timeutil import taipei_cutoff_str  # noqa: E402
 
-load_dotenv(ROOT / ".env")
+try:
+    from dotenv import load_dotenv
+except ImportError:  # NAS host 等未裝依賴時仍可離線清理
+    load_dotenv = None  # type: ignore[assignment]
+else:
+    load_dotenv(ROOT / ".env")
+
+
+def resolve_db_path(base_dir: Path | None = None) -> Path:
+    """與 db.connection.resolve_db_path 相同，避免為清理腳本拉入 aiosqlite。"""
+    env = (os.getenv("DB_PATH") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    root = base_dir if base_dir is not None else ROOT
+    return (root / "prasia_data.db").resolve()
 
 
 def _fmt_bytes(n: int) -> str:
