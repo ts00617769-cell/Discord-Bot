@@ -25,37 +25,37 @@ def test_merge_ranges_overlaps_and_adjacent():
 
 
 def test_transfer_pad_after_only():
-    """只留窗開始～結束後 pad，不含轉移前。"""
+    """只留窗開始～結束後 pad，不含轉移前（延遲登入緩衝）。"""
     windows = [
         ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次領域轉移"),
     ]
     ranges = build_search_keep_ranges(
         recent_days=0,
-        pad_days=5,
+        pad_days=3,
         max_transfer_windows=3,
         now=datetime(2026, 6, 7, 23, 59, 59),
         transfer_windows=windows,
     )
     assert ranges == [
-        ("2026-06-03 12:00:00", "2026-06-12 23:59:59"),
+        ("2026-06-03 12:00:00", "2026-06-10 23:59:59"),
     ]
 
 
 def test_defaults_transfer_and_recent_may_gap():
-    """預設 轉移後5 / 近3：第27次與最近區間中間可能留空洞。"""
+    """預設 轉移後+3 / 近3：第27次與最近區間中間可能留空洞。"""
     windows = [
         ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ]
-    # transfer: 07-01 12:00 ~ 07-10 23:59；recent3 from 07-21 04:00 → 07-18 04:00
+    # transfer: 07-01 12:00 ~ 07-08 23:59；recent3 from 07-21 04:00 → 07-18 04:00
     ranges = build_search_keep_ranges(
         recent_days=3,
-        pad_days=5,
+        pad_days=3,
         max_transfer_windows=3,
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
     assert ranges == [
-        ("2026-07-01 12:00:00", "2026-07-10 23:59:59"),
+        ("2026-07-01 12:00:00", "2026-07-08 23:59:59"),
         ("2026-07-18 04:00:00", "2026-07-21 04:00:00"),
     ]
 

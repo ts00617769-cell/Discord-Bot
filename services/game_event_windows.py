@@ -39,7 +39,7 @@ CLASS_CHANGE_WINDOWS: list[tuple[str, str, str]] = [
 ]
 
 # 轉移後延遲登入寬限：窗結束後仍可能隔 N 天才首次出現在新服榜
-TRANSFER_LOGIN_GRACE_DAYS = 5
+TRANSFER_LOGIN_GRACE_DAYS = 3
 # 舊服最後上榜可略早於窗開始（申請前仍短暫留在榜上）
 TRANSFER_DISAPPEAR_PRE_HOURS = 24
 

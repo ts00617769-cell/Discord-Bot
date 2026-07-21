@@ -154,7 +154,7 @@ ruff check .
 ```bash
 python cleanup_db.py
 python cleanup_db.py --days 30 --dry-run
-python cleanup_db.py --for-search --dry-run   # 尋人導向：近3天 ∪ 最近3次轉移窗～結束後5天
+python cleanup_db.py --for-search --dry-run   # 尋人導向：近3天 ∪ 最近3次轉移窗～結束後再+3天（延遲登入）
 python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引 + player_profile
 python cleanup_db.py --build-indexes          # 僅離線建索引（大庫啟動時會略過）
 python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
