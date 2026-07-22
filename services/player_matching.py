@@ -4,8 +4,22 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Optional
 
-# 履歷聚合 SELECT（fetch profile 用；職業來自 player_profile，避免相關子查詢）
+# 履歷讀取：優先 player_profile denorm（需已 backfill min/max／首末見）
 PROFILE_SELECT = """
+    pp.player_name, pp.server_name,
+    COALESCE(pp.max_level, 0),
+    pp.first_seen, pp.last_seen,
+    pp.min_exp, pp.max_exp,
+    COALESCE(pp.class_name, '未知') AS class_name,
+    pp.max_sub_grade
+"""
+
+PROFILE_FROM = """
+    FROM player_profile pp
+"""
+
+# 無 denorm 時回退：從 exp_history 聚合
+PROFILE_SELECT_AGG = """
     e.player_name, e.server_name,
     MAX(e.level), MIN(e.record_time), MAX(e.record_time),
     MIN(e.exp), MAX(e.exp),
@@ -13,14 +27,29 @@ PROFILE_SELECT = """
     MAX(e.subjugation_grade)
 """
 
-PROFILE_FROM = """
+PROFILE_FROM_AGG = """
     FROM exp_history e
     LEFT JOIN player_profile pp
       ON pp.player_name = e.player_name
      AND pp.server_name = e.server_name
 """
 
-# 無縫查詢共用 CTE：hit 粗篩 + prof 完整履歷聚合；fwd/back/near 只差 WHERE
+# 無縫候選：直接掃 denorm profile（避免 hit→重聚合 CTE）
+PROFILE_STATS_SELECT = """
+    SELECT player_name, server_name,
+           COALESCE(max_level, 0) AS lvl,
+           COALESCE(class_name, '未知') AS cls,
+           first_seen, last_seen, min_exp, max_exp,
+           max_sub_grade AS sub_grade
+    FROM player_profile
+    WHERE NOT (player_name = ? AND server_name = ?)
+      AND min_exp IS NOT NULL
+      AND max_exp IS NOT NULL
+      AND first_seen IS NOT NULL
+      AND last_seen IS NOT NULL
+"""
+
+# 舊路徑備援（denorm 未回填時）
 PROFILE_CTE = """
     WITH hit AS (
         SELECT DISTINCT player_name, server_name
@@ -50,6 +79,17 @@ PROFILE_CTE = """
            first_seen, last_seen, min_exp, max_exp, sub_grade
     FROM prof
 """
+
+# 分層 margin：先窄後寬，有 high 即停
+EXP_MARGIN_TIERS: tuple[float, ...] = (
+    1.0e8,  # 1 億
+    1.0e10,  # 100 億
+    1.0e12,  # 1 兆
+)
+
+SEARCH_TIMEOUT_SEC = 90.0
+QUERY_TIMEOUT_SEC = 30.0
+
 
 def is_unknown_class(cls_name: Optional[str]) -> bool:
     return cls_name in (None, "", "None", "未知")

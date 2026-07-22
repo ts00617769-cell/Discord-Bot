@@ -9,6 +9,7 @@ from db.schema import (
     build_search_indexes_sync,
     ensure_search_indexes,
     list_missing_search_indexes,
+    rebuild_player_profiles_sync,
 )
 
 
@@ -40,6 +41,12 @@ async def test_apply_migrations_fresh_db(tmp_path):
 
         assert "player_profile" in tables
 
+        async with db.execute("PRAGMA table_info(player_profile)") as cur:
+            pp_cols = {row[1] for row in await cur.fetchall()}
+        assert "min_exp" in pp_cols
+        assert "max_exp" in pp_cols
+        assert "first_seen" in pp_cols
+
         created = await ensure_search_indexes(db, skip_if_rows_above=1_000_000)
         assert "idx_exp" in created or created == []
         # 再跑一次應無新建
@@ -47,6 +54,40 @@ async def test_apply_migrations_fresh_db(tmp_path):
         assert created2 == []
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_player_profiles_fills_stats(tmp_path):
+    import aiosqlite
+    import sqlite3
+
+    db_path = tmp_path / "prof.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO exp_history
+            (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+            VALUES
+            ('2026-07-01 10:00:00', 'S1', 'A', 10, 100.0, '戰士', 1),
+            ('2026-07-02 10:00:00', 'S1', 'A', 11, 200.0, '法師', 2)
+            """
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        n = rebuild_player_profiles_sync(conn)
+        assert n == 1
+        row = conn.execute(
+            "SELECT class_name, min_exp, max_exp, max_level, max_sub_grade FROM player_profile"
+        ).fetchone()
+        assert row == ("法師", 100.0, 200.0, 11, 2)
+    finally:
+        conn.close()
 
 
 def test_build_search_indexes_sync(tmp_path):

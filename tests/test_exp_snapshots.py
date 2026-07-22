@@ -35,6 +35,9 @@ def test_players_to_insert_batch_skips_nameless():
     by_name = {p[0]: p for p in profiles}
     assert by_name["Hero"][2] == "太陽監視者"
     assert by_name["BadGrade"][2] == "未知"
+    assert len(by_name["Hero"]) == 10
+    assert by_name["Hero"][4] == 1e12  # min_exp
+    assert by_name["Hero"][5] == 1e12  # max_exp
 
 
 def test_pad_and_timeutil():

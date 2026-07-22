@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -116,6 +116,13 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        5,
+        "player_profile denorm stats + covering search indexes",
+        [
+            # 欄位以 _ensure_player_profile_columns 補齊（舊庫 ALTER）
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -141,6 +148,28 @@ _SEARCH_INDEXES: list[tuple[str, str]] = [
     (
         "idx_class_exp_time",
         "CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)",
+    ),
+    (
+        "idx_exp_player_server",
+        """
+        CREATE INDEX IF NOT EXISTS idx_exp_player_server
+        ON exp_history(exp, player_name, server_name)
+        """,
+    ),
+    (
+        "idx_player_server_time",
+        """
+        CREATE INDEX IF NOT EXISTS idx_player_server_time
+        ON exp_history(player_name, server_name, record_time)
+        """,
+    ),
+    (
+        "idx_profile_min_exp",
+        "CREATE INDEX IF NOT EXISTS idx_profile_min_exp ON player_profile(min_exp)",
+    ),
+    (
+        "idx_profile_max_exp",
+        "CREATE INDEX IF NOT EXISTS idx_profile_max_exp ON player_profile(max_exp)",
     ),
 ]
 
@@ -221,6 +250,67 @@ async def _ensure_exp_history_columns(db) -> None:
         )
 
 
+_PLAYER_PROFILE_STAT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("min_exp", "REAL"),
+    ("max_exp", "REAL"),
+    ("first_seen", "TIMESTAMP"),
+    ("last_seen", "TIMESTAMP"),
+    ("max_level", "INTEGER"),
+    ("max_sub_grade", "INTEGER"),
+)
+
+
+async def _ensure_player_profile_columns(db) -> None:
+    """確保 player_profile 存在且含 denorm 統計欄位。"""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS player_profile (
+            player_name TEXT NOT NULL,
+            server_name TEXT NOT NULL,
+            class_name TEXT NOT NULL DEFAULT '未知',
+            updated_at TIMESTAMP,
+            min_exp REAL,
+            max_exp REAL,
+            first_seen TIMESTAMP,
+            last_seen TIMESTAMP,
+            max_level INTEGER,
+            max_sub_grade INTEGER,
+            PRIMARY KEY (player_name, server_name)
+        )
+        """
+    )
+    cols = await _table_columns(db, "player_profile")
+    for name, decl in _PLAYER_PROFILE_STAT_COLUMNS:
+        if name not in cols:
+            await db.execute(f"ALTER TABLE player_profile ADD COLUMN {name} {decl}")
+
+
+def _ensure_player_profile_columns_sync(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS player_profile (
+            player_name TEXT NOT NULL,
+            server_name TEXT NOT NULL,
+            class_name TEXT NOT NULL DEFAULT '未知',
+            updated_at TIMESTAMP,
+            min_exp REAL,
+            max_exp REAL,
+            first_seen TIMESTAMP,
+            last_seen TIMESTAMP,
+            max_level INTEGER,
+            max_sub_grade INTEGER,
+            PRIMARY KEY (player_name, server_name)
+        )
+        """
+    )
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(player_profile)").fetchall()
+    }
+    for name, decl in _PLAYER_PROFILE_STAT_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE player_profile ADD COLUMN {name} {decl}")
+
+
 async def apply_migrations(db) -> int:
     """套用至 SCHEMA_VERSION；回傳套用後版本。"""
     current = await _get_schema_version(db)
@@ -234,6 +324,8 @@ async def apply_migrations(db) -> int:
                 await db.execute(sql)
         if version >= 1:
             await _ensure_exp_history_columns(db)
+        if version >= 4:
+            await _ensure_player_profile_columns(db)
         await _set_schema_version(db, version)
         await db.commit()
         current = version
@@ -241,6 +333,7 @@ async def apply_migrations(db) -> int:
 
     # 即使已是最新版，仍確保欄位齊全（手動改庫情境）
     await _ensure_exp_history_columns(db)
+    await _ensure_player_profile_columns(db)
     if current < SCHEMA_VERSION:
         await _set_schema_version(db, SCHEMA_VERSION)
         current = SCHEMA_VERSION
@@ -279,6 +372,8 @@ def build_search_indexes_sync(
     for name, ddl in wanted:
         if name in existing:
             continue
+        if name.startswith("idx_profile_"):
+            _ensure_player_profile_columns_sync(conn)
         logger.info("⏳ 離線建立資料庫索引 %s...", name)
         try:
             conn.execute(ddl)
@@ -332,6 +427,8 @@ async def ensure_search_indexes(
 
     created: list[str] = []
     for name, ddl in missing:
+        if name.startswith("idx_profile_"):
+            await _ensure_player_profile_columns(db)
         logger.info(f"⏳ 背景建立資料庫索引 {name}...")
         try:
             await db.execute(ddl)
@@ -344,32 +441,51 @@ async def ensure_search_indexes(
 
 
 def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
-    """離線重建 player_profile（每人每服取最新一筆職業）。回傳寫入列數。"""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS player_profile (
-            player_name TEXT NOT NULL,
-            server_name TEXT NOT NULL,
-            class_name TEXT NOT NULL DEFAULT '未知',
-            updated_at TIMESTAMP,
-            PRIMARY KEY (player_name, server_name)
-        )
-        """
-    )
+    """離線重建 player_profile（職業 + min/max EXP／首末見／等級／討伐）。回傳寫入列數。"""
+    _ensure_player_profile_columns_sync(conn)
     conn.execute("DELETE FROM player_profile")
     conn.execute(
         """
-        INSERT INTO player_profile (player_name, server_name, class_name, updated_at)
-        SELECT player_name, server_name, class_name, record_time
-        FROM (
-            SELECT player_name, server_name, class_name, record_time,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY player_name, server_name
-                       ORDER BY record_time DESC
-                   ) AS rn
-            FROM exp_history
+        INSERT INTO player_profile (
+            player_name, server_name, class_name, updated_at,
+            min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade
         )
-        WHERE rn = 1
+        SELECT
+            a.player_name,
+            a.server_name,
+            COALESCE(latest.class_name, '未知'),
+            a.last_seen,
+            a.min_exp,
+            a.max_exp,
+            a.first_seen,
+            a.last_seen,
+            a.max_level,
+            a.max_sub_grade
+        FROM (
+            SELECT player_name, server_name,
+                   MIN(exp) AS min_exp,
+                   MAX(exp) AS max_exp,
+                   MIN(record_time) AS first_seen,
+                   MAX(record_time) AS last_seen,
+                   MAX(level) AS max_level,
+                   MAX(subjugation_grade) AS max_sub_grade
+            FROM exp_history
+            GROUP BY player_name, server_name
+        ) a
+        LEFT JOIN (
+            SELECT player_name, server_name, class_name
+            FROM (
+                SELECT player_name, server_name, class_name,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY player_name, server_name
+                           ORDER BY record_time DESC
+                       ) AS rn
+                FROM exp_history
+            )
+            WHERE rn = 1
+        ) latest
+          ON latest.player_name = a.player_name
+         AND latest.server_name = a.server_name
         """
     )
     conn.commit()

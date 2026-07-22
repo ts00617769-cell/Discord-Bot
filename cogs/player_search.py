@@ -66,9 +66,12 @@ class PlayerSearch(commands.Cog):
             player_name, server_name, first_seen, days=days
         )
 
-    async def _find_seamless_candidates(self, profile, exp_margin, window_days=30, limit=8):
-        return await self.store._find_seamless_candidates(
-            profile, exp_margin, window_days=window_days, limit=limit
+    async def _find_seamless_candidates(self, profile, exp_margin=None, window_days=30, limit=8):
+        return await asyncio.wait_for(
+            self.store._find_seamless_candidates(
+                profile, exp_margin, window_days=window_days, limit=limit
+            ),
+            timeout=match.QUERY_TIMEOUT_SEC,
         )
 
     @commands.command(
@@ -199,11 +202,11 @@ class PlayerSearch(commands.Cog):
                         content=f"❌ 天眼系統找不到「{target_name}」的任何歷史紀錄。"
                     )
 
-                EXP_MARGIN = 1.0 * 1000000000000
                 timeline_entries = []
                 soft_candidates = []
                 seen_profiles = set()
                 queue = deque()
+                search_deadline = time.monotonic() + match.SEARCH_TIMEOUT_SEC
 
                 async def add_to_queue(
                     p_name, p_server, m_type, d_text, e_val, profile=None, confidence="high"
@@ -233,6 +236,8 @@ class PlayerSearch(commands.Cog):
                 idle_hops = 0
 
                 while queue and hops < bfs_limit:
+                    if time.monotonic() > search_deadline:
+                        raise asyncio.TimeoutError()
                     current = queue.popleft()
                     profile = current["profile"]
                     t_name, t_server, t_lvl, t_first, t_last, t_min_exp, t_max_exp, t_cls, t_sub_grade = profile
@@ -401,17 +406,29 @@ class PlayerSearch(commands.Cog):
                                 exact_added = True
 
                     hop_added = exact_added
-                    # Exact 已擴出 high 時略過 seamless，大幅減少重 CTE
+                    # Exact 已擴出 high 時略過 seamless；margin 分層由 store 處理
                     if not exact_added:
                         seamless = await self._find_seamless_candidates(
-                            profile, EXP_MARGIN, window_days=30, limit=5
+                            profile, None, window_days=30, limit=5
                         )
                         for cand in seamless:
                             soft_candidates.append(cand)
                             if cand["confidence"] == "high":
+                                reused = self.store.profile_tuple_from_row(
+                                    cand["name"],
+                                    cand["server"],
+                                    cand["lvl"],
+                                    cand["first"],
+                                    cand["last"],
+                                    cand.get("min_exp", cand["exp_val"]),
+                                    cand.get("max_exp", cand["exp_val"]),
+                                    cand["cls"],
+                                    cand.get("sub_grade"),
+                                )
                                 if await add_to_queue(
                                     cand["name"], cand["server"], cand["match_type"],
-                                    cand["diff_text"], cand["exp_val"], confidence="high",
+                                    cand["diff_text"], cand["exp_val"],
+                                    profile=reused, confidence="high",
                                 ):
                                     hop_added = True
                     hops += 1
@@ -484,9 +501,9 @@ class PlayerSearch(commands.Cog):
                     target_name,
                     unique_entries,
                     header=f"🚨 **啟動雙引擎掃描，成功捕捉「{target_name}」的軌跡！**\n\n",
-                    title=f"👁️ 天眼追蹤系統 (V5.5) - {target_name}",
+                    title=f"👁️ 天眼追蹤系統 (V6) - {target_name}",
                     color=0xff0000,
-                    footer="V5.5：early-stop・lazy seamless・player_profile",
+                    footer="V6：denorm stats・tiered margin・covering indexes",
                 )
                 _SEARCH_CACHE[cache_key] = (
                     time.monotonic(),
