@@ -106,6 +106,40 @@ async def test_require_allowed_channel_allows_listed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_require_allowed_channel_allows_extra_ids(monkeypatch):
+    monkeypatch.setenv("ALLOWED_COMMAND_CHANNELS", "111")
+    ctx = MagicMock()
+    ctx.channel = MagicMock()
+    ctx.channel.id = 999
+    ctx.channel.parent_id = None
+    ctx.channel.parent = None
+    ctx.send = AsyncMock()
+    assert await require_allowed_channel(ctx, extra_channel_ids=[999]) is True
+    ctx.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_allowed_channel_extra_env(monkeypatch):
+    monkeypatch.setenv("ALLOWED_COMMAND_CHANNELS", "111")
+    monkeypatch.setenv("TRANSFER_ALERT_CHANNEL_ID", "999")
+
+    @allowed_channel("TRANSFER_ALERT_CHANNEL_ID")
+    async def dummy(ctx):
+        return "ok"
+
+    ctx = MagicMock()
+    ctx.channel = MagicMock()
+    ctx.channel.id = 999
+    ctx.channel.parent_id = None
+    ctx.channel.parent = None
+    ctx.send = AsyncMock()
+
+    checks = dummy.__commands_checks__
+    assert await checks[0](ctx) is True
+    ctx.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_allowed_channel_decorator_raises(monkeypatch):
     monkeypatch.delenv("ALLOWED_COMMAND_CHANNELS", raising=False)
 

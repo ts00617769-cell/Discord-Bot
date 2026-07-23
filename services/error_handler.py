@@ -88,9 +88,16 @@ async def _send_channel_deny(ctx) -> None:
         logger.warning(f"Failed to send channel-deny message: {e}")
 
 
-async def require_allowed_channel(ctx) -> bool:
-    """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。"""
+async def require_allowed_channel(
+    ctx, extra_channel_ids: Optional[list[int]] = None
+) -> bool:
+    """機密指令頻道檢查；拒絕時回覆提示。True = 允許繼續。
+
+    extra_channel_ids：額外允許的頻道（例如轉移警報目標頻道也可跑測試指令）。
+    """
     allowed = get_allowed_command_channels()
+    if extra_channel_ids:
+        allowed = list(dict.fromkeys([*allowed, *extra_channel_ids]))
     candidates = resolve_command_channel_ids(ctx.channel)
     if any(is_allowed_command_channel(cid, allowed) for cid in candidates):
         return True
@@ -98,11 +105,17 @@ async def require_allowed_channel(ctx) -> bool:
     return False
 
 
-def allowed_channel():
-    """機密指令 decorator；拒絕時已送提示並拋 CheckFailure（WarRoom 靜默略過）。"""
+def allowed_channel(*extra_env_names: str):
+    """機密指令 decorator；拒絕時已送提示並拋 CheckFailure（WarRoom 靜默略過）。
+
+    可傳入額外環境變數名稱（如 TRANSFER_ALERT_CHANNEL_ID），那些頻道也視為允許。
+    """
 
     async def predicate(ctx: commands.Context) -> bool:
-        if await require_allowed_channel(ctx):
+        extras: list[int] = []
+        for name in extra_env_names:
+            extras.extend(parse_env_channel_ids(env_name=name))
+        if await require_allowed_channel(ctx, extra_channel_ids=extras or None):
             return True
         raise commands.CheckFailure(CHANNEL_DENIED)
 

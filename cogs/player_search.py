@@ -767,7 +767,7 @@ class PlayerSearch(commands.Cog):
                 pass
 
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
-    @allowed_channel()
+    @allowed_channel("TRANSFER_ALERT_CHANNEL_ID")
     async def test_transfer_alert(self, ctx):
         channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
         if not channel_ids:
