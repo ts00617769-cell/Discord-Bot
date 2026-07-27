@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands, tasks
 
 from db import ensure_search_indexes
+from db.connection import read_db
 from game_data import SERVER_MAP
 from services.error_handler import (
     min_complete_snapshot_servers,
@@ -63,6 +64,10 @@ class ExpTracker(commands.Cog):
     async def cog_load(self):
         # schema 已在 bot.setup_hook 套用；!reload 時不必再 migrate
         await self._load_alert_settings()
+        if not self.TRANSFER_ALERT_CHANNEL_IDS:
+            logger.warning(
+                "⚠️ TRANSFER_ALERT_CHANNEL_ID 未設定或無效：轉服警報不會發送。"
+            )
         self._index_task = asyncio.create_task(self._ensure_search_indexes())
         self.auto_fetch_exp.start()
         self._validate_task = asyncio.create_task(self._startup_validate_servers())
@@ -115,20 +120,57 @@ class ExpTracker(commands.Cog):
         await self.bot.db.commit()
 
     async def _setting_exists(self, key: str) -> bool:
-        async with self.bot.db.execute(
+        """相容舊 bot_settings overspeed:*；新寫入走 alert_dedupe。"""
+        async with read_db(self.bot).execute(
+            "SELECT 1 FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
+            ("overspeed", key),
+        ) as cursor:
+            if await cursor.fetchone():
+                return True
+        async with read_db(self.bot).execute(
             "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
         ) as cursor:
             return await cursor.fetchone() is not None
 
     async def _mark_setting(self, key: str, value: str = "1") -> None:
+        now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         await self.bot.db.execute(
             """
-            INSERT INTO bot_settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            INSERT INTO alert_dedupe (kind, dedupe_key, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(kind, dedupe_key) DO UPDATE SET created_at=excluded.created_at
             """,
-            (key, value),
+            ("overspeed", key, now),
         )
         await self.bot.db.commit()
+
+    async def _transfer_pairs_already_alerted(
+        self, pair_keys: list[tuple[str, str, str, str]]
+    ) -> set[tuple[str, str, str, str]]:
+        """只查候選 pair，避免整表載入 transfer_alerts_log。"""
+        if not pair_keys:
+            return set()
+        found: set[tuple[str, str, str, str]] = set()
+        db = read_db(self.bot)
+        # SQLite 變數上限保守分批
+        chunk = 80
+        for i in range(0, len(pair_keys), chunk):
+            batch = pair_keys[i : i + chunk]
+            placeholders = ",".join("(?,?,?,?)" for _ in batch)
+            flat: list[str] = []
+            for p in batch:
+                flat.extend(p)
+            async with db.execute(
+                f"""
+                SELECT old_name, old_server, new_name, new_server
+                FROM transfer_alerts_log
+                WHERE (old_name, old_server, new_name, new_server) IN ({placeholders})
+                """,
+                tuple(flat),
+            ) as cursor:
+                for row in await cursor.fetchall():
+                    found.add(tuple(row))
+        return found
 
     async def _startup_validate_servers(self):
         try:
@@ -263,7 +305,7 @@ class ExpTracker(commands.Cog):
             HAVING COUNT(DISTINCT server_name) >= ?
             ORDER BY record_time DESC LIMIT 10
         """
-        async with self.bot.db.execute(sql_times, (min_servers,)) as cursor:
+        async with read_db(self.bot).execute(sql_times, (min_servers,)) as cursor:
             times = await cursor.fetchall()
 
         if len(times) < 2:
@@ -300,7 +342,7 @@ class ExpTracker(commands.Cog):
                     '''
                     params = (time_now, time_prev, self.alert_server)
 
-                async with self.bot.db.execute(sql, params) as cursor:
+                async with read_db(self.bot).execute(sql, params) as cursor:
                     records = await cursor.fetchall()
 
                 alert_list = collect_overspeed(
@@ -363,7 +405,7 @@ class ExpTracker(commands.Cog):
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
         """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""
-        async with self.bot.db.execute(
+        async with read_db(self.bot).execute(
             POTENTIAL_TRANSFERS_SQL,
             (time_prev, time_prev, name_margin, class_margin, time_now, time_prev),
         ) as cursor:
@@ -374,6 +416,8 @@ class ExpTracker(commands.Cog):
         new_lvl, new_cls, new_sub_grade, status_str, exp_diff,
     ) -> int:
         """發送轉服警報；回傳成功送達的頻道數。"""
+        if not self.TRANSFER_ALERT_CHANNEL_IDS:
+            return 0
         diff_str = format_exp_diff(exp_diff)
         embed = discord.Embed(
             title="【波拉西亞戰記】轉移/旅團變動警報",
@@ -398,7 +442,7 @@ class ExpTracker(commands.Cog):
         return success
 
     async def _player_present_at(self, record_time, player_name, server_name) -> bool:
-        async with self.bot.db.execute(
+        async with read_db(self.bot).execute(
             "SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?",
             (record_time, player_name, server_name),
         ) as cursor:
@@ -416,21 +460,18 @@ class ExpTracker(commands.Cog):
             if complete_times and len(complete_times) >= 2:
                 miss_times = [complete_times[0][0], complete_times[1][0]]
 
-            async with self.bot.db.execute(
+            async with read_db(self.bot).execute(
                 "SELECT player_name, original_identity FROM member_registry"
             ) as cursor:
                 registry_rows = await cursor.fetchall()
 
-            async with self.bot.db.execute(
-                """
-                SELECT old_name, old_server, new_name, new_server
-                FROM transfer_alerts_log
-                """
-            ) as cursor:
-                already_alerted = {tuple(row) for row in await cursor.fetchall()}
-
             alias_map = build_alias_map(registry_rows)
             ranked = rank_transfer_candidates(transfer_records, alias_map)
+
+            candidate_keys = [
+                (row[5], row[6], row[1], row[2]) for row in ranked
+            ]
+            already_alerted = await self._transfer_pairs_already_alerted(candidate_keys)
 
             viable = []
             for row in ranked:

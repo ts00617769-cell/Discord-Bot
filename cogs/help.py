@@ -33,7 +33,7 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(
             name="🕵️ 尋人",
-            value="`!尋人` / `/尋人` `[玩家名稱]`\n例：`!尋人 驕傲o`",
+            value="`!尋人` / `/尋人` `[玩家名稱] [伺服器?]`\n例：`!尋人 驕傲o`、`!尋人 驕傲o 萊涅01`",
             inline=False,
         )
         embed.add_field(

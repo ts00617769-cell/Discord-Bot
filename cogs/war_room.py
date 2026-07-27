@@ -6,8 +6,18 @@ import traceback
 import discord
 from discord.ext import commands, tasks
 
+from db.connection import read_db
+from db.schema import list_missing_search_indexes_async
 from services.error_handler import parse_env_channel_id
+from services.retention_windows import (
+    DEFAULT_MAX_TRANSFER_WINDOWS,
+    DEFAULT_RECENT_DAYS,
+    DEFAULT_TRANSFER_PAD_DAYS,
+    build_search_keep_ranges,
+    exp_history_outside_keep_sql,
+)
 from services.settings_prune import (
+    PRUNE_ALERT_DEDUPE_SQL,
     PRUNE_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
@@ -127,19 +137,21 @@ class WarRoom(commands.Cog):
     health_time = datetime.time(hour=9, minute=0, tzinfo=TAIPEI)
 
     async def _gather_health_stats(self) -> dict:
+        db = read_db(self.bot)
         stats = {
             "exp_rows": 0,
             "transfer_rows": 0,
             "last_snapshot": None,
             "server_count_last": 0,
+            "missing_indexes": [],
         }
-        async with self.bot.db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+        async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
             stats["exp_rows"] = (await cursor.fetchone())[0]
-        async with self.bot.db.execute(
+        async with db.execute(
             "SELECT COUNT(*) FROM transfer_alerts_log"
         ) as cursor:
             stats["transfer_rows"] = (await cursor.fetchone())[0]
-        async with self.bot.db.execute(
+        async with db.execute(
             """
             SELECT record_time, COUNT(DISTINCT server_name)
             FROM exp_history
@@ -152,20 +164,26 @@ class WarRoom(commands.Cog):
             if row:
                 stats["last_snapshot"] = row[0]
                 stats["server_count_last"] = row[1]
+        try:
+            stats["missing_indexes"] = await list_missing_search_indexes_async(db)
+        except sqlite3.DatabaseError as e:
+            logger.warning(f"list missing indexes failed: {e}")
         return stats
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點清理超過 60 天的資料（不在線上 VACUUM，避免鎖庫）。"""
+        """每天凌晨 4 點：尋人導向保留（近 N 天 ∪ 轉移窗）外刪除；不過期 VACUUM。"""
         try:
             cutoff = taipei_cutoff_str(60)
-            async with self.bot.db.execute(
-                """
-                DELETE FROM exp_history
-                WHERE record_time < ?
-                """,
-                (cutoff,),
-            ) as cursor:
+            keep_ranges = build_search_keep_ranges(
+                recent_days=DEFAULT_RECENT_DAYS,
+                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
+                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
+            )
+            del_sql, del_params = exp_history_outside_keep_sql(
+                keep_ranges, for_delete=True
+            )
+            async with self.bot.db.execute(del_sql, del_params) as cursor:
                 deleted_exp = cursor.rowcount or 0
 
             async with self.bot.db.execute(
@@ -177,7 +195,6 @@ class WarRoom(commands.Cog):
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
 
-            # 超速／Boss 去重 key：依字串前綴與截止時間比較清理
             cutoff_date_only = cutoff[:10] if len(cutoff) >= 10 else today_taipei_str()
             async with self.bot.db.execute(
                 PRUNE_DEDUPE_SQL,
@@ -188,6 +205,11 @@ class WarRoom(commands.Cog):
             ) as cursor:
                 deleted_settings = cursor.rowcount or 0
 
+            async with self.bot.db.execute(
+                PRUNE_ALERT_DEDUPE_SQL, (cutoff,)
+            ) as cursor:
+                deleted_alert_dedupe = cursor.rowcount or 0
+
             await self.bot.db.commit()
             try:
                 await self.bot.db.execute("PRAGMA optimize")
@@ -196,7 +218,10 @@ class WarRoom(commands.Cog):
 
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel and (
-                deleted_exp > 0 or deleted_transfer > 0 or deleted_settings > 0
+                deleted_exp > 0
+                or deleted_transfer > 0
+                or deleted_settings > 0
+                or deleted_alert_dedupe > 0
             ):
                 vacuum_hint = ""
                 if deleted_exp >= 5000:
@@ -204,9 +229,11 @@ class WarRoom(commands.Cog):
                         "\n💡 刪除量較大，建議停 bot 後執行 `python cleanup_db.py` 釋放磁碟。"
                     )
                 await log_channel.send(
-                    f"🧹 **【資料庫維護】** 清理 `exp_history` {deleted_exp} 筆、"
+                    f"🧹 **【資料庫維護】** 尋人保留窗外清理 "
+                    f"`exp_history` {deleted_exp} 筆、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆、"
-                    f"`bot_settings` 去重 key {deleted_settings} 筆。"
+                    f"`bot_settings` 去重 key {deleted_settings} 筆、"
+                    f"`alert_dedupe` {deleted_alert_dedupe} 筆。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
                 )
 
@@ -235,10 +262,16 @@ class WarRoom(commands.Cog):
             stats = await self._gather_health_stats()
             last = stats["last_snapshot"] or "尚無"
             vacuum_note = ""
-            if stats["exp_rows"] > 50_000:
+            missing = stats.get("missing_indexes") or []
+            if missing:
                 vacuum_note = (
-                    "\n⚠️ `exp_history` 超過 5 萬筆；若啟動略過索引，"
-                    "請離線執行 `python cleanup_db.py`。"
+                    f"\n⚠️ 缺少索引：`{'`, `'.join(missing)}`；"
+                    "請離線執行 `python cleanup_db.py --build-indexes`。"
+                )
+            elif stats["exp_rows"] > 50_000:
+                vacuum_note = (
+                    "\n💡 `exp_history` 超過 5 萬筆；若尋人變慢，"
+                    "請離線執行 `python cleanup_db.py --for-search`。"
                 )
             await channel.send(
                 f"📊 **【每週健康摘要】**\n"

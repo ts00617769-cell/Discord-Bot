@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 try:
     from zoneinfo import ZoneInfo
 
-    TAIPEI = ZoneInfo("Asia/Taipei")
+    try:
+        TAIPEI: Any = ZoneInfo("Asia/Taipei")
+    except Exception:  # ZoneInfoNotFoundError 等（Windows 未裝 tzdata）
+        TAIPEI = timezone(timedelta(hours=8))
 except ImportError:  # Python < 3.9 或精簡環境（如部分 NAS）
     # 台灣無夏令時間，固定 UTC+8 足夠
     TAIPEI = timezone(timedelta(hours=8))

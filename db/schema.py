@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -123,6 +123,38 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             # 欄位以 _ensure_player_profile_columns 補齊（舊庫 ALTER）
         ],
     ),
+    (
+        6,
+        "alert_dedupe table + transfer log time index",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS transfer_alerts_log (
+                old_name TEXT,
+                old_server TEXT,
+                new_name TEXT,
+                new_server TEXT,
+                alert_time TIMESTAMP,
+                PRIMARY KEY (old_name, old_server, new_name, new_server)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS alert_dedupe (
+                kind TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (kind, dedupe_key)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alert_dedupe_created
+            ON alert_dedupe(created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_transfer_alerts_time
+            ON transfer_alerts_log(alert_time)
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -224,6 +256,7 @@ _PRAGMA_TABLE_ALLOWLIST = frozenset(
         "active_quiz_status",
         "quiz_votes",
         "horoscope_cache",
+        "alert_dedupe",
     }
 )
 
@@ -491,3 +524,86 @@ def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
     conn.commit()
     row = conn.execute("SELECT COUNT(*) FROM player_profile").fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+async def denorm_coverage_stats(db) -> tuple[int, int]:
+    """回傳 (total_profiles, filled_with_min_exp)。"""
+    async with db.execute("SELECT COUNT(*) FROM player_profile") as cursor:
+        total = int((await cursor.fetchone())[0] or 0)
+    async with db.execute(
+        "SELECT COUNT(*) FROM player_profile WHERE min_exp IS NOT NULL"
+    ) as cursor:
+        filled = int((await cursor.fetchone())[0] or 0)
+    return total, filled
+
+
+async def backfill_player_profile_denorm(db, *, batch_limit: int = 500) -> int:
+    """增量回填 player_profile 缺 denorm 統計的列；回傳本批更新數。
+
+    僅處理 min_exp IS NULL 的列，避免全表重建鎖庫。
+    """
+    await _ensure_player_profile_columns(db)
+    async with db.execute(
+        """
+        SELECT player_name, server_name
+        FROM player_profile
+        WHERE min_exp IS NULL
+        LIMIT ?
+        """,
+        (batch_limit,),
+    ) as cursor:
+        targets = await cursor.fetchall()
+    if not targets:
+        return 0
+
+    updated = 0
+    for player_name, server_name in targets:
+        async with db.execute(
+            """
+            SELECT
+                MIN(exp), MAX(exp),
+                MIN(record_time), MAX(record_time),
+                MAX(level), MAX(subjugation_grade)
+            FROM exp_history
+            WHERE player_name = ? AND server_name = ?
+            """,
+            (player_name, server_name),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row or row[0] is None:
+            continue
+        min_exp, max_exp, first_seen, last_seen, max_level, max_sub = row
+        await db.execute(
+            """
+            UPDATE player_profile
+            SET min_exp = ?, max_exp = ?,
+                first_seen = ?, last_seen = ?,
+                max_level = ?, max_sub_grade = ?,
+                updated_at = COALESCE(?, updated_at)
+            WHERE player_name = ? AND server_name = ?
+            """,
+            (
+                min_exp,
+                max_exp,
+                first_seen,
+                last_seen,
+                max_level,
+                max_sub,
+                last_seen,
+                player_name,
+                server_name,
+            ),
+        )
+        updated += 1
+    if updated:
+        await db.commit()
+    return updated
+
+
+async def list_missing_search_indexes_async(db) -> list[str]:
+    """aiosqlite 版：回傳尚未建立的尋人索引名稱。"""
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ) as cursor:
+        existing = {row[0] for row in await cursor.fetchall()}
+    return [name for name, _ in _SEARCH_INDEXES if name not in existing]

@@ -17,3 +17,8 @@ _tmp_events/
 service_account.json
 bank_ledger.json
 prasia_data.db
+*.db.bak
+*.corrupt.bak
+prasia_data.db*
+*.db-wal
+*.db-shm

@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  dc-bot:
+    build: .
+    image: prasia-bot:local
+    container_name: prasia-bot-final
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Taipei
+      # 建議把 DB 指到 SSD 掛載路徑，例如 /data/prasia_data.db
+      # - DB_PATH=/data/prasia_data.db
+    volumes:
+      - /volume1/docker/dc_bot:/app
+      # 可選：獨立掛載資料庫目錄
+      # - /volume1/docker/dc_bot_data:/data
+    working_dir: /app
+    # 依賴已在 image 內；勿在 command 重複 pip install
+    command: ["python", "bot.py"]

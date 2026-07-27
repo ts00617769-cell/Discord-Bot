@@ -99,7 +99,7 @@ ruff check .
 | `!排名 [數量] [伺服器] [職業…]` | 即時經驗排名；職業名可對應 API 時只打該職業榜 |
 | `!測速 [數量] [伺服器]` | 依快照計算練功時速 |
 | `!警報 開/關 [數量] [伺服器]` | 自動超速警報（設定會寫入 DB，重啟保留） |
-| `!尋人 [名稱]` | 依經驗特徵追蹤改名／轉服 |
+| `!尋人 [名稱] [伺服器?]` | 依經驗特徵追蹤改名／轉服；可加伺服器縮小範圍 |
 | `!尋人回報 …` | 標記或清除前身別名 |
 | `!轉服掃描` / `!移民清單` / `!抓包` | 近期轉服候選清單 |
 | `!測試轉移警報` | 確認轉服警報頻道（白名單或轉移警報頻道皆可） |
@@ -124,7 +124,7 @@ ruff check .
 | 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行 |
 | Boss 提醒 | 召喚前約 10 分鐘 `@everyone`（DB 去重，重啟不連 ping） |
 | 每日盲投 | 依 `QUIZ_POST_TIME`／`QUIZ_REVEAL_TIME` 發布與開獎 |
-| DB 清理 | 戰情室排程刪過期列；大量刪除後建議離線 VACUUM |
+| DB 清理 | 戰情室排程依尋人保留窗（近 3 天 ∪ 轉移窗）刪 `exp_history`；另清過期轉服 log／`alert_dedupe`；大量刪除後建議離線 VACUUM |
 | 健康摘要 | 每週日 09:00（台北）發到 `WAR_ROOM_CHANNEL_ID`（若有設） |
 
 快照「品質達標」條件：該服**總榜成功**，且合併玩家人數 ≥ `SNAPSHOT_MIN_PLAYERS`。部分職業榜失敗仍會寫入可用資料，但該服不計入完整快照門檻，以降低假轉服。
@@ -141,6 +141,7 @@ ruff check .
 | [`db/`](db/) | SQLite 連線 PRAGMA、版本化 schema／索引 |
 | [`game_data.py`](game_data.py) | `SERVER_MAP`、Boss 時段等常數 |
 | [`cleanup_db.py`](cleanup_db.py) | **離線**刪過期資料並 VACUUM（會讀 `.env` 的 `DB_PATH`） |
+| [`Dockerfile`](Dockerfile) / [`compose.example.yaml`](compose.example.yaml) | 映像建置時安裝依賴；部署請 `cp compose.example.yaml compose.yaml` 並用 `.env` |
 | [`tests/`](tests/) | 純邏輯單元測試（不連 Discord／beanfun） |
 
 ### 資料庫

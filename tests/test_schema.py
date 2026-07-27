@@ -40,6 +40,7 @@ async def test_apply_migrations_fresh_db(tmp_path):
         assert ver2 == SCHEMA_VERSION
 
         assert "player_profile" in tables
+        assert "alert_dedupe" in tables
 
         async with db.execute("PRAGMA table_info(player_profile)") as cur:
             pp_cols = {row[1] for row in await cur.fetchall()}

@@ -1,4 +1,4 @@
-"""bot_settings 去重 key 清理輔助。"""
+"""bot_settings / alert_dedupe 去重 key 清理輔助。"""
 from __future__ import annotations
 
 
@@ -26,4 +26,10 @@ PRUNE_DEDUPE_SQL = """
 DELETE FROM bot_settings
 WHERE (key LIKE 'overspeed:%' AND key < ?)
    OR (key LIKE 'boss_reminder:%' AND key < ?)
+"""
+
+# alert_dedupe.created_at 為 SQL 時間字串，直接與 cutoff 比較
+PRUNE_ALERT_DEDUPE_SQL = """
+DELETE FROM alert_dedupe
+WHERE created_at < ?
 """

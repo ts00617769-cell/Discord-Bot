@@ -11,31 +11,46 @@ from typing import Any
 from .schema import (
     SCHEMA_VERSION,
     apply_migrations,
+    backfill_player_profile_denorm,
     build_search_indexes_sync,
+    denorm_coverage_stats,
     ensure_search_indexes,
     list_missing_search_indexes,
+    list_missing_search_indexes_async,
     rebuild_player_profiles_sync,
 )
 
 __all__ = [
     "SCHEMA_VERSION",
+    "DatabaseIntegrityError",
     "apply_migrations",
+    "backfill_player_profile_denorm",
     "build_search_indexes_sync",
     "configure_connection",
     "connect_db",
+    "connect_db_ro",
+    "denorm_coverage_stats",
     "ensure_search_indexes",
+    "integrity_quick_check",
     "list_missing_search_indexes",
+    "list_missing_search_indexes_async",
+    "read_db",
     "rebuild_player_profiles_sync",
+    "resolve_db_path",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name in ("configure_connection", "connect_db"):
-        from .connection import configure_connection, connect_db
+    if name in (
+        "configure_connection",
+        "connect_db",
+        "connect_db_ro",
+        "integrity_quick_check",
+        "read_db",
+        "resolve_db_path",
+        "DatabaseIntegrityError",
+    ):
+        from . import connection as conn_mod
 
-        mapping = {
-            "configure_connection": configure_connection,
-            "connect_db": connect_db,
-        }
-        return mapping[name]
+        return getattr(conn_mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -11,8 +11,13 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from db import apply_migrations, connect_db
-from db.connection import resolve_db_path
+from db import apply_migrations, connect_db, connect_db_ro
+from db.connection import DatabaseIntegrityError, resolve_db_path
+from db.schema import (
+    backfill_player_profile_denorm,
+    denorm_coverage_stats,
+    list_missing_search_indexes_async,
+)
 from services.ranking_api import get_ranking_client
 from services.timeutil import now_naive_taipei, taipei_cutoff_str
 
@@ -139,14 +144,52 @@ class PrasiaBot(commands.Bot):
             self.ranking_client = get_ranking_client(self)
 
             db_path = resolve_db_path(os.path.dirname(os.path.abspath(__file__)))
-            self.db = await connect_db(db_path)
+            try:
+                self.db = await connect_db(db_path, check_integrity=True)
+            except DatabaseIntegrityError as e:
+                logger.error(f"❌ 資料庫完整性檢查失敗，拒絕啟動: {e}")
+                raise
             schema_ver = await apply_migrations(self.db)
             logger.info(f"✅ schema 版本: v{schema_ver}")
+
+            try:
+                self.db_ro = await connect_db_ro(db_path)
+            except (OSError, FileNotFoundError) as e:
+                logger.warning(f"唯讀連線開啟失敗，重查詢將共用寫入連線: {e}")
+                self.db_ro = self.db
+
+            missing_idx = await list_missing_search_indexes_async(self.db_ro)
+            if missing_idx:
+                logger.warning(
+                    "⚠️ 缺少尋人索引 %s。大庫請停 bot 後執行 "
+                    "`python cleanup_db.py --build-indexes` 或 `--for-search`。",
+                    ", ".join(missing_idx),
+                )
+
+            try:
+                total_pp, filled_pp = await denorm_coverage_stats(self.db_ro)
+                if total_pp > 0 and filled_pp < total_pp:
+                    logger.info(
+                        "⏳ player_profile denorm 覆蓋 %s/%s，啟動增量回填…",
+                        filled_pp,
+                        total_pp,
+                    )
+                    filled_n = await backfill_player_profile_denorm(
+                        self.db, batch_limit=500
+                    )
+                    if filled_n:
+                        logger.info("✅ denorm 回填 %s 筆", filled_n)
+            except Exception as e:
+                logger.warning(f"denorm 覆蓋檢查／回填略過: {e}")
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.error(
                     "❌ ALLOWED_COMMAND_CHANNELS 未設定：機密指令已改為 fail-closed，"
                     "全部機密指令將無法使用。請在 .env 填入戰情室頻道 ID。"
+                )
+            if not os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").strip():
+                logger.warning(
+                    "⚠️ TRANSFER_ALERT_CHANNEL_ID 未設定：轉服／改名警報將不會發送。"
                 )
 
             cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
@@ -177,8 +220,13 @@ class PrasiaBot(commands.Bot):
     async def close(self):
         if hasattr(self, "session"):
             await self.session.close()
-        if hasattr(self, "db"):
-            await self.db.close()
+        db_ro = getattr(self, "db_ro", None)
+        db = getattr(self, "db", None)
+        if db_ro is not None and db_ro is not db:
+            await db_ro.close()
+            logger.info("✅ 唯讀資料庫已關閉")
+        if db is not None:
+            await db.close()
             logger.info("✅ 資料庫已安全關閉")
         await super().close()
 
