@@ -46,7 +46,9 @@ TRANSFER_DISAPPEAR_PRE_HOURS = 24
 _FMT = "%Y-%m-%d %H:%M:%S"
 
 
-def _parse(s: str) -> Optional[datetime.datetime]:
+def _parse(s: Optional[str]) -> Optional[datetime.datetime]:
+    if not s:
+        return None
     try:
         return datetime.datetime.strptime(s, _FMT)
     except (TypeError, ValueError):
