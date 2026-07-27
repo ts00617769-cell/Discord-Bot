@@ -6,7 +6,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from services import player_matching as match
 from services.game_event_windows import (
@@ -429,3 +429,85 @@ def causal_transfer_pairs(players: list[dict]) -> list[tuple[dict, dict, float]]
                 continue
             pairs.append((earlier, later, gap))
     return pairs
+
+
+SHARED_EXPS_SQL = """
+SELECT exp
+FROM exp_history
+WHERE exp > 1000000000000
+GROUP BY exp
+HAVING COUNT(DISTINCT server_name) > 1
+ORDER BY MAX(record_time) DESC
+LIMIT 30
+"""
+
+
+async def fetch_shared_exps(db) -> list[Any]:
+    """跨服共用 EXP（轉服掃描候選特徵碼）。"""
+    async with db.execute(SHARED_EXPS_SQL) as cursor:
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def fetch_records_for_shared_exps(db, exp_list: list[Any]) -> list[tuple]:
+    if not exp_list:
+        return []
+    placeholders = ",".join("?" for _ in exp_list)
+    async with db.execute(
+        f"""
+        SELECT e.exp, e.player_name, e.server_name,
+               MIN(e.record_time), MAX(e.record_time),
+               MAX(e.level),
+               COALESCE(MAX(pp.class_name), '未知'),
+               MAX(e.subjugation_grade)
+        FROM exp_history e
+        LEFT JOIN player_profile pp
+          ON pp.player_name = e.player_name
+         AND pp.server_name = e.server_name
+        WHERE e.exp IN ({placeholders})
+        GROUP BY e.exp, e.player_name, e.server_name
+        ORDER BY e.exp DESC, MIN(e.record_time) ASC
+        """,
+        tuple(exp_list),
+    ) as cursor:
+        return list(await cursor.fetchall())
+
+
+def group_scan_records_by_exp(records: Sequence[tuple]) -> dict[Any, list[dict]]:
+    grouped: dict[Any, list[dict]] = {}
+    for exp, p_name, s_name, first_seen, last_seen, lvl, cls, sub in records:
+        grouped.setdefault(exp, []).append(
+            {
+                "name": p_name,
+                "server": s_name,
+                "first": first_seen,
+                "last": last_seen,
+                "lvl": lvl,
+                "cls": cls,
+                "sub": sub,
+            }
+        )
+    return grouped
+
+
+def build_causal_scan_sections(
+    grouped: dict[Any, list[dict]],
+    *,
+    max_groups: int = 10,
+    max_pairs_per_group: int = 3,
+) -> list[dict[str, Any]]:
+    """回傳 [{exp, pairs: [(earlier, later, gap), ...]}, ...] 供 Discord 組 embed。"""
+    sections: list[dict[str, Any]] = []
+    for exp, players in grouped.items():
+        causal = causal_transfer_pairs(players)
+        if not causal:
+            continue
+        sections.append(
+            {
+                "exp": exp,
+                "pairs": causal[:max_pairs_per_group],
+            }
+        )
+        if len(sections) >= max_groups:
+            break
+    return sections

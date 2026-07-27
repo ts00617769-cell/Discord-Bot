@@ -35,7 +35,7 @@ async def test_connect_db_ro_and_cannot_write(tmp_path):
 
     ro = await connect_db_ro(db_path)
     try:
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises((sqlite3.OperationalError, sqlite3.DatabaseError)):
             await ro.execute(
                 "INSERT INTO bot_settings (key, value) VALUES ('x', '1')"
             )

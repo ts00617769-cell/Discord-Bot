@@ -21,7 +21,10 @@ from services.error_handler import allowed_channel, parse_env_channel_ids
 from services.member_registry import clear_member_identity, upsert_alias_links
 from services.player_search_db import PlayerSearchStore
 from services.player_search_engine import (
-    causal_transfer_pairs,
+    build_causal_scan_sections,
+    fetch_records_for_shared_exps,
+    fetch_shared_exps,
+    group_scan_records_by_exp,
     parse_track_target,
     run_track_search,
 )
@@ -200,8 +203,9 @@ class PlayerSearch(commands.Cog):
                     return
 
                 if result.kind == "no_link":
+                    last_exp = result.target_last_exp or 0.0
                     content = (
-                        f"⚠️ 目標最後紀錄為 {result.target_last_exp/1000000000000:.2f} 兆。\n"
+                        f"⚠️ 目標最後紀錄為 {last_exp/1000000000000:.2f} 兆。\n"
                         f"雙引擎未找到符合條件的轉服/改名軌跡。{result.tip}\n"
                         f"提示：可用 `!尋人回報 {name} 前身名` 手動標記後再查。"
                     )
@@ -326,7 +330,7 @@ class PlayerSearch(commands.Cog):
 
         try:
             shared_exps = await asyncio.wait_for(
-                self._scan_shared_exps(db),
+                fetch_shared_exps(db),
                 timeout=match.SEARCH_TIMEOUT_SEC,
             )
             if not shared_exps:
@@ -335,28 +339,23 @@ class PlayerSearch(commands.Cog):
                 )
 
             records = await asyncio.wait_for(
-                self._scan_records_for_exps(db, shared_exps),
+                fetch_records_for_shared_exps(db, shared_exps),
                 timeout=match.SEARCH_TIMEOUT_SEC,
             )
+            grouped = group_scan_records_by_exp(records)
+            sections = build_causal_scan_sections(grouped)
 
-            grouped_data = {}
-            for exp, p_name, s_name, first_seen, last_seen, lvl, cls, sub in records:
-                grouped_data.setdefault(exp, []).append({
-                    "name": p_name, "server": s_name,
-                    "first": first_seen, "last": last_seen,
-                    "lvl": lvl, "cls": cls, "sub": sub,
-                })
+            if not sections:
+                return await processing_msg.edit(
+                    content="💤 有共用 EXP，但沒有符合「先結束再開始、非雙活躍」的因果配對。"
+                )
 
             embeds = []
             desc = "🔍 **以下玩家被系統偵測到經驗值完全重疊（含因果時間窗）：**\n\n"
-            shown = 0
-            for exp, players in grouped_data.items():
-                causal = causal_transfer_pairs(players)
-                if not causal:
-                    continue
-                exp_zhao = exp / 1_000_000_000_000
+            for section in sections:
+                exp_zhao = section["exp"] / 1_000_000_000_000
                 desc += f"🔗 **特徵碼：{exp_zhao:.3f} 兆**\n```yaml\n"
-                for earlier, later, gap in causal[:3]:
+                for earlier, later, gap in section["pairs"]:
                     desc += (
                         f"• {earlier['name']} [{earlier['server']}] "
                         f"({earlier['first'][5:16]}~{earlier['last'][5:16]})\n"
@@ -365,7 +364,6 @@ class PlayerSearch(commands.Cog):
                         f" 空窗 {gap/24:.1f} 天\n"
                     )
                 desc += "```\n"
-                shown += 1
                 if len(desc) > 1500:
                     embeds.append(
                         discord.Embed(
@@ -375,13 +373,6 @@ class PlayerSearch(commands.Cog):
                         )
                     )
                     desc = ""
-                if shown >= 10:
-                    break
-
-            if shown == 0:
-                return await processing_msg.edit(
-                    content="💤 有共用 EXP，但沒有符合「先結束再開始、非雙活躍」的因果配對。"
-                )
 
             if desc:
                 embeds.append(
@@ -407,42 +398,6 @@ class PlayerSearch(commands.Cog):
                 await processing_msg.edit(content="❌ 掃描查詢逾時，請重試")
             except discord.NotFound:
                 pass
-
-    async def _scan_shared_exps(self, db):
-        async with db.execute(
-            '''
-            SELECT exp
-            FROM exp_history
-            WHERE exp > 1000000000000
-            GROUP BY exp
-            HAVING COUNT(DISTINCT server_name) > 1
-            ORDER BY MAX(record_time) DESC
-            LIMIT 30
-            '''
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return [row[0] for row in rows]
-
-    async def _scan_records_for_exps(self, db, exp_list):
-        placeholders = ",".join("?" for _ in exp_list)
-        async with db.execute(
-            f'''
-            SELECT e.exp, e.player_name, e.server_name,
-                   MIN(e.record_time), MAX(e.record_time),
-                   MAX(e.level),
-                   COALESCE(MAX(pp.class_name), '未知'),
-                   MAX(e.subjugation_grade)
-            FROM exp_history e
-            LEFT JOIN player_profile pp
-              ON pp.player_name = e.player_name
-             AND pp.server_name = e.server_name
-            WHERE e.exp IN ({placeholders})
-            GROUP BY e.exp, e.player_name, e.server_name
-            ORDER BY e.exp DESC, MIN(e.record_time) ASC
-            ''',
-            tuple(exp_list),
-        ) as cursor:
-            return await cursor.fetchall()
 
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
     @allowed_channel("TRANSFER_ALERT_CHANNEL_ID")

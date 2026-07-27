@@ -180,14 +180,14 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
-def main() -> int:
-    default_db = resolve_db_path(ROOT)
+def build_cleanup_parser(default_db: Path | None = None) -> argparse.ArgumentParser:
+    db_hint = default_db if default_db is not None else resolve_db_path(ROOT)
     parser = argparse.ArgumentParser(description="離線清理 prasia_data.db")
     parser.add_argument(
         "--db",
         type=Path,
         default=None,
-        help=f"資料庫路徑（預設與 bot 相同：DB_PATH 或 {default_db.name}）",
+        help=f"資料庫路徑（預設與 bot 相同：DB_PATH 或 {db_hint.name}）",
     )
     parser.add_argument(
         "--days",
@@ -249,30 +249,46 @@ def main() -> int:
         action="store_true",
         help="離線建立尋人索引（大表啟動時會略過；建議清庫後執行）",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def validate_cleanup_args(args: argparse.Namespace, argv: list[str]) -> str | None:
+    """回傳錯誤訊息；通過則 None。"""
     if args.wipe_history and args.for_search:
-        print("錯誤：--wipe-history 與 --for-search 不可同時使用", file=sys.stderr)
-        return 2
+        return "錯誤：--wipe-history 與 --for-search 不可同時使用"
     indexes_only = bool(args.build_indexes) and not (
-        args.wipe_history or args.for_search or "--days" in sys.argv
+        args.wipe_history or args.for_search or "--days" in argv
     )
     if args.for_search:
         if args.recent_days < 0:
-            print("錯誤：--recent-days 必須 >= 0", file=sys.stderr)
-            return 2
+            return "錯誤：--recent-days 必須 >= 0"
         if args.transfer_pad_days < 0:
-            print("錯誤：--transfer-pad-days 必須 >= 0", file=sys.stderr)
-            return 2
+            return "錯誤：--transfer-pad-days 必須 >= 0"
         if args.max_transfer_windows < 0:
-            print("錯誤：--max-transfer-windows 必須 >= 0", file=sys.stderr)
-            return 2
+            return "錯誤：--max-transfer-windows 必須 >= 0"
     elif not indexes_only and args.days < 1 and not args.wipe_history:
-        print(
-            "錯誤：--days 必須 >= 1（或改用 --wipe-history / --for-search / --build-indexes）",
-            file=sys.stderr,
+        return (
+            "錯誤：--days 必須 >= 1（或改用 --wipe-history / --for-search / --build-indexes）"
         )
+    return None
+
+
+def is_indexes_only(args: argparse.Namespace, argv: list[str]) -> bool:
+    return bool(args.build_indexes) and not (
+        args.wipe_history or args.for_search or "--days" in argv
+    )
+
+
+def main() -> int:
+    default_db = resolve_db_path(ROOT)
+    parser = build_cleanup_parser(default_db)
+    args = parser.parse_args()
+
+    err = validate_cleanup_args(args, sys.argv)
+    if err:
+        print(err, file=sys.stderr)
         return 2
+    indexes_only = is_indexes_only(args, sys.argv)
 
     db_path: Path = args.db if args.db is not None else default_db
     if not db_path.is_file():

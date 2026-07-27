@@ -140,6 +140,32 @@ def test_realm_transfer_delayed_login_two_days():
     )
 
 
+def test_realm_transfer_pre_hours_and_grace_bounds():
+    """消失可略早於窗開始（PRE_HOURS）；出現不可晚於窗結束+grace。"""
+    from services.game_event_windows import (
+        TRANSFER_DISAPPEAR_PRE_HOURS,
+        TRANSFER_LOGIN_GRACE_DAYS,
+        match_realm_transfer,
+    )
+
+    assert TRANSFER_DISAPPEAR_PRE_HOURS == 24
+    assert TRANSFER_LOGIN_GRACE_DAYS == 3
+    # 第26次 06/03 12:00 開始；前 24h 內消失 OK
+    assert (
+        match_realm_transfer("2026-06-02 12:00:00", "2026-06-04 12:00:00")
+        == "第26次領域轉移"
+    )
+    # 再早一小時 → 不符
+    assert match_realm_transfer("2026-06-02 11:00:00", "2026-06-04 12:00:00") is None
+    # 窗結束 06/07 23:59 + 3 天 = 06/10 23:59；邊界內 OK
+    assert (
+        match_realm_transfer("2026-06-07 20:00:00", "2026-06-10 23:59:59")
+        == "第26次領域轉移"
+    )
+    # 超過 grace
+    assert match_realm_transfer("2026-06-07 20:00:00", "2026-06-11 00:00:00") is None
+
+
 def test_confidence_delayed_transfer_same_class_is_high():
     assert (
         confidence(

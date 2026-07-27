@@ -10,7 +10,9 @@ import pytest
 from db.schema import apply_migrations, rebuild_player_profiles_sync
 from services.player_search_db import PlayerSearchStore, normalize_profile_rows
 from services.player_search_engine import (
+    build_causal_scan_sections,
     causal_transfer_pairs,
+    group_scan_records_by_exp,
     parse_track_target,
     run_track_search,
 )
@@ -71,6 +73,19 @@ def test_causal_transfer_pairs():
     assert earlier["name"] == "A"
     assert later["name"] == "B"
     assert gap >= 0
+
+
+def test_group_and_build_causal_scan_sections():
+    exp = 2_000_000_000_000
+    records = [
+        (exp, "A", "S1", "2026-07-01 10:00:00", "2026-07-02 10:00:00", 60, "戰士", 1),
+        (exp, "B", "S2", "2026-07-02 12:00:00", "2026-07-03 10:00:00", 60, "戰士", 1),
+    ]
+    grouped = group_scan_records_by_exp(records)
+    sections = build_causal_scan_sections(grouped)
+    assert len(sections) == 1
+    assert sections[0]["exp"] == exp
+    assert len(sections[0]["pairs"]) == 1
 
 
 def test_online_cleanup_delete_sql_matches_for_search():

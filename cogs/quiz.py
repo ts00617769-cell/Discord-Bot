@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import sqlite3
+from typing import cast
 
 import discord
 from discord.ext import commands, tasks
@@ -50,7 +51,8 @@ def _empty_poll() -> dict:
 
 
 def _get_quiz_cog(interaction: discord.Interaction):
-    return interaction.client.get_cog("QuizSystem")
+    bot = cast(commands.Bot, interaction.client)
+    return bot.get_cog("QuizSystem")
 
 
 class QuizButton(discord.ui.Button):
@@ -107,7 +109,8 @@ class SecretQuizButton(discord.ui.Button):
 
         # 以 DB UNIQUE(user_id) 為準：先寫入成功才更新記憶體，避免連點雙回覆
         try:
-            db = interaction.client.db
+            bot = cast(commands.Bot, interaction.client)
+            db = bot.db  # type: ignore[attr-defined]
             cursor = await db.execute(
                 "INSERT INTO quiz_votes (user_id, user_name, choice) VALUES (?, ?, ?)",
                 (user_id, user_name, self.choice_key),
@@ -283,7 +286,7 @@ class QuizSystem(commands.Cog):
             description=f"回顧今日題目：\n{question['title']}",
             color=0xE74C3C,
         )
-        results = {key: [] for key in question["options"].keys()}
+        results: dict[str, list[str]] = {key: [] for key in question["options"].keys()}
         for user_info in self.active_poll["votes"].values():
             results[user_info["choice"]].append(user_info["name"])
 

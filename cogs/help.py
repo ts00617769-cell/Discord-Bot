@@ -41,7 +41,21 @@ class HelpCog(commands.Cog):
             value="`!尋人回報 [目前名稱] [前身1]...` 或 `!尋人回報 名稱 清除`",
             inline=False,
         )
-        embed.add_field(name="🛫 轉服掃描", value="`!轉服掃描`", inline=False)
+        embed.add_field(
+            name="🛫 轉服掃描",
+            value="`!轉服掃描`（別名：`!移民清單`、`!抓包`）",
+            inline=False,
+        )
+        embed.add_field(
+            name="🧪 測試轉移警報",
+            value="`!測試轉移警報`（限轉移警報頻道或指令白名單）",
+            inline=False,
+        )
+        embed.add_field(
+            name="🛠️ 重建履歷",
+            value="`!重建履歷 [增量|全量]`（擁有者；補建 player_profile denorm）",
+            inline=False,
+        )
         embed.set_footer(text="機密層級：最高 | 資料來源：warsofprasia.beanfun.com")
         await ctx.send(embed=embed)
 

@@ -26,7 +26,7 @@ class TimeCrevice(commands.Cog):
 
     @commands.command(name="時空王", aliases=["交叉王", "時間隙縫", "時空隙縫", "隙縫戰報", "crevice戰報"])
     @commands.cooldown(1, 15, commands.BucketType.user)
-    async def time_crevice(self, ctx, server_name: str = None):
+    async def time_crevice(self, ctx, server_name: str | None = None):
         """
         查詢時間隙縫首領擊殺戰報
         用法: !時空王 [伺服器名稱]

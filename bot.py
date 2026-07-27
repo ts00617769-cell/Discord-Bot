@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import atexit
 import logging
 import os
@@ -5,6 +7,7 @@ import socket
 import sqlite3
 import sys
 from collections import Counter
+from typing import Any, cast
 
 import aiohttp
 import discord
@@ -348,7 +351,7 @@ async def on_ready():
         logger.warning(f"清理 cmd_dedupe 失敗: {e}")
 
 @bot.command(name="reload", hidden=True)
-@commands.is_owner()
+@cast(Any, commands.is_owner())
 async def reload_cog(ctx, extension: str):
     """(開發者專用) 重新載入特定的模組，不用重開機器人！"""
     try:

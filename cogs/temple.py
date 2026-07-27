@@ -32,7 +32,7 @@ class Temple(commands.Cog):
             logger.error(f"[線上廟宇] 讀取籤詩失敗: {e}")
 
     @commands.command(name="求籤", help="向菩薩請示。用法: !求籤 [你的問題]")
-    async def draw_fortune(self, ctx, *, question: str = None):
+    async def draw_fortune(self, ctx, *, question: str | None = None):
         # --- 強制容錯：如果籤筒是空的，立刻執行一次載入 ---
         if not self.fortunes:
             logger.warning("[線上廟宇] 偵測到籤筒為空，嘗試強制重新載入...")

@@ -7,7 +7,7 @@ import aiosqlite
 import pytest
 
 from db.schema import apply_migrations, rebuild_player_profiles_sync
-from services.player_search_db import PlayerSearchStore, normalize_profile_rows
+from services.player_search_db import PlayerSearchStore
 
 
 @pytest.mark.asyncio

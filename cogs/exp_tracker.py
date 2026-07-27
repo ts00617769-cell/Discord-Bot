@@ -10,6 +10,7 @@ from discord.ext import commands, tasks
 from db import ensure_search_indexes
 from db.connection import read_db
 from game_data import SERVER_MAP
+from services.alert_dedupe import mark_overspeed_sent, overspeed_already_sent
 from services.error_handler import (
     min_complete_snapshot_servers,
     min_snapshot_players,
@@ -30,6 +31,11 @@ from services.member_registry import get_member_tag
 from services.ranking_api import get_ranking_client
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
+from services.transfer_alert_flow import (
+    filter_viable_ranked,
+    lookup_alerted_pairs,
+    pair_key_from_row,
+)
 from services.transfer_detect import (
     CLASS_MARGIN,
     NAME_MARGIN,
@@ -121,56 +127,11 @@ class ExpTracker(commands.Cog):
 
     async def _setting_exists(self, key: str) -> bool:
         """相容舊 bot_settings overspeed:*；新寫入走 alert_dedupe。"""
-        async with read_db(self.bot).execute(
-            "SELECT 1 FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
-            ("overspeed", key),
-        ) as cursor:
-            if await cursor.fetchone():
-                return True
-        async with read_db(self.bot).execute(
-            "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
-        ) as cursor:
-            return await cursor.fetchone() is not None
+        return await overspeed_already_sent(read_db(self.bot), key)
 
     async def _mark_setting(self, key: str, value: str = "1") -> None:
         now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        await self.bot.db.execute(
-            """
-            INSERT INTO alert_dedupe (kind, dedupe_key, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(kind, dedupe_key) DO UPDATE SET created_at=excluded.created_at
-            """,
-            ("overspeed", key, now),
-        )
-        await self.bot.db.commit()
-
-    async def _transfer_pairs_already_alerted(
-        self, pair_keys: list[tuple[str, str, str, str]]
-    ) -> set[tuple[str, str, str, str]]:
-        """只查候選 pair，避免整表載入 transfer_alerts_log。"""
-        if not pair_keys:
-            return set()
-        found: set[tuple[str, str, str, str]] = set()
-        db = read_db(self.bot)
-        # SQLite 變數上限保守分批
-        chunk = 80
-        for i in range(0, len(pair_keys), chunk):
-            batch = pair_keys[i : i + chunk]
-            placeholders = ",".join("(?,?,?,?)" for _ in batch)
-            flat: list[str] = []
-            for p in batch:
-                flat.extend(p)
-            async with db.execute(
-                f"""
-                SELECT old_name, old_server, new_name, new_server
-                FROM transfer_alerts_log
-                WHERE (old_name, old_server, new_name, new_server) IN ({placeholders})
-                """,
-                tuple(flat),
-            ) as cursor:
-                for row in await cursor.fetchall():
-                    found.add(tuple(row))
-        return found
+        await mark_overspeed_sent(self.bot.db, key, created_at=now)
 
     async def _startup_validate_servers(self):
         try:
@@ -306,7 +267,7 @@ class ExpTracker(commands.Cog):
             ORDER BY record_time DESC LIMIT 10
         """
         async with read_db(self.bot).execute(sql_times, (min_servers,)) as cursor:
-            times = await cursor.fetchall()
+            times = [tuple(r) for r in await cursor.fetchall()]
 
         if len(times) < 2:
             return
@@ -331,7 +292,7 @@ class ExpTracker(commands.Cog):
                           ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
                         WHERE t1.record_time = ? AND t2.record_time = ?
                     '''
-                    params = (time_now, time_prev)
+                    params: tuple = (time_now, time_prev)
                 else:
                     sql = '''
                         SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
@@ -343,7 +304,7 @@ class ExpTracker(commands.Cog):
                     params = (time_now, time_prev, self.alert_server)
 
                 async with read_db(self.bot).execute(sql, params) as cursor:
-                    records = await cursor.fetchall()
+                    records = [tuple(r) for r in await cursor.fetchall()]
 
                 alert_list = collect_overspeed(
                     records, minutes_diff, self.SPEED_LIMIT
@@ -441,13 +402,6 @@ class ExpTracker(commands.Cog):
                     logger.error(f"Failed to send transfer alert to {channel_id}: {e}")
         return success
 
-    async def _player_present_at(self, record_time, player_name, server_name) -> bool:
-        async with read_db(self.bot).execute(
-            "SELECT 1 FROM exp_history WHERE record_time = ? AND player_name = ? AND server_name = ?",
-            (record_time, player_name, server_name),
-        ) as cursor:
-            return await cursor.fetchone() is not None
-
     async def check_for_transfers(self, time_now, time_prev, complete_times=None):
         try:
             transfer_records = await self._get_potential_transfers(
@@ -467,26 +421,13 @@ class ExpTracker(commands.Cog):
 
             alias_map = build_alias_map(registry_rows)
             ranked = rank_transfer_candidates(transfer_records, alias_map)
+            db = read_db(self.bot)
 
-            candidate_keys = [
-                (row[5], row[6], row[1], row[2]) for row in ranked
-            ]
-            already_alerted = await self._transfer_pairs_already_alerted(candidate_keys)
-
-            viable = []
-            for row in ranked:
-                pair_key = (row[5], row[6], row[1], row[2])
-                if pair_key in already_alerted:
-                    continue
-                old_name, old_server = row[5], row[6]
-                old_missing_all = True
-                for miss_t in miss_times:
-                    if await self._player_present_at(miss_t, old_name, old_server):
-                        old_missing_all = False
-                        break
-                if not old_missing_all:
-                    continue
-                viable.append(row)
+            candidate_keys = [pair_key_from_row(row) for row in ranked]
+            already_alerted = await lookup_alerted_pairs(db, candidate_keys)
+            viable = await filter_viable_ranked(
+                db, ranked, already_alerted, miss_times
+            )
 
             for pair in pick_unique_pairs(viable, already_alerted):
                 sent = await self._send_transfer_alert(

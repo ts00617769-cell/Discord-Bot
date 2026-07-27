@@ -58,18 +58,26 @@ class RankTracker(commands.Cog):
             level_filter = filters.level_filter
 
             class_key = resolve_class_key(class_filter) if class_filter else None
-            fetch_kwargs = {}
-            if class_key:
-                fetch_kwargs["classes"] = [class_key]
 
             if is_global:
+                fetch_kwargs = {}
+                if class_key:
+                    fetch_kwargs["classes"] = [class_key]
                 all_players, failed_servers = await client.fetch_all_servers(
                     SERVER_MAP, **fetch_kwargs
                 )
             else:
-                result = await client.fetch_server(
-                    target_group_id, target_world_id, **fetch_kwargs
-                )
+                assert target_group_id is not None and target_world_id is not None
+                if class_key:
+                    result = await client.fetch_server(
+                        target_group_id,
+                        target_world_id,
+                        classes=[class_key],
+                    )
+                else:
+                    result = await client.fetch_server(
+                        target_group_id, target_world_id
+                    )
                 if not result.ok:
                     err = result.error or "未知錯誤"
                     return await processing_msg.edit(content=f"❌ 撈取失敗：{err}")

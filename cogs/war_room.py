@@ -146,7 +146,7 @@ class WarRoom(commands.Cog):
 
     async def _gather_health_stats(self) -> dict:
         db = read_db(self.bot)
-        stats = {
+        stats: dict = {
             "exp_rows": 0,
             "transfer_rows": 0,
             "last_snapshot": None,
@@ -156,11 +156,13 @@ class WarRoom(commands.Cog):
             "denorm_filled": 0,
         }
         async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
-            stats["exp_rows"] = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            stats["exp_rows"] = row[0] if row else 0
         async with db.execute(
             "SELECT COUNT(*) FROM transfer_alerts_log"
         ) as cursor:
-            stats["transfer_rows"] = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            stats["transfer_rows"] = row[0] if row else 0
         async with db.execute(
             """
             SELECT record_time, COUNT(DISTINCT server_name)
