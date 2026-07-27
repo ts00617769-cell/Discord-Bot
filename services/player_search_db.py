@@ -1,7 +1,9 @@
 """天眼尋人資料庫查詢與無縫接軌候選（Discord 無關）。"""
 from __future__ import annotations
 
+from db.schema import DENORM_COVERAGE_READY_RATIO, denorm_is_ready
 from services import player_matching as match
+from services.member_registry import collect_alias_group
 from services.text_display import escape_like
 
 _PROFILE_SELECT = match.PROFILE_SELECT
@@ -26,20 +28,17 @@ class PlayerSearchStore:
         self.db = db
         self._denorm_ready: bool | None = None
 
+    def invalidate_denorm_cache(self) -> None:
+        self._denorm_ready = None
+
     async def _has_denorm_stats(self) -> bool:
-        """player_profile 是否已回填統計（抽樣檢查）。"""
+        """覆蓋率足夠才走 denorm 快路徑。"""
         if self._denorm_ready is not None:
             return self._denorm_ready
         try:
-            async with self.db.execute(
-                """
-                SELECT 1 FROM player_profile
-                WHERE min_exp IS NOT NULL AND first_seen IS NOT NULL
-                LIMIT 1
-                """
-            ) as cursor:
-                row = await cursor.fetchone()
-            self._denorm_ready = row is not None
+            self._denorm_ready = await denorm_is_ready(
+                self.db, min_ratio=DENORM_COVERAGE_READY_RATIO
+            )
         except Exception:
             self._denorm_ready = False
         return self._denorm_ready
@@ -96,31 +95,33 @@ class PlayerSearchStore:
         return await self._fetch_name_profiles(player_name, server_name)
 
     async def _fetch_profiles_by_names(self, names):
+        """合併 agg（保證歷史齊）與 denorm（有則覆寫）。"""
         name_list = list(names)
         if not name_list:
             return []
         placeholders = ",".join("?" for _ in name_list)
-        use_denorm = await self._has_denorm_stats()
-        if use_denorm:
-            sql = f'''
+        sql_agg = f"""
+            SELECT {_PROFILE_SELECT_AGG}
+            {_PROFILE_FROM_AGG}
+            WHERE e.player_name IN ({placeholders})
+            GROUP BY e.player_name, e.server_name
+        """
+        async with self.db.execute(sql_agg, tuple(name_list)) as cursor:
+            agg_rows = await cursor.fetchall()
+        by_key = {(r[0], r[1]): r for r in agg_rows}
+
+        if await self._has_denorm_stats():
+            sql_denorm = f"""
                 SELECT {_PROFILE_SELECT}
                 {_PROFILE_FROM}
                 WHERE pp.player_name IN ({placeholders})
                   AND pp.min_exp IS NOT NULL
                   AND pp.first_seen IS NOT NULL
-            '''
-            async with self.db.execute(sql, tuple(name_list)) as cursor:
-                rows = await cursor.fetchall()
-            if rows:
-                return rows
-        sql = f'''
-            SELECT {_PROFILE_SELECT_AGG}
-            {_PROFILE_FROM_AGG}
-            WHERE e.player_name IN ({placeholders})
-            GROUP BY e.player_name, e.server_name
-        '''
-        async with self.db.execute(sql, tuple(name_list)) as cursor:
-            return await cursor.fetchall()
+            """
+            async with self.db.execute(sql_denorm, tuple(name_list)) as cursor:
+                for row in await cursor.fetchall():
+                    by_key[(row[0], row[1])] = row
+        return list(by_key.values())
 
     @staticmethod
     def _escape_like(value: str) -> str:
@@ -128,25 +129,8 @@ class PlayerSearchStore:
         return escape_like(value)
 
     async def _get_related_names(self, target_name):
-        """定向查詢別名群組，避免全表掃描 member_registry。"""
-        names = {target_name}
-        like = f"%{self._escape_like(target_name)}%"
-        async with self.db.execute(
-            '''
-            SELECT player_name, original_identity FROM member_registry
-            WHERE player_name = ?
-               OR original_identity = ?
-               OR original_identity LIKE ? ESCAPE '\\'
-            ''',
-            (target_name, target_name, like),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        for player_name, identity in rows:
-            aliases = [x.strip() for x in (identity or "").split(",") if x.strip()]
-            group = {player_name, *aliases}
-            if target_name in group:
-                names.update(group)
-        return names
+        """精確別名群組（BFS 閉包），避免 LIKE 子字串誤配。"""
+        return await collect_alias_group(self.db, {target_name})
 
     async def _recent_exp_anchors(self, player_name, server_name, limit=8):
         async with self.db.execute(
@@ -233,6 +217,29 @@ class PlayerSearchStore:
                 unknown_cls=unknown_cls,
                 use_denorm=use_denorm,
             )
+            # denorm 可能漏掉尚未進 profile 的歷史角：無 high 時補跑 CTE
+            if use_denorm and not any(c.get("confidence") == "high" for c in batch):
+                batch_cte = await self._seamless_one_margin(
+                    profile=(
+                        t_name, t_server, t_lvl, t_first, t_last,
+                        t_min_exp, t_max_exp, t_cls, t_sub,
+                    ),
+                    exp_margin=margin,
+                    window_days=window_days,
+                    limit=limit,
+                    unknown_cls=unknown_cls,
+                    use_denorm=False,
+                )
+                by_batch = {
+                    (c["name"], c["server"], c["direction"]): c for c in batch
+                }
+                for c in batch_cte:
+                    key = (c["name"], c["server"], c["direction"])
+                    prev = by_batch.get(key)
+                    if prev is None or c["score"] < prev["score"]:
+                        by_batch[key] = c
+                batch = list(by_batch.values())
+
             # 合併去重，保留較佳 score
             by_key: dict[tuple, dict] = {
                 (c["name"], c["server"], c["direction"]): c for c in merged

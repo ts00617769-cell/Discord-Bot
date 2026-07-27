@@ -9,11 +9,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db.connection import read_db, resolve_db_path
+from db.connection import read_db
 from db.schema import (
     backfill_player_profile_denorm,
     denorm_coverage_stats,
-    rebuild_player_profiles_sync,
+    rebuild_player_profiles,
 )
 from game_data import SERVER_MAP
 from services import player_matching as match
@@ -497,27 +497,19 @@ class PlayerSearch(commands.Cog):
         mode = (mode or "增量").strip()
         try:
             if mode in ("全量", "full", "全部"):
-                await ctx.send("⏳ 離線式全量重建中（可能較久）…")
-
-                path = resolve_db_path()
-
-                def _run():
-                    conn = sqlite3.connect(str(path))
-                    try:
-                        return rebuild_player_profiles_sync(conn)
-                    finally:
-                        conn.close()
-
-                n = await asyncio.to_thread(_run)
+                await ctx.send("⏳ 全量重建中（使用 bot 寫入連線，可能較久）…")
+                n = await rebuild_player_profiles(self.bot.db)
                 invalidate_search_cache()
                 self._refresh_store()
+                if hasattr(self.store, "invalidate_denorm_cache"):
+                    self.store.invalidate_denorm_cache()
                 await ctx.send(f"✅ 全量重建完成，共 {n:,} 筆 player_profile。")
             else:
                 total, filled = await denorm_coverage_stats(read_db(self.bot))
                 n = await backfill_player_profile_denorm(self.bot.db, batch_limit=2000)
                 invalidate_search_cache()
-                if hasattr(self.store, "_denorm_ready"):
-                    self.store._denorm_ready = None
+                if hasattr(self.store, "invalidate_denorm_cache"):
+                    self.store.invalidate_denorm_cache()
                 self._refresh_store()
                 await ctx.send(
                     f"✅ 增量回填 {n} 筆（先前覆蓋 {filled}/{total}）。"

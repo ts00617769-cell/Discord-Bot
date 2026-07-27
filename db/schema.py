@@ -476,9 +476,13 @@ async def ensure_search_indexes(
 def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
     """離線重建 player_profile（職業 + min/max EXP／首末見／等級／討伐）。回傳寫入列數。"""
     _ensure_player_profile_columns_sync(conn)
-    conn.execute("DELETE FROM player_profile")
-    conn.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
-    conn.commit()
+    try:
+        conn.execute("DELETE FROM player_profile")
+        conn.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     row = conn.execute("SELECT COUNT(*) FROM player_profile").fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
@@ -528,14 +532,52 @@ _PLAYER_PROFILE_REBUILD_INSERT_SQL = """
 
 
 async def rebuild_player_profiles(db) -> int:
-    """線上重建 player_profile（與離線 rebuild_player_profiles_sync 同邏輯）。"""
+    """線上重建 player_profile；失敗必 rollback，避免留下空表。"""
     await _ensure_player_profile_columns(db)
-    await db.execute("DELETE FROM player_profile")
-    await db.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
-    await db.commit()
+    try:
+        await db.execute("DELETE FROM player_profile")
+        await db.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("rebuild_player_profiles rollback 失敗", exc_info=True)
+        raise
     async with db.execute("SELECT COUNT(*) FROM player_profile") as cursor:
         row = await cursor.fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+async def prune_orphaned_player_profiles(db) -> int:
+    """刪除已無 exp_history 對應的 player_profile 列；回傳刪除數。"""
+    await _ensure_player_profile_columns(db)
+    try:
+        cursor = await db.execute(
+            """
+            DELETE FROM player_profile
+            WHERE NOT EXISTS (
+                SELECT 1 FROM exp_history e
+                WHERE e.player_name = player_profile.player_name
+                  AND e.server_name = player_profile.server_name
+            )
+            """
+        )
+        deleted = cursor.rowcount or 0
+        await db.commit()
+        return int(deleted)
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("prune_orphaned_player_profiles rollback 失敗", exc_info=True)
+        raise
+
+
+# 線上清理：刪除量達此門檻才考慮全量 rebuild（其餘用 orphan prune + backfill）
+ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD = 5_000
+# denorm 覆蓋率低於此值則不走 denorm 快路徑
+DENORM_COVERAGE_READY_RATIO = 0.85
 
 
 async def denorm_coverage_stats(db) -> tuple[int, int]:
@@ -548,6 +590,13 @@ async def denorm_coverage_stats(db) -> tuple[int, int]:
         filled = int((await cursor.fetchone())[0] or 0)
     return total, filled
 
+
+async def denorm_is_ready(db, *, min_ratio: float = DENORM_COVERAGE_READY_RATIO) -> bool:
+    """覆蓋率足夠才允許 denorm 快路徑。"""
+    total, filled = await denorm_coverage_stats(db)
+    if total <= 0:
+        return False
+    return (filled / total) >= min_ratio
 
 async def backfill_player_profile_denorm(db, *, batch_limit: int = 500) -> int:
     """增量回填 player_profile 缺 denorm 統計的列；回傳本批更新數。

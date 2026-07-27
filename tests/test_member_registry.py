@@ -44,3 +44,51 @@ async def test_upsert_alias_links_bidirectional(tmp_path):
         assert "現名" not in await _identity_of(db, "前身A")
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_clear_scrubs_stale_non_closure_rows(tmp_path):
+    """舊資料未互指時，clear 仍應清掉殘留 token。"""
+    db_path = tmp_path / "stale.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            "INSERT INTO member_registry VALUES ('主名', '別名X')"
+        )
+        await db.execute(
+            "INSERT INTO member_registry VALUES ('外人', '主名,別人')"
+        )
+        await db.commit()
+        await clear_member_identity(db, "主名")
+        assert "主名" not in await _identity_of(db, "外人")
+        async with db.execute(
+            "SELECT 1 FROM member_registry WHERE player_name='主名'"
+        ) as cur:
+            assert await cur.fetchone() is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_related_names_no_substring_false_positive(tmp_path):
+    from services.player_search_db import PlayerSearchStore
+
+    db_path = tmp_path / "like.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            "INSERT INTO member_registry VALUES ('小碎', '別人')"
+        )
+        await db.execute(
+            "INSERT INTO member_registry VALUES ('小碎冰', '前身')"
+        )
+        await db.commit()
+        store = PlayerSearchStore(db)
+        related = await store._get_related_names("小碎")
+        assert "小碎" in related
+        assert "別人" in related
+        assert "小碎冰" not in related
+    finally:
+        await db.close()

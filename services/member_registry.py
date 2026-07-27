@@ -20,6 +20,11 @@ def _join_identities(names: list[str]) -> str:
     return ", ".join(out)
 
 
+def identity_contains_name(raw: str | None, name: str) -> bool:
+    """original_identity 字串是否含完整別名 token（非子字串）。"""
+    return name in _split_identities(raw)
+
+
 async def get_member_tag(db, name: str) -> str:
     """回傳 `({original_identity})` 或空字串。"""
 
@@ -62,13 +67,29 @@ async def _set_identity_list(db, player_name: str, identities: list[str]) -> Non
     )
 
 
-async def _collect_alias_group(db, seed_names: set[str]) -> set[str]:
-    """BFS 收集同一別名群組內所有玩家名。"""
+async def _load_alias_adjacency(db) -> dict[str, set[str]]:
+    """一次載入 registry，建成雙向鄰接表。"""
+    adj: dict[str, set[str]] = {}
+    async with db.execute(
+        "SELECT player_name, original_identity FROM member_registry"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    for player_name, raw in rows:
+        aliases = _split_identities(raw)
+        adj.setdefault(player_name, set()).update(aliases)
+        for alias in aliases:
+            adj.setdefault(alias, set()).add(player_name)
+    return adj
+
+
+async def collect_alias_group(db, seed_names: set[str]) -> set[str]:
+    """BFS 收集同一別名群組（精確 token，不用 LIKE）。"""
+    adj = await _load_alias_adjacency(db)
     group = set(seed_names)
-    frontier = list(group)
+    frontier = list(seed_names)
     while frontier:
         name = frontier.pop()
-        for linked in await _get_identity_list(db, name):
+        for linked in adj.get(name, ()):
             if linked not in group:
                 group.add(linked)
                 frontier.append(linked)
@@ -92,7 +113,7 @@ async def upsert_alias_links(db, current_name: str, aliases: list[str]) -> str:
         return ""
 
     seeds = {current, *alias_list}
-    group = await _collect_alias_group(db, seeds)
+    group = await collect_alias_group(db, seeds)
     group.update(alias_list)
     await _sync_alias_group(db, group)
     await db.commit()
@@ -100,11 +121,11 @@ async def upsert_alias_links(db, current_name: str, aliases: list[str]) -> str:
 
 
 async def clear_member_identity(db, player_name: str) -> None:
-    """清除玩家標記；群組其餘成員仍彼此互指。"""
+    """清除玩家標記；群組其餘成員仍彼此互指，並全表 scrub 殘留 token。"""
     name = (player_name or "").strip()
     if not name:
         return
-    group = await _collect_alias_group(db, {name})
+    group = await collect_alias_group(db, {name})
     await db.execute(
         "DELETE FROM member_registry WHERE player_name = ?",
         (name,),
@@ -112,4 +133,17 @@ async def clear_member_identity(db, player_name: str) -> None:
     remaining = group - {name}
     if remaining:
         await _sync_alias_group(db, remaining)
+
+    async with db.execute(
+        "SELECT player_name, original_identity FROM member_registry"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    for other_name, raw in rows:
+        if other_name == name:
+            continue
+        identities = _split_identities(raw)
+        if name not in identities:
+            continue
+        identities = [x for x in identities if x != name]
+        await _set_identity_list(db, other_name, identities)
     await db.commit()

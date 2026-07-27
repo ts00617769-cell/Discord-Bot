@@ -134,3 +134,54 @@ async def test_run_track_search_with_server_filter(tmp_path):
         assert seeds[0]["server"] == "S1"
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_track_search_server_filter_limits_alias_seed(tmp_path):
+    """指定伺服器時，別名 seed 不得從其他服帶入。"""
+    db_path = tmp_path / "alias_seed.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.executemany(
+            """
+            INSERT INTO exp_history
+            (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("2026-07-01 10:00:00", "S1", "Target", 50, 1e12, "戰士", 5),
+                ("2026-07-01 10:00:00", "S2", "Alias", 50, 2e12, "戰士", 5),
+                ("2026-07-01 11:00:00", "S1", "Alias", 50, 1.5e12, "戰士", 5),
+            ],
+        )
+        await db.execute(
+            "INSERT INTO member_registry (player_name, original_identity) VALUES ('Target', 'Alias')"
+        )
+        await db.execute(
+            "INSERT INTO member_registry (player_name, original_identity) VALUES ('Alias', 'Target')"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rebuild_player_profiles_sync(conn)
+    finally:
+        conn.close()
+
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        store = PlayerSearchStore(db)
+        result = await run_track_search(store, db, "Target", server_name="S1")
+        seeds = [
+            (e["name"], e["server"])
+            for e in result.unique_entries
+            if e["match_type"] in ("🎯 查詢目標", "🏷️ 登錄別名")
+        ]
+        assert ("Target", "S1") in seeds
+        assert ("Alias", "S2") not in seeds
+        assert ("Alias", "S1") in seeds
+    finally:
+        await db.close()

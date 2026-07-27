@@ -7,7 +7,14 @@ import discord
 from discord.ext import commands, tasks
 
 from db.connection import read_db
-from db.schema import list_missing_search_indexes_async, rebuild_player_profiles
+from db.schema import (
+    ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD,
+    backfill_player_profile_denorm,
+    denorm_coverage_stats,
+    list_missing_search_indexes_async,
+    prune_orphaned_player_profiles,
+    rebuild_player_profiles,
+)
 from services.error_handler import parse_env_channel_id
 from services.retention_windows import (
     DEFAULT_MAX_TRANSFER_WINDOWS,
@@ -145,6 +152,8 @@ class WarRoom(commands.Cog):
             "last_snapshot": None,
             "server_count_last": 0,
             "missing_indexes": [],
+            "denorm_total": 0,
+            "denorm_filled": 0,
         }
         async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
             stats["exp_rows"] = (await cursor.fetchone())[0]
@@ -169,6 +178,12 @@ class WarRoom(commands.Cog):
             stats["missing_indexes"] = await list_missing_search_indexes_async(db)
         except sqlite3.DatabaseError as e:
             logger.warning(f"list missing indexes failed: {e}")
+        try:
+            total, filled = await denorm_coverage_stats(db)
+            stats["denorm_total"] = total
+            stats["denorm_filled"] = filled
+        except sqlite3.DatabaseError as e:
+            logger.warning(f"denorm coverage failed: {e}")
         return stats
 
     @tasks.loop(time=clean_time)
@@ -191,9 +206,18 @@ class WarRoom(commands.Cog):
             async with self.bot.db.execute(del_sql, del_params) as cursor:
                 deleted_exp = cursor.rowcount or 0
 
+            pruned_profiles = 0
             rebuilt_profiles = 0
+            backfilled = 0
             if deleted_exp > 0:
-                rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
+                # 輕量：清掉已無歷史的履歷；大刪除量才全量 rebuild
+                pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
+                if deleted_exp >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
+                    rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
+                else:
+                    backfilled = await backfill_player_profile_denorm(
+                        self.bot.db, batch_limit=1000
+                    )
 
             async with self.bot.db.execute(
                 """
@@ -234,6 +258,8 @@ class WarRoom(commands.Cog):
                 or deleted_settings > 0
                 or deleted_alert_dedupe > 0
                 or rebuilt_profiles > 0
+                or pruned_profiles > 0
+                or backfilled > 0
             ):
                 vacuum_hint = ""
                 if deleted_exp >= 5000:
@@ -242,7 +268,11 @@ class WarRoom(commands.Cog):
                     )
                 profile_note = ""
                 if rebuilt_profiles > 0:
-                    profile_note = f"、`player_profile` 重建 {rebuilt_profiles:,} 筆"
+                    profile_note = f"、`player_profile` 全量重建 {rebuilt_profiles:,} 筆"
+                elif pruned_profiles or backfilled:
+                    profile_note = (
+                        f"、履歷 prune {pruned_profiles}／backfill {backfilled}"
+                    )
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 尋人保留窗外清理 "
                     f"`exp_history` {deleted_exp} 筆、"
@@ -254,6 +284,10 @@ class WarRoom(commands.Cog):
                 )
 
         except sqlite3.DatabaseError as e:
+            try:
+                await self.bot.db.rollback()
+            except sqlite3.DatabaseError:
+                pass
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel:
                 await log_channel.send(f"⚠️ **【資料庫清理異常】**\n```python\n{e}\n```")
@@ -289,12 +323,19 @@ class WarRoom(commands.Cog):
                     "\n💡 `exp_history` 超過 5 萬筆；若尋人變慢，"
                     "請離線執行 `python cleanup_db.py --for-search`。"
                 )
+            denorm_note = ""
+            dt, df = stats.get("denorm_total", 0), stats.get("denorm_filled", 0)
+            if dt > 0 and df < dt:
+                denorm_note = (
+                    f"\n⚠️ denorm 覆蓋 {df:,}/{dt:,}；"
+                    "可用 `!重建履歷` 增量或離線 `--for-search`。"
+                )
             await channel.send(
                 f"📊 **【每週健康摘要】**\n"
                 f"> `exp_history`：{stats['exp_rows']:,} 筆\n"
                 f"> `transfer_alerts_log`：{stats['transfer_rows']:,} 筆\n"
                 f"> 最近快照：`{last}`（{stats['server_count_last']} 服）"
-                f"{vacuum_note}"
+                f"{vacuum_note}{denorm_note}"
             )
         except sqlite3.DatabaseError as e:
             logger.error(f"Health summary failed: {e}", exc_info=True)

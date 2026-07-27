@@ -65,10 +65,14 @@ async def run_track_search(
         aliases = [n for n in related_names if n != target_name]
         if aliases:
             seen = {(p[0], p[1]) for p in target_profiles}
-            for p in await store._fetch_profiles_by_names(aliases):
-                if (p[0], p[1]) not in seen:
-                    target_profiles.append(p)
-                    seen.add((p[0], p[1]))
+            # 指定伺服器時：別名 seed 也限該服，避免全服別名污染；BFS 仍可跨服擴張
+            for alias in aliases:
+                for p in normalize_profile_rows(
+                    await store._fetch_name_profiles(alias, server_name=server_name)
+                ):
+                    if (p[0], p[1]) not in seen:
+                        target_profiles.append(p)
+                        seen.add((p[0], p[1]))
     else:
         target_profiles = await store._fetch_profiles_by_names(related_names)
 
@@ -175,6 +179,7 @@ async def run_track_search(
                 WHERE e.exp IN ({placeholders})
                   AND NOT (e.player_name = ? AND e.server_name = ?)
                 GROUP BY e.exp, e.player_name, e.server_name
+                ORDER BY MAX(e.record_time) DESC
                 LIMIT 30
             """
             async with db.execute(
