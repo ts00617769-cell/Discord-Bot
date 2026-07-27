@@ -29,8 +29,8 @@ jobs:
       - name: Run ruff
         run: ruff check .
 
-      - name: Run mypy (services + db)
-        run: mypy services db
+      - name: Run mypy (services + db + bot + cogs)
+        run: mypy services db bot.py cogs
 
       - name: Run pytest
         run: pytest -q
