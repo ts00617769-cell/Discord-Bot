@@ -12,6 +12,15 @@ _PROFILE_STATS_SELECT = match.PROFILE_STATS_SELECT
 _PROFILE_CTE = match.PROFILE_CTE
 
 
+def normalize_profile_rows(result) -> list[tuple]:
+    """_fetch_name_profiles 可能回傳 list、單列 tuple 或 None。"""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    return [result]
+
+
 class PlayerSearchStore:
     def __init__(self, db):
         self.db = db

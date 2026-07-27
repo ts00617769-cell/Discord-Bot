@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
 from services.error_handler import parse_env_channel_id
-from services.timeutil import now_taipei, today_taipei_str
+from services.timeutil import now_naive_taipei, now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +28,25 @@ class BossSchedule(commands.Cog):
 
     async def _already_reminded(self, key: str) -> bool:
         async with self.bot.db.execute(
+            "SELECT 1 FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
+            ("boss_reminder", key),
+        ) as cursor:
+            if await cursor.fetchone():
+                return True
+        async with self.bot.db.execute(
             "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
         ) as cursor:
             return await cursor.fetchone() is not None
 
     async def _mark_reminded(self, key: str) -> None:
+        now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         await self.bot.db.execute(
             """
-            INSERT INTO bot_settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            INSERT INTO alert_dedupe (kind, dedupe_key, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(kind, dedupe_key) DO UPDATE SET created_at=excluded.created_at
             """,
-            (key, "1"),
+            ("boss_reminder", key, now),
         )
         await self.bot.db.commit()
 

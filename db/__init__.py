@@ -17,6 +17,7 @@ from .schema import (
     ensure_search_indexes,
     list_missing_search_indexes,
     list_missing_search_indexes_async,
+    rebuild_player_profiles,
     rebuild_player_profiles_sync,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "list_missing_search_indexes",
     "list_missing_search_indexes_async",
     "read_db",
+    "rebuild_player_profiles",
     "rebuild_player_profiles_sync",
     "resolve_db_path",
 ]

@@ -40,8 +40,10 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
     exp_history_outside_keep_sql,
+    search_retention_cutoff,
 )
 from services.settings_prune import (  # noqa: E402
+    PRUNE_ALERT_DEDUPE_SQL,
     PRUNE_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
@@ -300,6 +302,7 @@ def main() -> int:
         has_exp = _table_exists(conn, "exp_history")
         has_transfer = _table_exists(conn, "transfer_alerts_log")
         has_settings = _table_exists(conn, "bot_settings")
+        has_alert_dedupe = _table_exists(conn, "alert_dedupe")
 
         if indexes_only:
             if args.dry_run:
@@ -343,6 +346,11 @@ def main() -> int:
                 if has_settings
                 else 0
             )
+            alert_dedupe_stale = (
+                _count(conn, "SELECT COUNT(*) FROM alert_dedupe")
+                if has_alert_dedupe
+                else 0
+            )
             mode = "清空全部歷史"
         elif args.for_search:
             keep_ranges = build_search_keep_ranges(
@@ -355,8 +363,12 @@ def main() -> int:
                 keep_ranges, for_delete=True
             )
             exp_stale = _count(conn, count_sql, count_params) if has_exp else 0
-            # transfer / settings：與「最近 N 天」對齊
-            settings_cutoff = taipei_cutoff_str(args.recent_days)
+            # transfer / settings / alert_dedupe：與「最近 N 天」對齊
+            settings_cutoff = search_retention_cutoff(
+                recent_days=args.recent_days,
+                pad_days=args.transfer_pad_days,
+                max_transfer_windows=args.max_transfer_windows,
+            )
             transfer_stale = (
                 _count(
                     conn,
@@ -383,6 +395,15 @@ def main() -> int:
                     ),
                 )
                 if has_settings
+                else 0
+            )
+            alert_dedupe_stale = (
+                _count(
+                    conn,
+                    "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
+                    (settings_cutoff,),
+                )
+                if has_alert_dedupe
                 else 0
             )
             mode = (
@@ -433,6 +454,15 @@ def main() -> int:
                 if has_settings
                 else 0
             )
+            alert_dedupe_stale = (
+                _count(
+                    conn,
+                    "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
+                    (cutoff,),
+                )
+                if has_alert_dedupe
+                else 0
+            )
             mode = f"保留最近 {args.days} 天（截止 {cutoff} 台北）"
 
         print(f"模式：{mode}")
@@ -446,18 +476,29 @@ def main() -> int:
             print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
         else:
             print("bot_settings：表不存在，略過")
+        if has_alert_dedupe:
+            print(f"alert_dedupe：將刪 {alert_dedupe_stale:,} 筆")
+        else:
+            print("alert_dedupe：表不存在，略過")
 
         if args.dry_run:
             print("dry-run：未修改資料庫。")
             return 0
 
-        if exp_stale == 0 and transfer_stale == 0 and settings_stale == 0 and args.no_vacuum:
+        if (
+            exp_stale == 0
+            and transfer_stale == 0
+            and settings_stale == 0
+            and alert_dedupe_stale == 0
+            and args.no_vacuum
+        ):
             print("沒有可刪資料，略過。")
             return 0
 
         deleted_exp = 0
         deleted_transfer = 0
         deleted_settings = 0
+        deleted_alert_dedupe = 0
         if args.wipe_history:
             if has_exp:
                 deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
@@ -470,6 +511,8 @@ def main() -> int:
                     WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
                     """
                 ).rowcount
+            if has_alert_dedupe:
+                deleted_alert_dedupe = conn.execute("DELETE FROM alert_dedupe").rowcount
         elif args.for_search:
             if has_exp and exp_delete_sql:
                 deleted_exp = conn.execute(exp_delete_sql, exp_delete_params).rowcount
@@ -489,6 +532,10 @@ def main() -> int:
                         overspeed_prune_bound(settings_cutoff),
                         boss_reminder_prune_bound(settings_cutoff[:10]),
                     ),
+                ).rowcount
+            if has_alert_dedupe:
+                deleted_alert_dedupe = conn.execute(
+                    PRUNE_ALERT_DEDUPE_SQL, (settings_cutoff,)
                 ).rowcount
         else:
             cutoff = taipei_cutoff_str(args.days)
@@ -516,12 +563,17 @@ def main() -> int:
                         boss_reminder_prune_bound(cutoff[:10]),
                     ),
                 ).rowcount
+            if has_alert_dedupe:
+                deleted_alert_dedupe = conn.execute(
+                    PRUNE_ALERT_DEDUPE_SQL, (cutoff,)
+                ).rowcount
 
         conn.commit()
         print(
             f"已刪除：exp_history {deleted_exp:,}、"
             f"transfer_alerts_log {deleted_transfer:,}、"
-            f"bot_settings 去重 {deleted_settings:,}"
+            f"bot_settings 去重 {deleted_settings:,}、"
+            f"alert_dedupe {deleted_alert_dedupe:,}"
         )
 
         if not args.no_vacuum:

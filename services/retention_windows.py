@@ -145,3 +145,19 @@ def exp_history_outside_keep_sql(
         params.extend([start, end])
     where = " OR ".join(parts)
     return f"{verb} WHERE NOT ({where})", tuple(params)
+
+
+def search_retention_cutoff(
+    *,
+    recent_days: int = DEFAULT_RECENT_DAYS,
+    pad_days: int = DEFAULT_TRANSFER_PAD_DAYS,
+    max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
+    now: Optional[datetime.datetime] = None,
+) -> str:
+    """與 cleanup_db --for-search 對齊的 transfer_alerts / alert_dedupe 截止時間。"""
+    _ = (pad_days, max_transfer_windows)
+    now_dt = now if now is not None else now_naive_taipei()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+    cutoff = now_dt - datetime.timedelta(days=int(recent_days))
+    return cutoff.strftime(FMT_SQL)

@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands, tasks
 
 from db.connection import read_db
-from db.schema import list_missing_search_indexes_async
+from db.schema import list_missing_search_indexes_async, rebuild_player_profiles
 from services.error_handler import parse_env_channel_id
 from services.retention_windows import (
     DEFAULT_MAX_TRANSFER_WINDOWS,
@@ -15,6 +15,7 @@ from services.retention_windows import (
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
     exp_history_outside_keep_sql,
+    search_retention_cutoff,
 )
 from services.settings_prune import (
     PRUNE_ALERT_DEDUPE_SQL,
@@ -22,7 +23,7 @@ from services.settings_prune import (
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
-from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
+from services.timeutil import TAIPEI, now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,11 @@ class WarRoom(commands.Cog):
     async def db_cleanup_task(self):
         """每天凌晨 4 點：尋人導向保留（近 N 天 ∪ 轉移窗）外刪除；不過期 VACUUM。"""
         try:
-            cutoff = taipei_cutoff_str(60)
+            retention_cutoff = search_retention_cutoff(
+                recent_days=DEFAULT_RECENT_DAYS,
+                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
+                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
+            )
             keep_ranges = build_search_keep_ranges(
                 recent_days=DEFAULT_RECENT_DAYS,
                 pad_days=DEFAULT_TRANSFER_PAD_DAYS,
@@ -186,27 +191,33 @@ class WarRoom(commands.Cog):
             async with self.bot.db.execute(del_sql, del_params) as cursor:
                 deleted_exp = cursor.rowcount or 0
 
+            rebuilt_profiles = 0
+            if deleted_exp > 0:
+                rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
+
             async with self.bot.db.execute(
                 """
                 DELETE FROM transfer_alerts_log
                 WHERE alert_time < ?
                 """,
-                (cutoff,),
+                (retention_cutoff,),
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
 
-            cutoff_date_only = cutoff[:10] if len(cutoff) >= 10 else today_taipei_str()
+            cutoff_date_only = (
+                retention_cutoff[:10] if len(retention_cutoff) >= 10 else today_taipei_str()
+            )
             async with self.bot.db.execute(
                 PRUNE_DEDUPE_SQL,
                 (
-                    overspeed_prune_bound(cutoff),
+                    overspeed_prune_bound(retention_cutoff),
                     boss_reminder_prune_bound(cutoff_date_only),
                 ),
             ) as cursor:
                 deleted_settings = cursor.rowcount or 0
 
             async with self.bot.db.execute(
-                PRUNE_ALERT_DEDUPE_SQL, (cutoff,)
+                PRUNE_ALERT_DEDUPE_SQL, (retention_cutoff,)
             ) as cursor:
                 deleted_alert_dedupe = cursor.rowcount or 0
 
@@ -222,18 +233,23 @@ class WarRoom(commands.Cog):
                 or deleted_transfer > 0
                 or deleted_settings > 0
                 or deleted_alert_dedupe > 0
+                or rebuilt_profiles > 0
             ):
                 vacuum_hint = ""
                 if deleted_exp >= 5000:
                     vacuum_hint = (
                         "\n💡 刪除量較大，建議停 bot 後執行 `python cleanup_db.py` 釋放磁碟。"
                     )
+                profile_note = ""
+                if rebuilt_profiles > 0:
+                    profile_note = f"、`player_profile` 重建 {rebuilt_profiles:,} 筆"
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 尋人保留窗外清理 "
                     f"`exp_history` {deleted_exp} 筆、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆、"
                     f"`bot_settings` 去重 key {deleted_settings} 筆、"
-                    f"`alert_dedupe` {deleted_alert_dedupe} 筆。"
+                    f"`alert_dedupe` {deleted_alert_dedupe} 筆"
+                    f"{profile_note}。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
                 )
 

@@ -477,8 +477,13 @@ def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
     """離線重建 player_profile（職業 + min/max EXP／首末見／等級／討伐）。回傳寫入列數。"""
     _ensure_player_profile_columns_sync(conn)
     conn.execute("DELETE FROM player_profile")
-    conn.execute(
-        """
+    conn.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
+    conn.commit()
+    row = conn.execute("SELECT COUNT(*) FROM player_profile").fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+_PLAYER_PROFILE_REBUILD_INSERT_SQL = """
         INSERT INTO player_profile (
             player_name, server_name, class_name, updated_at,
             min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade
@@ -520,9 +525,16 @@ def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
           ON latest.player_name = a.player_name
          AND latest.server_name = a.server_name
         """
-    )
-    conn.commit()
-    row = conn.execute("SELECT COUNT(*) FROM player_profile").fetchone()
+
+
+async def rebuild_player_profiles(db) -> int:
+    """線上重建 player_profile（與離線 rebuild_player_profiles_sync 同邏輯）。"""
+    await _ensure_player_profile_columns(db)
+    await db.execute("DELETE FROM player_profile")
+    await db.execute(_PLAYER_PROFILE_REBUILD_INSERT_SQL)
+    await db.commit()
+    async with db.execute("SELECT COUNT(*) FROM player_profile") as cursor:
+        row = await cursor.fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
 

@@ -1,6 +1,9 @@
 """版本化 schema 遷移。"""
 from __future__ import annotations
 
+import sqlite3
+
+import aiosqlite
 import pytest
 
 from db.schema import (
@@ -9,14 +12,13 @@ from db.schema import (
     build_search_indexes_sync,
     ensure_search_indexes,
     list_missing_search_indexes,
+    rebuild_player_profiles,
     rebuild_player_profiles_sync,
 )
 
 
 @pytest.mark.asyncio
 async def test_apply_migrations_fresh_db(tmp_path):
-    import aiosqlite
-
     db_path = tmp_path / "t.db"
     db = await aiosqlite.connect(str(db_path))
     try:
@@ -59,9 +61,6 @@ async def test_apply_migrations_fresh_db(tmp_path):
 
 @pytest.mark.asyncio
 async def test_rebuild_player_profiles_fills_stats(tmp_path):
-    import aiosqlite
-    import sqlite3
-
     db_path = tmp_path / "prof.db"
     db = await aiosqlite.connect(str(db_path))
     try:
@@ -91,9 +90,34 @@ async def test_rebuild_player_profiles_fills_stats(tmp_path):
         conn.close()
 
 
-def test_build_search_indexes_sync(tmp_path):
-    import sqlite3
+@pytest.mark.asyncio
+async def test_rebuild_player_profiles_async(tmp_path):
+    db_path = tmp_path / "async_prof.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO exp_history
+            (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+            VALUES
+            ('2026-07-01 10:00:00', 'S1', 'A', 10, 100.0, '戰士', 1),
+            ('2026-07-02 10:00:00', 'S1', 'A', 11, 200.0, '法師', 2)
+            """
+        )
+        await db.commit()
+        n = await rebuild_player_profiles(db)
+        assert n == 1
+        async with db.execute(
+            "SELECT class_name, min_exp, max_exp FROM player_profile"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row == ("法師", 100.0, 200.0)
+    finally:
+        await db.close()
 
+
+def test_build_search_indexes_sync(tmp_path):
     db_path = tmp_path / "sync.db"
     conn = sqlite3.connect(str(db_path))
     try:
@@ -123,8 +147,6 @@ def test_build_search_indexes_sync(tmp_path):
 
 @pytest.mark.asyncio
 async def test_legacy_column_backfill(tmp_path):
-    import aiosqlite
-
     db_path = tmp_path / "legacy.db"
     db = await aiosqlite.connect(str(db_path))
     try:

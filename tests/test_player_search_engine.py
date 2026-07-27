@@ -2,12 +2,30 @@
 from __future__ import annotations
 
 import datetime
+import sqlite3
 
-from services.player_search_engine import causal_transfer_pairs, parse_track_target
+import aiosqlite
+import pytest
+
+from db.schema import apply_migrations, rebuild_player_profiles_sync
+from services.player_search_db import PlayerSearchStore, normalize_profile_rows
+from services.player_search_engine import (
+    causal_transfer_pairs,
+    parse_track_target,
+    run_track_search,
+)
 from services.retention_windows import (
     build_search_keep_ranges,
     exp_history_outside_keep_sql,
+    search_retention_cutoff,
 )
+
+
+def test_normalize_profile_rows_single_tuple():
+    row = ("A", "S1", 10, "2026-07-01 10:00:00", "2026-07-02 10:00:00", 1.0, 2.0, "戰士", 1)
+    assert normalize_profile_rows(None) == []
+    assert normalize_profile_rows(row) == [row]
+    assert normalize_profile_rows([row]) == [row]
 
 
 def test_parse_track_target_with_server():
@@ -68,3 +86,51 @@ def test_online_cleanup_delete_sql_matches_for_search():
     assert sql.startswith("DELETE FROM exp_history")
     assert "NOT (" in sql
     assert len(params) == 2
+
+
+def test_search_retention_cutoff_matches_recent_days():
+    now = datetime.datetime(2026, 7, 27, 12, 0, 0)
+    cutoff = search_retention_cutoff(recent_days=3, now=now)
+    assert cutoff == "2026-07-24 12:00:00"
+
+
+@pytest.mark.asyncio
+async def test_run_track_search_with_server_filter(tmp_path):
+    db_path = tmp_path / "track.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        await apply_migrations(db)
+        await db.executemany(
+            """
+            INSERT INTO exp_history
+            (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("2026-07-01 10:00:00", "S1", "Target", 50, 1e12, "戰士", 5),
+                ("2026-07-02 10:00:00", "S1", "Target", 51, 1.01e12, "戰士", 5),
+                ("2026-07-01 10:00:00", "S2", "Target", 50, 1e12, "戰士", 5),
+            ],
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rebuild_player_profiles_sync(conn)
+    finally:
+        conn.close()
+
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        store = PlayerSearchStore(db)
+        result = await run_track_search(store, db, "Target", server_name="S1")
+        assert result.kind in ("linked", "no_link", "soft")
+        seeds = [
+            e for e in result.unique_entries if e["match_type"] == "🎯 查詢目標"
+        ]
+        assert len(seeds) == 1
+        assert seeds[0]["server"] == "S1"
+    finally:
+        await db.close()

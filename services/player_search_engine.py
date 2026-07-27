@@ -15,7 +15,7 @@ from services.game_event_windows import (
     class_change_label,
     realm_transfer_label,
 )
-from services.player_search_db import PlayerSearchStore
+from services.player_search_db import PlayerSearchStore, normalize_profile_rows
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ async def run_track_search(
     """執行尋人 BFS；db 用於 exact EXP SQL（建議唯讀連線）。"""
     related_names = await store._get_related_names(target_name)
     if server_name:
-        target_profiles = list(
+        target_profiles = normalize_profile_rows(
             await store._fetch_name_profiles(target_name, server_name=server_name)
         )
         aliases = [n for n in related_names if n != target_name]

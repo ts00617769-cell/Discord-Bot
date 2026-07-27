@@ -5,6 +5,7 @@ from services.retention_windows import (
     build_search_keep_ranges,
     exp_history_outside_keep_sql,
     merge_ranges,
+    search_retention_cutoff,
     select_recent_transfer_windows,
 )
 

@@ -1,17 +1,17 @@
 """PlayerSearchStore denorm / seamless smoke tests."""
 from __future__ import annotations
 
+import sqlite3
+
+import aiosqlite
 import pytest
 
 from db.schema import apply_migrations, rebuild_player_profiles_sync
-from services.player_search_db import PlayerSearchStore
+from services.player_search_db import PlayerSearchStore, normalize_profile_rows
 
 
 @pytest.mark.asyncio
 async def test_seamless_uses_denorm_stats(tmp_path):
-    import aiosqlite
-    import sqlite3
-
     db_path = tmp_path / "search.db"
     db = await aiosqlite.connect(str(db_path))
     try:
