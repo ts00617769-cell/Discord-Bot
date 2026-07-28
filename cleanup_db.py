@@ -174,6 +174,11 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def _log(msg: str) -> None:
+    """進度輸出立即 flush，避免 docker/管道看起來像卡住。"""
+    print(msg, flush=True)
+
+
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
@@ -312,8 +317,8 @@ def main() -> int:
     shm = Path(str(db_path) + "-shm")
     before_total = before + _file_size(wal) + _file_size(shm)
 
-    print(f"資料庫：{db_path}")
-    print(f"清理前大小：{_fmt_bytes(before)}（含 WAL/SHM 約 {_fmt_bytes(before_total)}）")
+    _log(f"資料庫：{db_path}")
+    _log(f"清理前大小：{_fmt_bytes(before)}（含 WAL/SHM 約 {_fmt_bytes(before_total)}）")
 
     conn = sqlite3.connect(str(db_path), timeout=30)
     try:
@@ -326,54 +331,69 @@ def main() -> int:
         if indexes_only:
             if args.dry_run:
                 missing = list_missing_search_indexes(conn)
-                print("模式：僅檢查尋人索引（dry-run）")
-                print(f"將建立：{', '.join(missing) if missing else '（已齊全）'}")
+                _log("模式：僅檢查尋人索引（dry-run）")
+                _log(f"將建立：{', '.join(missing) if missing else '（已齊全）'}")
                 return 0
-            print("模式：僅建立尋人索引")
+            _log("模式：僅建立尋人索引")
             created = build_search_indexes_sync(conn)
-            print(
+            _log(
                 f"索引：新建 {len(created)} 個"
                 + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
             )
             if has_exp:
-                print("正在重建 player_profile…")
+                _log("正在重建 player_profile…")
                 n_prof = rebuild_player_profiles_sync(conn)
-                print(f"player_profile：{n_prof:,} 筆")
+                _log(f"player_profile：{n_prof:,} 筆")
             return 0
 
-        exp_total = _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
-        transfer_total = (
-            _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log") if has_transfer else 0
-        )
+        # 大庫全表 COUNT 極慢；實際刪除改看 DELETE rowcount。
+        # 僅 --dry-run 才預先統計（仍可能需數十分鐘）。
+        do_precount = bool(args.dry_run)
+        exp_total = -1
+        transfer_total = -1
+        exp_stale = -1
+        exp_middle_stale = -1
+        transfer_stale = -1
+        settings_stale = -1
+        alert_dedupe_stale = -1
 
         keep_ranges: list[tuple[str, str]] = []
         thin_ranges: list[tuple[str, str]] = []
         exp_delete_sql = ""
         exp_delete_params: tuple[str, ...] = ()
         thin_delete_stmts: list[tuple[str, tuple[str, str, str, str]]] = []
-        exp_middle_stale = 0
         settings_cutoff: str | None = None
 
         if args.wipe_history:
-            exp_stale = exp_total
-            transfer_stale = transfer_total
-            settings_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM bot_settings
-                    WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
-                    """,
-                )
-                if has_settings
-                else 0
-            )
-            alert_dedupe_stale = (
-                _count(conn, "SELECT COUNT(*) FROM alert_dedupe")
-                if has_alert_dedupe
-                else 0
-            )
             mode = "清空全部歷史"
+            if do_precount:
+                _log("正在統計筆數（dry-run，大庫可能很久）…")
+                exp_total = (
+                    _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
+                )
+                transfer_total = (
+                    _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log")
+                    if has_transfer
+                    else 0
+                )
+                exp_stale = exp_total
+                transfer_stale = transfer_total
+                settings_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM bot_settings
+                        WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+                        """,
+                    )
+                    if has_settings
+                    else 0
+                )
+                alert_dedupe_stale = (
+                    _count(conn, "SELECT COUNT(*) FROM alert_dedupe")
+                    if has_alert_dedupe
+                    else 0
+                )
         elif args.for_search:
             keep_ranges = build_search_keep_ranges(
                 recent_days=args.recent_days,
@@ -383,62 +403,16 @@ def main() -> int:
             thin_ranges = build_transfer_thin_ranges(
                 max_transfer_windows=args.max_transfer_windows,
             )
-            count_sql, count_params = exp_history_outside_keep_sql(keep_ranges)
             exp_delete_sql, exp_delete_params = exp_history_outside_keep_sql(
                 keep_ranges, for_delete=True
             )
-            exp_stale = _count(conn, count_sql, count_params) if has_exp else 0
-            # dry-run 近似：先假設窗外列仍在；實際刪除會先窗外再 sparse
-            if has_exp and thin_ranges:
-                for count_sql_m, count_params_m in exp_history_transfer_middle_statements(
-                    thin_ranges, for_delete=False
-                ):
-                    exp_middle_stale += _count(conn, count_sql_m, count_params_m)
             thin_delete_stmts = exp_history_transfer_middle_statements(
                 thin_ranges, for_delete=True
             )
-            # transfer / settings / alert_dedupe：與「最近 N 天」對齊
             settings_cutoff = search_retention_cutoff(
                 recent_days=args.recent_days,
                 pad_days=args.transfer_pad_days,
                 max_transfer_windows=args.max_transfer_windows,
-            )
-            transfer_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM transfer_alerts_log
-                    WHERE alert_time < ?
-                    """,
-                    (settings_cutoff,),
-                )
-                if has_transfer
-                else 0
-            )
-            settings_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM bot_settings
-                    WHERE (key LIKE 'overspeed:%' AND key < ?)
-                       OR (key LIKE 'boss_reminder:%' AND key < ?)
-                    """,
-                    (
-                        overspeed_prune_bound(settings_cutoff),
-                        boss_reminder_prune_bound(settings_cutoff[:10]),
-                    ),
-                )
-                if has_settings
-                else 0
-            )
-            alert_dedupe_stale = (
-                _count(
-                    conn,
-                    "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
-                    (settings_cutoff,),
-                )
-                if has_alert_dedupe
-                else 0
             )
             mode = (
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
@@ -446,96 +420,176 @@ def main() -> int:
                 f"～結束後+{args.transfer_pad_days} 天；"
                 f"轉移窗內同角同服只留首尾）"
             )
+            # 先印區間，避免大庫 COUNT 讓人以為卡住
+            _log(f"模式：{mode}")
+            if keep_ranges:
+                _log("保留區間：")
+                for start, end in keep_ranges:
+                    _log(f"  {start}  ~  {end}")
+            if thin_ranges:
+                _log("轉移窗稀疏化（同角同服只留首尾）：")
+                for start, end in thin_ranges:
+                    _log(f"  {start}  ~  {end}")
+            if do_precount:
+                _log("正在統計筆數（dry-run，千萬筆級可能需數十分鐘）…")
+                exp_total = (
+                    _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
+                )
+                _log(f"  exp_history 總筆數：{exp_total:,}")
+                count_sql, count_params = exp_history_outside_keep_sql(keep_ranges)
+                exp_stale = (
+                    _count(conn, count_sql, count_params) if has_exp else 0
+                )
+                _log(f"  窗外將刪：{exp_stale:,}")
+                exp_middle_stale = 0
+                if has_exp and thin_ranges:
+                    for i, (count_sql_m, count_params_m) in enumerate(
+                        exp_history_transfer_middle_statements(
+                            thin_ranges, for_delete=False
+                        ),
+                        start=1,
+                    ):
+                        _log(f"  統計轉移窗中間 #{i}/{len(thin_ranges)}…")
+                        exp_middle_stale += _count(conn, count_sql_m, count_params_m)
+                _log(f"  轉移窗中間將刪：{exp_middle_stale:,}")
+                transfer_total = (
+                    _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log")
+                    if has_transfer
+                    else 0
+                )
+                transfer_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM transfer_alerts_log
+                        WHERE alert_time < ?
+                        """,
+                        (settings_cutoff,),
+                    )
+                    if has_transfer
+                    else 0
+                )
+                settings_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM bot_settings
+                        WHERE (key LIKE 'overspeed:%' AND key < ?)
+                           OR (key LIKE 'boss_reminder:%' AND key < ?)
+                        """,
+                        (
+                            overspeed_prune_bound(settings_cutoff),
+                            boss_reminder_prune_bound(settings_cutoff[:10]),
+                        ),
+                    )
+                    if has_settings
+                    else 0
+                )
+                alert_dedupe_stale = (
+                    _count(
+                        conn,
+                        "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
+                        (settings_cutoff,),
+                    )
+                    if has_alert_dedupe
+                    else 0
+                )
         else:
             cutoff = taipei_cutoff_str(args.days)
             settings_cutoff = cutoff
-            exp_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM exp_history
-                    WHERE record_time < ?
-                    """,
-                    (cutoff,),
-                )
-                if has_exp
-                else 0
-            )
-            transfer_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM transfer_alerts_log
-                    WHERE alert_time < ?
-                    """,
-                    (cutoff,),
-                )
-                if has_transfer
-                else 0
-            )
-            settings_stale = (
-                _count(
-                    conn,
-                    """
-                    SELECT COUNT(*) FROM bot_settings
-                    WHERE (key LIKE 'overspeed:%' AND key < ?)
-                       OR (key LIKE 'boss_reminder:%' AND key < ?)
-                    """,
-                    (
-                        overspeed_prune_bound(cutoff),
-                        boss_reminder_prune_bound(cutoff[:10]),
-                    ),
-                )
-                if has_settings
-                else 0
-            )
-            alert_dedupe_stale = (
-                _count(
-                    conn,
-                    "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
-                    (cutoff,),
-                )
-                if has_alert_dedupe
-                else 0
-            )
             mode = f"保留最近 {args.days} 天（截止 {cutoff} 台北）"
+            if do_precount:
+                _log("正在統計筆數（dry-run，大庫可能很久）…")
+                exp_total = (
+                    _count(conn, "SELECT COUNT(*) FROM exp_history") if has_exp else 0
+                )
+                transfer_total = (
+                    _count(conn, "SELECT COUNT(*) FROM transfer_alerts_log")
+                    if has_transfer
+                    else 0
+                )
+                exp_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM exp_history
+                        WHERE record_time < ?
+                        """,
+                        (cutoff,),
+                    )
+                    if has_exp
+                    else 0
+                )
+                transfer_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM transfer_alerts_log
+                        WHERE alert_time < ?
+                        """,
+                        (cutoff,),
+                    )
+                    if has_transfer
+                    else 0
+                )
+                settings_stale = (
+                    _count(
+                        conn,
+                        """
+                        SELECT COUNT(*) FROM bot_settings
+                        WHERE (key LIKE 'overspeed:%' AND key < ?)
+                           OR (key LIKE 'boss_reminder:%' AND key < ?)
+                        """,
+                        (
+                            overspeed_prune_bound(cutoff),
+                            boss_reminder_prune_bound(cutoff[:10]),
+                        ),
+                    )
+                    if has_settings
+                    else 0
+                )
+                alert_dedupe_stale = (
+                    _count(
+                        conn,
+                        "SELECT COUNT(*) FROM alert_dedupe WHERE created_at < ?",
+                        (cutoff,),
+                    )
+                    if has_alert_dedupe
+                    else 0
+                )
 
-        print(f"模式：{mode}")
-        if keep_ranges:
-            print("保留區間：")
-            for start, end in keep_ranges:
-                print(f"  {start}  ~  {end}")
-        if thin_ranges:
-            print("轉移窗稀疏化（同角同服只留首尾）：")
-            for start, end in thin_ranges:
-                print(f"  {start}  ~  {end}")
-        print(f"exp_history：共 {exp_total:,} 筆，窗外將刪 {exp_stale:,} 筆")
-        if args.for_search:
-            print(f"轉移窗中間將刪 {exp_middle_stale:,} 筆")
-        print(f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆")
-        if has_settings:
-            print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
-        else:
-            print("bot_settings：表不存在，略過")
-        if has_alert_dedupe:
-            print(f"alert_dedupe：將刪 {alert_dedupe_stale:,} 筆")
-        else:
-            print("alert_dedupe：表不存在，略過")
+        if not args.for_search:
+            _log(f"模式：{mode}")
+            if keep_ranges:
+                _log("保留區間：")
+                for start, end in keep_ranges:
+                    _log(f"  {start}  ~  {end}")
+            if thin_ranges:
+                _log("轉移窗稀疏化（同角同服只留首尾）：")
+                for start, end in thin_ranges:
+                    _log(f"  {start}  ~  {end}")
 
-        if args.dry_run:
-            print("dry-run：未修改資料庫。")
+        if do_precount:
+            _log(
+                f"exp_history：共 {exp_total:,} 筆，窗外將刪 {exp_stale:,} 筆"
+            )
+            if args.for_search:
+                _log(f"轉移窗中間將刪 {exp_middle_stale:,} 筆")
+            _log(
+                f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆"
+            )
+            if has_settings:
+                _log(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
+            else:
+                _log("bot_settings：表不存在，略過")
+            if has_alert_dedupe:
+                _log(f"alert_dedupe：將刪 {alert_dedupe_stale:,} 筆")
+            else:
+                _log("alert_dedupe：表不存在，略過")
+            _log("dry-run：未修改資料庫。")
             return 0
 
-        if (
-            exp_stale == 0
-            and exp_middle_stale == 0
-            and transfer_stale == 0
-            and settings_stale == 0
-            and alert_dedupe_stale == 0
-            and args.no_vacuum
-        ):
-            print("沒有可刪資料，略過。")
-            return 0
+        _log("略過預先 COUNT（大庫太慢）；改直接 DELETE，結束後印實際刪除數。")
 
         deleted_exp = 0
         deleted_middle = 0
@@ -544,6 +598,7 @@ def main() -> int:
         deleted_alert_dedupe = 0
         if args.wipe_history:
             if has_exp:
+                _log("正在清空 exp_history…")
                 deleted_exp = conn.execute("DELETE FROM exp_history").rowcount
             if has_transfer:
                 deleted_transfer = conn.execute("DELETE FROM transfer_alerts_log").rowcount
@@ -558,10 +613,18 @@ def main() -> int:
                 deleted_alert_dedupe = conn.execute("DELETE FROM alert_dedupe").rowcount
         elif args.for_search:
             if has_exp and exp_delete_sql:
+                _log("正在刪除保留窗外 exp_history（可能很久）…")
                 deleted_exp = conn.execute(exp_delete_sql, exp_delete_params).rowcount
+                _log(f"  窗外已刪 {deleted_exp:,} 筆")
             if has_exp and thin_delete_stmts:
-                for thin_sql, thin_params in thin_delete_stmts:
-                    deleted_middle += conn.execute(thin_sql, thin_params).rowcount
+                for i, (thin_sql, thin_params) in enumerate(thin_delete_stmts, start=1):
+                    _log(
+                        f"正在稀疏化轉移窗 #{i}/{len(thin_delete_stmts)} "
+                        f"（同角同服只留首尾）…"
+                    )
+                    n = conn.execute(thin_sql, thin_params).rowcount
+                    deleted_middle += n
+                    _log(f"  本窗中間已刪 {n:,} 筆")
             assert settings_cutoff is not None
             if has_transfer:
                 deleted_transfer = conn.execute(
@@ -586,6 +649,7 @@ def main() -> int:
         else:
             cutoff = taipei_cutoff_str(args.days)
             if has_exp:
+                _log(f"正在刪除 {cutoff} 之前的 exp_history…")
                 deleted_exp = conn.execute(
                     """
                     DELETE FROM exp_history
@@ -593,6 +657,7 @@ def main() -> int:
                     """,
                     (cutoff,),
                 ).rowcount
+                _log(f"  已刪 {deleted_exp:,} 筆")
             if has_transfer:
                 deleted_transfer = conn.execute(
                     """
@@ -618,42 +683,53 @@ def main() -> int:
         middle_note = (
             f"（含轉移窗中間 {deleted_middle:,}）" if deleted_middle else ""
         )
-        print(
+        _log(
             f"已刪除：exp_history {deleted_exp + deleted_middle:,}{middle_note}、"
             f"transfer_alerts_log {deleted_transfer:,}、"
             f"bot_settings 去重 {deleted_settings:,}、"
             f"alert_dedupe {deleted_alert_dedupe:,}"
         )
 
+        if (
+            deleted_exp == 0
+            and deleted_middle == 0
+            and deleted_transfer == 0
+            and deleted_settings == 0
+            and deleted_alert_dedupe == 0
+            and args.no_vacuum
+        ):
+            _log("沒有可刪資料，略過。")
+            return 0
+
         if not args.no_vacuum:
-            print("正在 checkpoint + VACUUM（大庫可能需數分鐘）…")
+            _log("正在 checkpoint + VACUUM（大庫可能需數十分鐘）…")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")
-            print("VACUUM 完成。")
+            _log("VACUUM 完成。")
         else:
-            print("已跳過 VACUUM（檔案大小可能尚未縮小）。")
+            _log("已跳過 VACUUM（檔案大小可能尚未縮小）。")
 
         # 清庫後預設建索引；也可用 --build-indexes 強制再跑一次
         if args.build_indexes or args.for_search:
-            print("正在建立尋人索引（大庫可能需數分鐘）…")
+            _log("正在建立尋人索引（大庫可能需數分鐘）…")
             created = build_search_indexes_sync(conn)
-            print(
+            _log(
                 f"索引：新建 {len(created)} 個"
                 + (f"（{', '.join(created)}）" if created else "（原本已齊全）")
             )
 
         if has_exp:
-            print("正在重建 player_profile…")
+            _log("正在重建 player_profile…")
             n_prof = rebuild_player_profiles_sync(conn)
-            print(f"player_profile：{n_prof:,} 筆")
+            _log(f"player_profile：{n_prof:,} 筆")
     finally:
         conn.close()
 
     after = _file_size(db_path)
     after_total = after + _file_size(wal) + _file_size(shm)
-    print(f"清理後大小：{_fmt_bytes(after)}（含 WAL/SHM 約 {_fmt_bytes(after_total)}）")
+    _log(f"清理後大小：{_fmt_bytes(after)}（含 WAL/SHM 約 {_fmt_bytes(after_total)}）")
     if after < before:
-        print(f"回收約 {_fmt_bytes(before - after)}。")
+        _log(f"回收約 {_fmt_bytes(before - after)}。")
     return 0
 
 
