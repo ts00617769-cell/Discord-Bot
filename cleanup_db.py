@@ -202,7 +202,8 @@ def build_cleanup_parser(default_db: Path | None = None) -> argparse.ArgumentPar
         action="store_true",
         help=(
             "尋人導向：保留最近 N 天 ∪ 最近 K 次領域轉移窗"
-            "（窗開始～結束後 pad 天），其餘刪除"
+            "（窗開始～結束後 pad 天），其餘刪除；"
+            "轉移窗內同角同服只留首尾"
         ),
     )
     parser.add_argument(
