@@ -5,6 +5,7 @@ from datetime import datetime
 from services.retention_windows import (
     build_search_keep_ranges,
     build_transfer_thin_ranges,
+    exp_history_outside_keep_batch_sql,
     exp_history_outside_keep_sql,
     exp_history_transfer_middle_sql,
     exp_history_transfer_middle_statements,
@@ -147,6 +148,14 @@ def test_empty_ranges_safe_no_delete():
     sql, params = exp_history_outside_keep_sql([], for_delete=True)
     assert sql == "DELETE FROM exp_history WHERE 0"
     assert params == ()
+
+
+def test_outside_keep_batch_sql_has_limit():
+    ranges = [("2026-05-01 00:00:00", "2026-05-20 00:00:00")]
+    sql, params = exp_history_outside_keep_batch_sql(ranges, batch_size=1000)
+    assert "LIMIT ?" in sql
+    assert params[-1] == 1000
+    assert params[:2] == ("2026-05-01 00:00:00", "2026-05-20 00:00:00")
 
 
 def test_thin_ranges_official_window_without_pad():

@@ -147,6 +147,35 @@ def exp_history_outside_keep_sql(
     return f"{verb} WHERE NOT ({where})", tuple(params)
 
 
+def exp_history_outside_keep_batch_sql(
+    ranges: Sequence[tuple[str, str]],
+    *,
+    batch_size: int = 50_000,
+) -> tuple[str, tuple]:
+    """分批 DELETE：每次最多刪 batch_size 筆（大庫避免單交易 OOM／被殺）。"""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    if not ranges:
+        return "DELETE FROM exp_history WHERE 0", ()
+
+    parts: list[str] = []
+    params: list = []
+    for start, end in ranges:
+        parts.append("record_time BETWEEN ? AND ?")
+        params.extend([start, end])
+    where = " OR ".join(parts)
+    sql = f"""
+        DELETE FROM exp_history
+        WHERE rowid IN (
+            SELECT rowid FROM exp_history
+            WHERE NOT ({where})
+            LIMIT ?
+        )
+    """
+    params.append(int(batch_size))
+    return sql, tuple(params)
+
+
 def build_transfer_thin_ranges(
     *,
     max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
@@ -220,6 +249,41 @@ def exp_history_transfer_middle_sql(
               AND e.record_time > bounds.min_t
               AND e.record_time < bounds.max_t
         """
+    return sql, params
+
+
+def exp_history_transfer_middle_batch_sql(
+    start: str,
+    end: str,
+    *,
+    batch_size: int = 50_000,
+) -> tuple[str, tuple]:
+    """轉移窗中間列分批 DELETE。"""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    bounds = """
+        SELECT player_name, server_name,
+               MIN(record_time) AS min_t,
+               MAX(record_time) AS max_t
+        FROM exp_history
+        WHERE record_time BETWEEN ? AND ?
+        GROUP BY player_name, server_name
+    """
+    sql = f"""
+        DELETE FROM exp_history
+        WHERE rowid IN (
+            SELECT e.rowid
+            FROM exp_history e
+            INNER JOIN ({bounds}) bounds
+              ON e.player_name = bounds.player_name
+             AND e.server_name = bounds.server_name
+            WHERE e.record_time BETWEEN ? AND ?
+              AND e.record_time > bounds.min_t
+              AND e.record_time < bounds.max_t
+            LIMIT ?
+        )
+    """
+    params = (start, end, start, end, int(batch_size))
     return sql, params
 
 

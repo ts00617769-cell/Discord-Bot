@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOCK_PATH = ROOT / ".bot.lock"
 DEFAULT_DAYS = 60
+DELETE_BATCH_SIZE = 50_000
 
 # 允許直接執行：把專案根加入 path
 if str(ROOT) not in sys.path:
@@ -40,7 +41,9 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
+    exp_history_outside_keep_batch_sql,
     exp_history_outside_keep_sql,
+    exp_history_transfer_middle_batch_sql,
     exp_history_transfer_middle_statements,
     search_retention_cutoff,
 )
@@ -177,6 +180,30 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
 def _log(msg: str) -> None:
     """進度輸出立即 flush，避免 docker/管道看起來像卡住。"""
     print(msg, flush=True)
+
+
+def _delete_in_batches(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple,
+    *,
+    label: str,
+    batch_size: int = DELETE_BATCH_SIZE,
+) -> int:
+    """重複執行 LIMIT 批次 DELETE，每批 commit，回傳總刪除數。"""
+    total = 0
+    batch_no = 0
+    while True:
+        batch_no += 1
+        n = conn.execute(sql, params).rowcount
+        if n <= 0:
+            break
+        total += n
+        conn.commit()
+        _log(f"  {label} 第 {batch_no} 批刪 {n:,}（累計 {total:,}）")
+        if n < batch_size:
+            break
+    return total
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -323,6 +350,11 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path), timeout=30)
     try:
         conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        # 約 64MB page cache，降低大 DELETE 被 OOM 的機率
+        conn.execute("PRAGMA cache_size=-65536")
         has_exp = _table_exists(conn, "exp_history")
         has_transfer = _table_exists(conn, "transfer_alerts_log")
         has_settings = _table_exists(conn, "bot_settings")
@@ -359,9 +391,6 @@ def main() -> int:
 
         keep_ranges: list[tuple[str, str]] = []
         thin_ranges: list[tuple[str, str]] = []
-        exp_delete_sql = ""
-        exp_delete_params: tuple[str, ...] = ()
-        thin_delete_stmts: list[tuple[str, tuple[str, str, str, str]]] = []
         settings_cutoff: str | None = None
 
         if args.wipe_history:
@@ -402,12 +431,6 @@ def main() -> int:
             )
             thin_ranges = build_transfer_thin_ranges(
                 max_transfer_windows=args.max_transfer_windows,
-            )
-            exp_delete_sql, exp_delete_params = exp_history_outside_keep_sql(
-                keep_ranges, for_delete=True
-            )
-            thin_delete_stmts = exp_history_transfer_middle_statements(
-                thin_ranges, for_delete=True
             )
             settings_cutoff = search_retention_cutoff(
                 recent_days=args.recent_days,
@@ -612,19 +635,40 @@ def main() -> int:
             if has_alert_dedupe:
                 deleted_alert_dedupe = conn.execute("DELETE FROM alert_dedupe").rowcount
         elif args.for_search:
-            if has_exp and exp_delete_sql:
-                _log("正在刪除保留窗外 exp_history（可能很久）…")
-                deleted_exp = conn.execute(exp_delete_sql, exp_delete_params).rowcount
-                _log(f"  窗外已刪 {deleted_exp:,} 筆")
-            if has_exp and thin_delete_stmts:
-                for i, (thin_sql, thin_params) in enumerate(thin_delete_stmts, start=1):
+            if has_exp and keep_ranges:
+                _log(
+                    f"正在分批刪除保留窗外 exp_history"
+                    f"（每批 {DELETE_BATCH_SIZE:,}，可能很久）…"
+                )
+                batch_sql, batch_params = exp_history_outside_keep_batch_sql(
+                    keep_ranges, batch_size=DELETE_BATCH_SIZE
+                )
+                deleted_exp = _delete_in_batches(
+                    conn,
+                    batch_sql,
+                    batch_params,
+                    label="窗外",
+                    batch_size=DELETE_BATCH_SIZE,
+                )
+                _log(f"  窗外合計已刪 {deleted_exp:,} 筆")
+            if has_exp and thin_ranges:
+                for i, (start, end) in enumerate(thin_ranges, start=1):
                     _log(
-                        f"正在稀疏化轉移窗 #{i}/{len(thin_delete_stmts)} "
-                        f"（同角同服只留首尾）…"
+                        f"正在分批稀疏化轉移窗 #{i}/{len(thin_ranges)} "
+                        f"{start} ~ {end}…"
                     )
-                    n = conn.execute(thin_sql, thin_params).rowcount
+                    thin_sql, thin_params = exp_history_transfer_middle_batch_sql(
+                        start, end, batch_size=DELETE_BATCH_SIZE
+                    )
+                    n = _delete_in_batches(
+                        conn,
+                        thin_sql,
+                        thin_params,
+                        label=f"窗{i}中間",
+                        batch_size=DELETE_BATCH_SIZE,
+                    )
                     deleted_middle += n
-                    _log(f"  本窗中間已刪 {n:,} 筆")
+                    _log(f"  本窗中間合計已刪 {n:,} 筆")
             assert settings_cutoff is not None
             if has_transfer:
                 deleted_transfer = conn.execute(
@@ -722,6 +766,16 @@ def main() -> int:
             _log("正在重建 player_profile…")
             n_prof = rebuild_player_profiles_sync(conn)
             _log(f"player_profile：{n_prof:,} 筆")
+    except Exception as e:
+        import traceback
+
+        _log(f"清理異常中止：{type(e).__name__}: {e}")
+        traceback.print_exc()
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return 1
     finally:
         conn.close()
 
