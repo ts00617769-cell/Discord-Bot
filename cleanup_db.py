@@ -182,6 +182,35 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _execute_with_busy_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple = (),
+    *,
+    retries: int = 12,
+    sleep_sec: float = 5.0,
+):
+    """database is locked 時重試（常見於 bot 未停乾淨／WAL 殘留）。"""
+    import time
+
+    last: BaseException | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return conn.execute(sql, params)
+        except sqlite3.OperationalError as e:
+            last = e
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            _log(
+                f"  資料庫忙碌（{e}），{sleep_sec:.0f}s 後重試 "
+                f"{attempt}/{retries}…"
+            )
+            time.sleep(sleep_sec)
+    assert last is not None
+    raise last
+
+
 def _delete_in_batches(
     conn: sqlite3.Connection,
     sql: str,
@@ -195,7 +224,8 @@ def _delete_in_batches(
     batch_no = 0
     while True:
         batch_no += 1
-        n = conn.execute(sql, params).rowcount
+        cur = _execute_with_busy_retry(conn, sql, params)
+        n = cur.rowcount
         if n <= 0:
             break
         total += n
@@ -204,6 +234,22 @@ def _delete_in_batches(
         if n < batch_size:
             break
     return total
+
+
+def _ensure_exclusive_access(conn: sqlite3.Connection) -> str | None:
+    """嘗試取得寫入鎖；失敗時回傳錯誤提示字串。"""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.commit()
+        return None
+    except sqlite3.OperationalError as e:
+        return (
+            f"無法鎖定資料庫（{e}）。\n"
+            "請先確認已停止 prasia-bot-final，且沒有其他 cleanup 在跑：\n"
+            "  docker stop prasia-bot-final\n"
+            "  docker exec dc-cleanup ps aux | grep cleanup_db\n"
+            "停乾淨後再重試。"
+        )
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -347,14 +393,18 @@ def main() -> int:
     _log(f"資料庫：{db_path}")
     _log(f"清理前大小：{_fmt_bytes(before)}（含 WAL/SHM 約 {_fmt_bytes(before_total)}）")
 
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = sqlite3.connect(str(db_path), timeout=120)
     try:
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=120000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
         # 約 64MB page cache，降低大 DELETE 被 OOM 的機率
         conn.execute("PRAGMA cache_size=-65536")
+        lock_err = _ensure_exclusive_access(conn)
+        if lock_err:
+            _log(lock_err)
+            return 1
         has_exp = _table_exists(conn, "exp_history")
         has_transfer = _table_exists(conn, "transfer_alerts_log")
         has_settings = _table_exists(conn, "bot_settings")
