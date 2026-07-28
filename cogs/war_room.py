@@ -21,7 +21,9 @@ from services.retention_windows import (
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
+    build_transfer_thin_ranges,
     exp_history_outside_keep_sql,
+    exp_history_transfer_middle_statements,
     search_retention_cutoff,
 )
 from services.settings_prune import (
@@ -208,13 +210,24 @@ class WarRoom(commands.Cog):
             async with self.bot.db.execute(del_sql, del_params) as cursor:
                 deleted_exp = cursor.rowcount or 0
 
+            deleted_middle = 0
+            thin_ranges = build_transfer_thin_ranges(
+                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
+            )
+            for thin_sql, thin_params in exp_history_transfer_middle_statements(
+                thin_ranges, for_delete=True
+            ):
+                async with self.bot.db.execute(thin_sql, thin_params) as cursor:
+                    deleted_middle += cursor.rowcount or 0
+
             pruned_profiles = 0
             rebuilt_profiles = 0
             backfilled = 0
-            if deleted_exp > 0:
+            profile_touch = deleted_exp + deleted_middle
+            if profile_touch > 0:
                 # 輕量：清掉已無歷史的履歷；大刪除量才全量 rebuild
                 pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
-                if deleted_exp >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
+                if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
                     rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
                 else:
                     backfilled = await backfill_player_profile_denorm(
@@ -256,6 +269,7 @@ class WarRoom(commands.Cog):
             log_channel = self.bot.get_channel(self.log_channel_id)
             if log_channel and (
                 deleted_exp > 0
+                or deleted_middle > 0
                 or deleted_transfer > 0
                 or deleted_settings > 0
                 or deleted_alert_dedupe > 0
@@ -264,7 +278,7 @@ class WarRoom(commands.Cog):
                 or backfilled > 0
             ):
                 vacuum_hint = ""
-                if deleted_exp >= 5000:
+                if profile_touch >= 5000:
                     vacuum_hint = (
                         "\n💡 刪除量較大，建議停 bot 後執行 `python cleanup_db.py` 釋放磁碟。"
                     )
@@ -275,9 +289,14 @@ class WarRoom(commands.Cog):
                     profile_note = (
                         f"、履歷 prune {pruned_profiles}／backfill {backfilled}"
                     )
+                middle_note = (
+                    f"（窗外 {deleted_exp}、轉移窗中間 {deleted_middle}）"
+                    if deleted_middle
+                    else ""
+                )
                 await log_channel.send(
                     f"🧹 **【資料庫維護】** 尋人保留窗外清理 "
-                    f"`exp_history` {deleted_exp} 筆、"
+                    f"`exp_history` {deleted_exp + deleted_middle} 筆{middle_note}、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆、"
                     f"`bot_settings` 去重 key {deleted_settings} 筆、"
                     f"`alert_dedupe` {deleted_alert_dedupe} 筆"

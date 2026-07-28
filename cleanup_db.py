@@ -39,7 +39,9 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
+    build_transfer_thin_ranges,
     exp_history_outside_keep_sql,
+    exp_history_transfer_middle_statements,
     search_retention_cutoff,
 )
 from services.settings_prune import (  # noqa: E402
@@ -344,8 +346,11 @@ def main() -> int:
         )
 
         keep_ranges: list[tuple[str, str]] = []
+        thin_ranges: list[tuple[str, str]] = []
         exp_delete_sql = ""
         exp_delete_params: tuple[str, ...] = ()
+        thin_delete_stmts: list[tuple[str, tuple[str, str, str, str]]] = []
+        exp_middle_stale = 0
         settings_cutoff: str | None = None
 
         if args.wipe_history:
@@ -374,11 +379,23 @@ def main() -> int:
                 pad_days=args.transfer_pad_days,
                 max_transfer_windows=args.max_transfer_windows,
             )
+            thin_ranges = build_transfer_thin_ranges(
+                max_transfer_windows=args.max_transfer_windows,
+            )
             count_sql, count_params = exp_history_outside_keep_sql(keep_ranges)
             exp_delete_sql, exp_delete_params = exp_history_outside_keep_sql(
                 keep_ranges, for_delete=True
             )
             exp_stale = _count(conn, count_sql, count_params) if has_exp else 0
+            # dry-run 近似：先假設窗外列仍在；實際刪除會先窗外再 sparse
+            if has_exp and thin_ranges:
+                for count_sql_m, count_params_m in exp_history_transfer_middle_statements(
+                    thin_ranges, for_delete=False
+                ):
+                    exp_middle_stale += _count(conn, count_sql_m, count_params_m)
+            thin_delete_stmts = exp_history_transfer_middle_statements(
+                thin_ranges, for_delete=True
+            )
             # transfer / settings / alert_dedupe：與「最近 N 天」對齊
             settings_cutoff = search_retention_cutoff(
                 recent_days=args.recent_days,
@@ -425,7 +442,8 @@ def main() -> int:
             mode = (
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
                 f"最近 {args.max_transfer_windows} 次轉移窗"
-                f"～結束後+{args.transfer_pad_days} 天）"
+                f"～結束後+{args.transfer_pad_days} 天；"
+                f"轉移窗內同角同服只留首尾）"
             )
         else:
             cutoff = taipei_cutoff_str(args.days)
@@ -486,7 +504,13 @@ def main() -> int:
             print("保留區間：")
             for start, end in keep_ranges:
                 print(f"  {start}  ~  {end}")
-        print(f"exp_history：共 {exp_total:,} 筆，將刪 {exp_stale:,} 筆")
+        if thin_ranges:
+            print("轉移窗稀疏化（同角同服只留首尾）：")
+            for start, end in thin_ranges:
+                print(f"  {start}  ~  {end}")
+        print(f"exp_history：共 {exp_total:,} 筆，窗外將刪 {exp_stale:,} 筆")
+        if args.for_search:
+            print(f"轉移窗中間將刪 {exp_middle_stale:,} 筆")
         print(f"transfer_alerts_log：共 {transfer_total:,} 筆，將刪 {transfer_stale:,} 筆")
         if has_settings:
             print(f"bot_settings 去重 key：將刪 {settings_stale:,} 筆")
@@ -503,6 +527,7 @@ def main() -> int:
 
         if (
             exp_stale == 0
+            and exp_middle_stale == 0
             and transfer_stale == 0
             and settings_stale == 0
             and alert_dedupe_stale == 0
@@ -512,6 +537,7 @@ def main() -> int:
             return 0
 
         deleted_exp = 0
+        deleted_middle = 0
         deleted_transfer = 0
         deleted_settings = 0
         deleted_alert_dedupe = 0
@@ -532,6 +558,9 @@ def main() -> int:
         elif args.for_search:
             if has_exp and exp_delete_sql:
                 deleted_exp = conn.execute(exp_delete_sql, exp_delete_params).rowcount
+            if has_exp and thin_delete_stmts:
+                for thin_sql, thin_params in thin_delete_stmts:
+                    deleted_middle += conn.execute(thin_sql, thin_params).rowcount
             assert settings_cutoff is not None
             if has_transfer:
                 deleted_transfer = conn.execute(
@@ -585,8 +614,11 @@ def main() -> int:
                 ).rowcount
 
         conn.commit()
+        middle_note = (
+            f"（含轉移窗中間 {deleted_middle:,}）" if deleted_middle else ""
+        )
         print(
-            f"已刪除：exp_history {deleted_exp:,}、"
+            f"已刪除：exp_history {deleted_exp + deleted_middle:,}{middle_note}、"
             f"transfer_alerts_log {deleted_transfer:,}、"
             f"bot_settings 去重 {deleted_settings:,}、"
             f"alert_dedupe {deleted_alert_dedupe:,}"

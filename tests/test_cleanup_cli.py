@@ -123,3 +123,89 @@ def test_for_search_deletes_outside_keep(tmp_path, monkeypatch):
         assert rows == [("New",)]
     finally:
         conn.close()
+
+
+def test_for_search_thins_transfer_window_middles(tmp_path, monkeypatch):
+    db_path = tmp_path / "thin_del.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (6);
+            CREATE TABLE exp_history (
+                record_time TEXT NOT NULL,
+                player_name TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                level INTEGER,
+                exp REAL,
+                class_name TEXT,
+                subjugation_grade INTEGER
+            );
+            CREATE TABLE transfer_alerts_log (
+                old_name TEXT, old_server TEXT,
+                new_name TEXT, new_server TEXT,
+                alert_time TEXT
+            );
+            CREATE TABLE bot_settings (key TEXT PRIMARY KEY, value TEXT);
+            """
+        )
+        # 第27次轉移窗 2026-07-01～07-05：同角同服多筆中間應刪
+        for t, exp in [
+            ("2026-07-01 13:00:00", 1.0),
+            ("2026-07-02 13:00:00", 2.0),
+            ("2026-07-03 13:00:00", 3.0),
+            ("2026-07-05 13:00:00", 4.0),
+        ]:
+            conn.execute(
+                "INSERT INTO exp_history VALUES (?,?,?,?,?,?,?)",
+                (t, "Hero", "S1", 60, exp, "戰士", 1),
+            )
+        # 近三日（相對 mocked now）保留且不在 thin 窗內
+        conn.execute(
+            "INSERT INTO exp_history VALUES (?,?,?,?,?,?,?)",
+            ("2026-07-26 12:00:00", "Hero", "S1", 60, 9.0, "戰士", 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(cleanup_db, "_bot_appears_running", lambda: False)
+    # 固定「現在」讓 recent=3 不會蓋住 07-01～05 窗
+    monkeypatch.setattr(
+        "services.retention_windows.now_naive_taipei",
+        lambda: __import__("datetime").datetime(2026, 7, 28, 12, 0, 0),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "cleanup_db.py",
+            "--db",
+            str(db_path),
+            "--for-search",
+            "--recent-days",
+            "3",
+            "--max-transfer-windows",
+            "1",
+            "--transfer-pad-days",
+            "0",
+            "--no-vacuum",
+        ],
+    )
+    assert cleanup_db.main() == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        times = [
+            r[0]
+            for r in conn.execute(
+                "SELECT record_time FROM exp_history ORDER BY record_time"
+            ).fetchall()
+        ]
+        assert times == [
+            "2026-07-01 13:00:00",
+            "2026-07-05 13:00:00",
+            "2026-07-26 12:00:00",
+        ]
+    finally:
+        conn.close()

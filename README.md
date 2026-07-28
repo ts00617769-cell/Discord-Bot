@@ -124,7 +124,7 @@ ruff check .
 | 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行 |
 | Boss 提醒 | 召喚前約 10 分鐘 `@everyone`（DB 去重，重啟不連 ping） |
 | 每日盲投 | 依 `QUIZ_POST_TIME`／`QUIZ_REVEAL_TIME` 發布與開獎 |
-| DB 清理 | 戰情室排程依尋人保留窗（近 3 天 ∪ 轉移窗）刪 `exp_history`；另清過期轉服 log／`alert_dedupe`；大量刪除後建議離線 VACUUM |
+| DB 清理 | 戰情室排程依尋人保留窗（近 3 天 ∪ 轉移窗）刪 `exp_history`；轉移窗內同角同服只留首尾；另清過期轉服 log／`alert_dedupe`；大量刪除後建議離線 VACUUM |
 | 健康摘要 | 每週日 09:00（台北）發到 `WAR_ROOM_CHANNEL_ID`（若有設） |
 
 快照「品質達標」條件：該服**總榜成功**，且合併玩家人數 ≥ `SNAPSHOT_MIN_PLAYERS`。部分職業榜失敗仍會寫入可用資料，但該服不計入完整快照門檻，以降低假轉服。
@@ -155,7 +155,7 @@ ruff check .
 ```bash
 python cleanup_db.py
 python cleanup_db.py --days 30 --dry-run
-python cleanup_db.py --for-search --dry-run   # 尋人導向：近3天 ∪ 最近3次轉移窗～結束後再+3天（延遲登入）
+python cleanup_db.py --for-search --dry-run   # 尋人導向：近3天 ∪ 最近3次轉移窗～結束後再+3天（延遲登入）；轉移窗內同角同服只留首尾
 python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引 + player_profile
 python cleanup_db.py --build-indexes          # 僅離線建索引（大庫啟動時會略過）
 python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
