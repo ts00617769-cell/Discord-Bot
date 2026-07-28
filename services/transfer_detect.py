@@ -52,40 +52,20 @@ POTENTIAL_TRANSFERS_SQL = """
 """
 
 
-def build_alias_map(registry_rows: Iterable[tuple]) -> dict[str, set[str]]:
-    """(player_name, original_identity) → {name: set(aliases)}。"""
-    alias_map: dict[str, set[str]] = {}
-    for row in registry_rows:
-        name = row[0]
-        identities = [i.strip() for i in row[1].split(",")] if row[1] else []
-        alias_map[name] = set(identities)
-    return alias_map
-
-
-def is_known_alias(
-    alias_map: dict[str, set[str]], new_name: str, old_name: str
-) -> bool:
-    return (
-        old_name in alias_map.get(new_name, set())
-        or new_name in alias_map.get(old_name, set())
-    )
-
-
-def transfer_sort_key(row: tuple, alias_map: dict[str, set[str]]) -> tuple:
-    """較佳候選排前面：同名 > 登錄別名 > 同級 > 同討伐 > 經驗差小。"""
+def transfer_sort_key(row: tuple) -> tuple:
+    """較佳候選排前面：同名 > 同級 > 同討伐 > 經驗差小。"""
     return (
         0 if row[1] == row[5] else 1,
-        0 if is_known_alias(alias_map, row[1], row[5]) else 1,
         0 if row[3] == row[7] else 1,
         0 if (row[10] is not None and row[11] is not None and row[10] == row[11]) else 1,
         row[0] - row[9],
     )
 
 
-def should_skip_rename_mismatch(row: tuple, alias_map: dict[str, set[str]]) -> bool:
-    """異名且非別名時，討伐必須一致；否則略過。"""
+def should_skip_rename_mismatch(row: tuple) -> bool:
+    """異名時討伐必須一致；否則略過。"""
     new_name, old_name = row[1], row[5]
-    if new_name == old_name or is_known_alias(alias_map, new_name, old_name):
+    if new_name == old_name:
         return False
     if row[10] is None or row[11] is None or row[10] != row[11]:
         return True
@@ -102,17 +82,12 @@ def format_exp_diff(exp_diff: float) -> str:
     return f"+{(exp_diff / 100_000_000):,.0f} 億 (轉移期間偷練)"
 
 
-def rank_transfer_candidates(
-    transfer_records: list[tuple],
-    alias_map: dict[str, set[str]],
-) -> list[tuple]:
+def rank_transfer_candidates(transfer_records: list[tuple]) -> list[tuple]:
     """過濾異名討伐不符後，依優先序排序。"""
     filtered = [
-        row
-        for row in transfer_records
-        if not should_skip_rename_mismatch(row, alias_map)
+        row for row in transfer_records if not should_skip_rename_mismatch(row)
     ]
-    filtered.sort(key=lambda x: transfer_sort_key(x, alias_map))
+    filtered.sort(key=transfer_sort_key)
     return filtered
 
 

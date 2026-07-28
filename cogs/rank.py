@@ -10,7 +10,6 @@ from game_data import SERVER_MAP
 from services import error_handler
 from services.command_args import parse_rank_args, parse_rank_filters
 from services.error_handler import allowed_channel
-from services.member_registry import get_member_tag
 from services.ranking_api import get_ranking_client, resolve_class_key
 
 logger = logging.getLogger(__name__)
@@ -19,9 +18,6 @@ logger = logging.getLogger(__name__)
 class RankTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    async def get_member_info(self, name):
-        return await get_member_tag(self.bot.db, name)
 
     @commands.hybrid_command(
         name="排名",
@@ -137,12 +133,10 @@ class RankTracker(commands.Cog):
                 name = str(p.get("gc_name") or "未知")
                 class_name = str(p.get("class_name", "未知"))
                 grade_val = (p.get("string_map") or {}).get("grade", "0")
-                tag = await self.get_member_info(name)
-                display_name = f"{name}{tag}"
                 level_str = p.get("gc_level", "?")
 
                 line = (
-                    f"{idx:02d}. [{display_name}] [{class_name}] Lv.{level_str} | "
+                    f"{idx:02d}. [{name}] [{class_name}] Lv.{level_str} | "
                     f"討伐 {grade_val} {server_info}\n"
                 )
                 line += f"    ▶ 經驗值: {exp_zhao:,.2f} 兆\n"

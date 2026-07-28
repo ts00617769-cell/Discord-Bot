@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from db.schema import DENORM_COVERAGE_READY_RATIO, denorm_is_ready
 from services import player_matching as match
-from services.member_registry import collect_alias_group
-from services.text_display import escape_like
 
 _PROFILE_SELECT = match.PROFILE_SELECT
 _PROFILE_FROM = match.PROFILE_FROM
@@ -123,14 +121,9 @@ class PlayerSearchStore:
                     by_key[(row[0], row[1])] = row
         return list(by_key.values())
 
-    @staticmethod
-    def _escape_like(value: str) -> str:
-        """跳脫 LIKE 萬用字元 % / _ 與跳脫符本身。"""
-        return escape_like(value)
-
     async def _get_related_names(self, target_name):
-        """精確別名群組（BFS 閉包），避免 LIKE 子字串誤配。"""
-        return await collect_alias_group(self.db, {target_name})
+        """相關名稱集合（已移除手動別名；僅目標本名）。"""
+        return {target_name}
 
     async def _recent_exp_anchors(self, player_name, server_name, limit=8):
         async with self.db.execute(

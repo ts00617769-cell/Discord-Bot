@@ -37,11 +37,6 @@ class HelpCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="📝 尋人回報",
-            value="`!尋人回報 [目前名稱] [前身1]...` 或 `!尋人回報 名稱 清除`",
-            inline=False,
-        )
-        embed.add_field(
             name="🛫 轉服掃描",
             value="`!轉服掃描`（別名：`!移民清單`、`!抓包`）",
             inline=False,

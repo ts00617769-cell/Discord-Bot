@@ -27,7 +27,6 @@ from services.exp_speed import (
     collect_overspeed,
     pick_interval_baseline,
 )
-from services.member_registry import get_member_tag
 from services.ranking_api import get_ranking_client
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
@@ -40,7 +39,6 @@ from services.transfer_detect import (
     CLASS_MARGIN,
     NAME_MARGIN,
     POTENTIAL_TRANSFERS_SQL,
-    build_alias_map,
     format_exp_diff,
     pick_unique_pairs,
     rank_transfer_candidates,
@@ -172,9 +170,6 @@ class ExpTracker(commands.Cog):
             return
         except sqlite3.DatabaseError as e:
             logger.error(f"❌ 檢查/建立尋人索引時發生資料庫錯誤: {e}")
-
-    async def get_member_info(self, name):
-        return await get_member_tag(self.bot.db, name)
 
     @tasks.loop(minutes=10.0)
     async def auto_fetch_exp(self):
@@ -414,13 +409,7 @@ class ExpTracker(commands.Cog):
             if complete_times and len(complete_times) >= 2:
                 miss_times = [complete_times[0][0], complete_times[1][0]]
 
-            async with read_db(self.bot).execute(
-                "SELECT player_name, original_identity FROM member_registry"
-            ) as cursor:
-                registry_rows = await cursor.fetchall()
-
-            alias_map = build_alias_map(registry_rows)
-            ranked = rank_transfer_candidates(transfer_records, alias_map)
+            ranked = rank_transfer_candidates(transfer_records)
             db = read_db(self.bot)
 
             candidate_keys = [pair_key_from_row(row) for row in ranked]

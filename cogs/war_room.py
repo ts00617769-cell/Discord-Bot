@@ -25,6 +25,7 @@ from services.retention_windows import (
     exp_history_outside_keep_sql,
     exp_history_transfer_middle_statements,
     search_retention_cutoff,
+    transfer_alert_retention_cutoff,
 )
 from services.settings_prune import (
     PRUNE_ALERT_DEDUPE_SQL,
@@ -239,7 +240,7 @@ class WarRoom(commands.Cog):
                 DELETE FROM transfer_alerts_log
                 WHERE alert_time < ?
                 """,
-                (retention_cutoff,),
+                (transfer_alert_retention_cutoff(),),
             ) as cursor:
                 deleted_transfer = cursor.rowcount or 0
 

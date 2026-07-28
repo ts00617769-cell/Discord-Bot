@@ -40,6 +40,7 @@ from db.schema import (  # noqa: E402
 from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
+    DEFAULT_TRANSFER_ALERT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
@@ -48,6 +49,7 @@ from services.retention_windows import (  # noqa: E402
     exp_history_transfer_middle_batch_sql,
     exp_history_transfer_middle_statements,
     search_retention_cutoff,
+    transfer_alert_retention_cutoff,
 )
 from services.settings_prune import (  # noqa: E402
     PRUNE_ALERT_DEDUPE_SQL,
@@ -451,6 +453,7 @@ def main() -> int:
         keep_ranges: list[tuple[str, str]] = []
         thin_ranges: list[tuple[str, str]] = []
         settings_cutoff: str | None = None
+        transfer_cutoff: str | None = None
 
         if args.wipe_history:
             mode = "清空全部歷史"
@@ -496,6 +499,7 @@ def main() -> int:
                 pad_days=args.transfer_pad_days,
                 max_transfer_windows=args.max_transfer_windows,
             )
+            transfer_cutoff = transfer_alert_retention_cutoff()
             mode = (
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
                 f"最近 {args.max_transfer_windows} 次轉移窗"
@@ -546,7 +550,7 @@ def main() -> int:
                         SELECT COUNT(*) FROM transfer_alerts_log
                         WHERE alert_time < ?
                         """,
-                        (settings_cutoff,),
+                        (transfer_cutoff,),
                     )
                     if has_transfer
                     else 0
@@ -729,13 +733,14 @@ def main() -> int:
                     deleted_middle += n
                     _log(f"  本窗中間合計已刪 {n:,} 筆")
             assert settings_cutoff is not None
+            assert transfer_cutoff is not None
             if has_transfer:
                 deleted_transfer = conn.execute(
                     """
                     DELETE FROM transfer_alerts_log
                     WHERE alert_time < ?
                     """,
-                    (settings_cutoff,),
+                    (transfer_cutoff,),
                 ).rowcount
             if has_settings:
                 deleted_settings = conn.execute(

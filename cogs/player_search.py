@@ -18,7 +18,6 @@ from db.schema import (
 from game_data import SERVER_MAP
 from services import player_matching as match
 from services.error_handler import allowed_channel, parse_env_channel_ids
-from services.member_registry import clear_member_identity, upsert_alias_links
 from services.player_search_db import PlayerSearchStore
 from services.player_search_engine import (
     build_causal_scan_sections,
@@ -51,55 +50,6 @@ class PlayerSearch(commands.Cog):
 
     def _refresh_store(self):
         self.store = PlayerSearchStore(read_db(self.bot))
-
-    @commands.command(
-        name="尋人回報",
-        help="手動標記玩家前身身分（雙向）。用法: !尋人回報 驕傲o 某某某 艾雲o 或 !尋人回報 驕傲o 清除",
-    )
-    @allowed_channel()
-    async def report_identity(self, ctx, *args):
-        args_list = [arg for arg in args if arg.strip()]
-        if len(args_list) < 2:
-            return await ctx.send(
-                "❌ 參數不足！用法範例：`!尋人回報 驕傲o 某某某 艾雲o` 或 `!尋人回報 驕傲o 清除`"
-            )
-
-        current_name = args_list[0]
-        original_names = args_list[1:]
-
-        if len(original_names) == 1 and original_names[0] == "清除":
-            try:
-                await clear_member_identity(self.bot.db, current_name)
-                invalidate_search_cache()
-                await ctx.send(f"✅ 已成功清除【{current_name}】的身分標記（含反向別名）。")
-            except sqlite3.DatabaseError as e:
-                logger.error(f"Error clearing member info for '{current_name}': {e}")
-                await ctx.send("❌ 清除失敗（資料庫錯誤）")
-            return
-
-        try:
-            before = None
-            async with read_db(self.bot).execute(
-                "SELECT original_identity FROM member_registry WHERE player_name = ?",
-                (current_name,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                before = row[0] if row else None
-
-            new_identity_str = await upsert_alias_links(
-                self.bot.db, current_name, list(original_names)
-            )
-            if before == new_identity_str:
-                return await ctx.send(
-                    f"⚠️ 你輸入的名字都已經標記過了。目前的標記為：({new_identity_str})"
-                )
-            invalidate_search_cache()
-            await ctx.send(
-                f"✅ 已成功為【{current_name}】新增雙向身分標記！目前累計的身分：【{new_identity_str}】"
-            )
-        except sqlite3.DatabaseError as e:
-            logger.error(f"Error updating member info for '{current_name}': {e}")
-            await ctx.send("❌ 標記失敗（資料庫錯誤）")
 
     @commands.hybrid_command(
         name="尋人",
@@ -192,7 +142,7 @@ class PlayerSearch(commands.Cog):
                         ),
                         title=f"👁️ 天眼追蹤（可疑候選）- {name}",
                         color=0xf39c12,
-                        footer="僅供參考：請用 !尋人回報 確認後可提升後續追蹤精度",
+                        footer="僅供參考：可疑候選，請交叉比對等級／討伐／轉移時程",
                         show_confidence=True,
                     )
                     _SEARCH_CACHE[cache_key] = (
@@ -206,8 +156,7 @@ class PlayerSearch(commands.Cog):
                     last_exp = result.target_last_exp or 0.0
                     content = (
                         f"⚠️ 目標最後紀錄為 {last_exp/1000000000000:.2f} 兆。\n"
-                        f"雙引擎未找到符合條件的轉服/改名軌跡。{result.tip}\n"
-                        f"提示：可用 `!尋人回報 {name} 前身名` 手動標記後再查。"
+                        f"雙引擎未找到符合條件的轉服/改名軌跡。{result.tip}"
                     )
                     _SEARCH_CACHE[cache_key] = (
                         time.monotonic(),

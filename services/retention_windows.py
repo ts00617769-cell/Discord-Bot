@@ -11,6 +11,8 @@ DEFAULT_RECENT_DAYS = 1
 # 轉移窗結束後再留 N 天：窗尾（如 23:50）轉移後，可能隔幾天才上新服榜
 DEFAULT_TRANSFER_PAD_DAYS = 3
 DEFAULT_MAX_TRANSFER_WINDOWS = 3
+# 轉服警報 log 與 history 脫鉤，可留較久
+DEFAULT_TRANSFER_ALERT_DAYS = 180
 
 
 def _parse(s: str) -> Optional[datetime.datetime]:
@@ -306,10 +308,23 @@ def search_retention_cutoff(
     max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
     now: Optional[datetime.datetime] = None,
 ) -> str:
-    """與 cleanup_db --for-search 對齊的 transfer_alerts / alert_dedupe 截止時間。"""
+    """與密層對齊的 alert_dedupe / settings 截止時間。"""
     _ = (pad_days, max_transfer_windows)
     now_dt = now if now is not None else now_naive_taipei()
     if now_dt.tzinfo is not None:
         now_dt = now_dt.replace(tzinfo=None)
     cutoff = now_dt - datetime.timedelta(days=int(recent_days))
+    return cutoff.strftime(FMT_SQL)
+
+
+def transfer_alert_retention_cutoff(
+    *,
+    alert_days: int = DEFAULT_TRANSFER_ALERT_DAYS,
+    now: Optional[datetime.datetime] = None,
+) -> str:
+    """transfer_alerts_log 截止時間（預設 180 天）。"""
+    now_dt = now if now is not None else now_naive_taipei()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+    cutoff = now_dt - datetime.timedelta(days=int(alert_days))
     return cutoff.strftime(FMT_SQL)
