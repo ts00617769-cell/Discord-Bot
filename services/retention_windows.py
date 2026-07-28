@@ -7,7 +7,7 @@ from typing import Iterable, Optional, Sequence
 from services.game_event_windows import REALM_TRANSFER_WINDOWS
 from services.timeutil import FMT_SQL, now_naive_taipei
 
-DEFAULT_RECENT_DAYS = 3
+DEFAULT_RECENT_DAYS = 1
 # 轉移窗結束後再留 N 天：窗尾（如 23:50）轉移後，可能隔幾天才上新服榜
 DEFAULT_TRANSFER_PAD_DAYS = 3
 DEFAULT_MAX_TRANSFER_WINDOWS = 3
