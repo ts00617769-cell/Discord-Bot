@@ -68,11 +68,29 @@ async def connect_db(
     db = await aiosqlite.connect(str(path))
     await configure_connection(db)
     if check_integrity:
-        try:
-            await integrity_quick_check(db)
-        except DatabaseIntegrityError:
-            await db.close()
-            raise
+        skip = (os.getenv("SKIP_DB_QUICK_CHECK") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if skip:
+            logger.warning("⏭️ 已設定 SKIP_DB_QUICK_CHECK，略過 PRAGMA quick_check")
+        else:
+            try:
+                size_mb = path.stat().st_size / (1024 * 1024)
+            except OSError:
+                size_mb = -1.0
+            logger.info(
+                "⏳ PRAGMA quick_check 開始（約 %.0f MB；NAS 大庫可能需數分鐘）…",
+                size_mb,
+            )
+            try:
+                await integrity_quick_check(db)
+            except DatabaseIntegrityError:
+                await db.close()
+                raise
+            logger.info("✅ PRAGMA quick_check 通過")
     logger.info(f"✅ 資料庫已連接: {path}")
     return db
 

@@ -136,6 +136,7 @@ class PrasiaBot(commands.Bot):
 
     async def setup_hook(self):
         try:
+            logger.info("⏳ setup_hook 開始（登入後初始化）…")
             headers = {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -147,6 +148,7 @@ class PrasiaBot(commands.Bot):
             self.ranking_client = get_ranking_client(self)
 
             db_path = resolve_db_path(os.path.dirname(os.path.abspath(__file__)))
+            logger.info("⏳ 正在開啟資料庫 %s …", db_path)
             try:
                 self.db = await connect_db(db_path, check_integrity=True)
             except DatabaseIntegrityError as e:
