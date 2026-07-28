@@ -24,7 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOCK_PATH = ROOT / ".bot.lock"
 DEFAULT_DAYS = 60
-DELETE_BATCH_SIZE = 50_000
+# NAS 記憶體較緊時，偏小批次 + 定期 checkpoint 較不易被 OOM 殺掉
+DELETE_BATCH_SIZE = 20_000
+CHECKPOINT_EVERY_BATCHES = 10
 
 # 允許直接執行：把專案根加入 path
 if str(ROOT) not in sys.path:
@@ -224,6 +226,7 @@ def _delete_in_batches(
     batch_no = 0
     while True:
         batch_no += 1
+        _log(f"  {label} 開始第 {batch_no} 批…")
         cur = _execute_with_busy_retry(conn, sql, params)
         n = cur.rowcount
         if n <= 0:
@@ -231,6 +234,12 @@ def _delete_in_batches(
         total += n
         conn.commit()
         _log(f"  {label} 第 {batch_no} 批刪 {n:,}（累計 {total:,}）")
+        if batch_no % CHECKPOINT_EVERY_BATCHES == 0:
+            try:
+                _log(f"  {label} 中途 wal_checkpoint…")
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except sqlite3.OperationalError as e:
+                _log(f"  checkpoint 略過：{e}")
         if n < batch_size:
             break
     return total
