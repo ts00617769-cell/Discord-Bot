@@ -176,7 +176,7 @@ python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 ```bash
 pytest -q
 ruff check .
-python -X utf8 -m mypy services db
+python -X utf8 -m mypy services db bot.py cogs cleanup_db.py
 ```
 
 推送／PR 會跑 GitHub Actions：本機同款 `ruff` + `pytest` + `mypy`（不連 Discord／beanfun）。

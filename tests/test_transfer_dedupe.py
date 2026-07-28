@@ -80,3 +80,38 @@ async def test_filter_viable_ranked_requires_old_missing(tmp_path):
         assert viable2 == [row]
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_players_present_at_times_batches(tmp_path):
+    import aiosqlite
+
+    from services.transfer_alert_flow import players_present_at_times
+
+    db = await aiosqlite.connect(str(tmp_path / "batch.db"))
+    try:
+        await apply_migrations(db)
+        t1, t2 = "2026-07-28 10:00:00", "2026-07-28 10:10:00"
+        await db.executemany(
+            """
+            INSERT INTO exp_history
+            (record_time, player_name, server_name, level, exp, class_name, subjugation_grade)
+            VALUES (?, ?, ?, 60, 2e12, '戰士', 1)
+            """,
+            [
+                (t1, "A", "S1"),
+                (t1, "B", "S2"),
+                (t2, "A", "S1"),
+            ],
+        )
+        await db.commit()
+        present = await players_present_at_times(
+            db, [t1, t2], [("A", "S1"), ("B", "S2"), ("C", "S3")]
+        )
+        assert (t1, "A", "S1") in present
+        assert (t1, "B", "S2") in present
+        assert (t2, "A", "S1") in present
+        assert (t2, "B", "S2") not in present
+        assert (t1, "C", "S3") not in present
+    finally:
+        await db.close()

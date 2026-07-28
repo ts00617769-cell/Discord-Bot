@@ -53,7 +53,7 @@ def select_recent_transfer_windows(
     max_windows: int,
     now: Optional[datetime.datetime] = None,
 ) -> list[tuple[str, str, str]]:
-    """依窗結束時間取最近 max_windows 次（已開始或即將開始的窗優先）。"""
+    """依窗結束時間取最近 max_windows 次（略過尚未開始的未來窗）。"""
     if max_windows < 0:
         raise ValueError("max_windows must be >= 0")
     if max_windows == 0:
@@ -69,12 +69,12 @@ def select_recent_transfer_windows(
         start, end = _parse(start_s), _parse(end_s)
         if start is None or end is None:
             continue
-        # 尚未開始的未來窗：仍可保留（以 start 排序），但優先已結束／進行中
+        # 預估／未開跑的未來窗不佔「最近 K 次」名額，避免擠掉真實歷史窗
+        if start > now_dt:
+            continue
         scored.append((end, item))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    # 只取結束時間 <= now+pad 概念上「最近」；未來窗若 end 很遠也會排前面
-    # 實務：REALM 列表皆為已公告場次，取 end 最新的 N 筆即可
     return [item for _, item in scored[:max_windows]]
 
 

@@ -105,6 +105,20 @@ def test_only_last_n_transfer_windows():
     ]
 
 
+def test_select_skips_future_windows():
+    """尚未開始的預估窗不佔最近 K 次名額。"""
+    windows = [
+        ("2026-05-06 12:00:00", "2026-05-10 23:59:59", "第25次"),
+        ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次"),
+        ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次"),
+        ("2026-08-05 12:00:00", "2026-08-09 23:59:59", "第28次預估"),
+    ]
+    selected = select_recent_transfer_windows(
+        windows, max_windows=3, now=datetime(2026, 7, 28, 9, 0, 0)
+    )
+    assert [w[2] for w in selected] == ["第27次", "第26次", "第25次"]
+
+
 def test_outside_keep_sql_params_match_ranges():
     ranges = [
         ("2026-05-01 00:00:00", "2026-05-20 00:00:00"),
