@@ -30,6 +30,10 @@ from services.exp_speed import (
 from services.ranking_api import get_ranking_client
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
+from services.game_event_windows import (
+    TRANSFER_LOGIN_GRACE_DAYS,
+    is_transfer_active_period,
+)
 from services.transfer_alert_flow import (
     filter_viable_ranked,
     lookup_alerted_pairs,
@@ -42,6 +46,16 @@ from services.transfer_detect import (
     format_exp_diff,
     pick_unique_pairs,
     rank_transfer_candidates,
+)
+from services.transfer_missing import (
+    build_missing_queue_rows,
+    bump_still_missing,
+    fetch_newcomers,
+    fetch_open_missing,
+    mark_missing_resolved,
+    prune_stale_missing,
+    resolve_reappeared,
+    upsert_disappeared,
 )
 
 logger = logging.getLogger(__name__)
@@ -370,11 +384,16 @@ class ExpTracker(commands.Cog):
     async def _send_transfer_alert(
         self, time_now, new_name, new_server, old_name, old_server,
         new_lvl, new_cls, new_sub_grade, status_str, exp_diff,
+        *,
+        old_guild: str = "",
+        new_guild: str = "",
     ) -> int:
         """發送轉服警報；回傳成功送達的頻道數。"""
         if not self.TRANSFER_ALERT_CHANNEL_IDS:
             return 0
         diff_str = format_exp_diff(exp_diff)
+        old_g = old_guild or "—"
+        new_g = new_guild or "—"
         embed = discord.Embed(
             title="【波拉西亞戰記】轉移/旅團變動警報",
             description=(
@@ -382,7 +401,8 @@ class ExpTracker(commands.Cog):
                 f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
                 f"**{new_name}** ({new_server})\n"
                 f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
-                f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}"
+                f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}\n"
+                f"[旅團]: {old_g} ➔ {new_g}"
             ),
             color=0xf1c40f,
         )
@@ -399,9 +419,44 @@ class ExpTracker(commands.Cog):
 
     async def check_for_transfers(self, time_now, time_prev, complete_times=None):
         try:
-            transfer_records = await self._get_potential_transfers(
-                time_now, time_prev, NAME_MARGIN, CLASS_MARGIN
+            in_active = is_transfer_active_period(str(time_now))
+            write_db = self.bot.db
+            db = read_db(self.bot)
+
+            # 轉移活躍期：維護消失佇列（連續缺席／同服回歸）
+            if in_active:
+                try:
+                    await resolve_reappeared(write_db, time_now=str(time_now))
+                    await upsert_disappeared(
+                        write_db,
+                        time_now=str(time_now),
+                        time_prev=str(time_prev),
+                        created_at=str(time_now),
+                    )
+                    await bump_still_missing(write_db, time_now=str(time_now))
+                except sqlite3.DatabaseError as e:
+                    logger.error(f"transfer_missing upsert failed: {e}")
+
+            transfer_records = list(
+                await self._get_potential_transfers(
+                    time_now, time_prev, NAME_MARGIN, CLASS_MARGIN
+                )
             )
+
+            if in_active:
+                try:
+                    newcomers = await fetch_newcomers(
+                        db, time_now=str(time_now), time_prev=str(time_prev)
+                    )
+                    open_missing = await fetch_open_missing(db)
+                    queue_rows = build_missing_queue_rows(
+                        newcomers, open_missing, appear_time=str(time_now)
+                    )
+                    if queue_rows:
+                        transfer_records.extend(queue_rows)
+                except sqlite3.DatabaseError as e:
+                    logger.error(f"transfer_missing match failed: {e}")
+
             if not transfer_records:
                 return
 
@@ -409,8 +464,13 @@ class ExpTracker(commands.Cog):
             if complete_times and len(complete_times) >= 2:
                 miss_times = [complete_times[0][0], complete_times[1][0]]
 
-            ranked = rank_transfer_candidates(transfer_records)
-            db = read_db(self.bot)
+            ranked = rank_transfer_candidates(
+                transfer_records,
+                appear_time=str(time_now),
+                in_active_period=in_active,
+            )
+            if not ranked:
+                return
 
             candidate_keys = [pair_key_from_row(row) for row in ranked]
             already_alerted = await lookup_alerted_pairs(db, candidate_keys)
@@ -418,7 +478,9 @@ class ExpTracker(commands.Cog):
                 db, ranked, already_alerted, miss_times
             )
 
-            for pair in pick_unique_pairs(viable, already_alerted):
+            for pair in pick_unique_pairs(
+                viable, already_alerted, in_active_period=in_active
+            ):
                 sent = await self._send_transfer_alert(
                     time_now,
                     pair["new_name"],
@@ -430,9 +492,11 @@ class ExpTracker(commands.Cog):
                     pair["new_sub_grade"],
                     pair["status"],
                     pair["exp_diff"],
+                    old_guild=pair.get("old_guild") or "",
+                    new_guild=pair.get("new_guild") or "",
                 )
                 if sent > 0:
-                    await self.bot.db.execute(
+                    await write_db.execute(
                         '''
                         INSERT INTO transfer_alerts_log
                         (old_name, old_server, new_name, new_server, alert_time)
@@ -440,7 +504,13 @@ class ExpTracker(commands.Cog):
                         ''',
                         (*pair["pair_key"], time_now),
                     )
-                    await self.bot.db.commit()
+                    await mark_missing_resolved(
+                        write_db,
+                        pair["old_name"],
+                        pair["old_server"],
+                        resolved_at=str(time_now),
+                    )
+                    await write_db.commit()
                     already_alerted.add(pair["pair_key"])
                 else:
                     logger.warning(
@@ -448,6 +518,17 @@ class ExpTracker(commands.Cog):
                         f"{pair['old_name']}@{pair['old_server']} -> "
                         f"{pair['new_name']}@{pair['new_server']}"
                     )
+
+            # 清理過舊佇列（窗結束 + grace + 7 天）
+            try:
+                cutoff_dt = datetime.datetime.strptime(
+                    str(time_now), "%Y-%m-%d %H:%M:%S"
+                ) - datetime.timedelta(days=TRANSFER_LOGIN_GRACE_DAYS + 7)
+                await prune_stale_missing(
+                    write_db, before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+                )
+            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
+                logger.warning(f"prune transfer_missing skipped: {e}")
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error in transfer check: {e}\n{traceback.format_exc()}")
         except (ValueError, TypeError, KeyError) as e:

@@ -172,3 +172,70 @@ def allow_class_mismatch_high(
     ):
         return True
     return False
+
+
+def is_transfer_active_period(
+    when: Optional[str],
+    *,
+    grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+) -> bool:
+    """時間點是否落在任一領域轉移活躍期（窗開始前 PRE_HOURS ～ 窗結束+grace）。"""
+    dt = _parse(when)
+    if dt is None:
+        return False
+    pre = datetime.timedelta(hours=TRANSFER_DISAPPEAR_PRE_HOURS)
+    grace = datetime.timedelta(days=int(grace_days))
+    for start_s, end_s, _label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        if (start - pre) <= dt <= (end + grace):
+            return True
+    return False
+
+
+def active_transfer_label(
+    when: Optional[str],
+    *,
+    grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+) -> Optional[str]:
+    """回傳 `when` 所屬轉移場次 label；不在活躍期則 None。"""
+    dt = _parse(when)
+    if dt is None:
+        return None
+    pre = datetime.timedelta(hours=TRANSFER_DISAPPEAR_PRE_HOURS)
+    grace = datetime.timedelta(days=int(grace_days))
+    for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        if (start - pre) <= dt <= (end + grace):
+            return label
+    return None
+
+
+def disappear_in_transfer_window(
+    last_seen: Optional[str],
+    *,
+    grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+) -> Optional[str]:
+    """舊角最後上榜是否落在可計入消失的轉移窗區間；回傳 label。"""
+    dt = _parse(last_seen)
+    if dt is None:
+        return None
+    pre = datetime.timedelta(hours=TRANSFER_DISAPPEAR_PRE_HOURS)
+    for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        if (start - pre) <= dt <= end:
+            return label
+    # 窗結束後 grace 內仍可能補登消失（延遲偵測）
+    grace = datetime.timedelta(days=int(grace_days))
+    for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        if end < dt <= (end + grace):
+            return label
+    return None

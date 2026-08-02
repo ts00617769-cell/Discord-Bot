@@ -11,6 +11,42 @@ from services.transfer_alert_flow import (
 )
 
 
+def _xfer_row(
+    new_exp=2e12,
+    new_name="New",
+    new_server="S2",
+    new_lvl=60,
+    new_cls="戰士",
+    new_guild="",
+    old_name="Old",
+    old_server="S1",
+    old_lvl=60,
+    old_cls="戰士",
+    old_exp=2e12,
+    old_guild="",
+    new_sub=1,
+    old_sub=1,
+    old_last_seen="2026-07-27 11:00:00",
+):
+    return (
+        new_exp,
+        new_name,
+        new_server,
+        new_lvl,
+        new_cls,
+        new_guild,
+        old_name,
+        old_server,
+        old_lvl,
+        old_cls,
+        old_exp,
+        old_guild,
+        new_sub,
+        old_sub,
+        old_last_seen,
+    )
+
+
 @pytest.mark.asyncio
 async def test_transfer_pair_lookup_targeted(tmp_path):
     import aiosqlite
@@ -46,21 +82,7 @@ async def test_filter_viable_ranked_requires_old_missing(tmp_path):
     db = await aiosqlite.connect(str(tmp_path / "viable.db"))
     try:
         await apply_migrations(db)
-        # row layout matches transfer SQL select
-        row = (
-            2e12,
-            "New",
-            "S2",
-            60,
-            "戰士",
-            "Old",
-            "S1",
-            60,
-            "戰士",
-            2e12,
-            1,
-            1,
-        )
+        row = _xfer_row()
         assert pair_key_from_row(row) == ("Old", "S1", "New", "S2")
         t_now = "2026-07-27 12:00:00"
         await db.execute(

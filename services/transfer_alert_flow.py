@@ -3,10 +3,22 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from services.transfer_detect import (
+    IDX_NEW_NAME,
+    IDX_NEW_SERVER,
+    IDX_OLD_NAME,
+    IDX_OLD_SERVER,
+)
+
 
 def pair_key_from_row(row: tuple) -> tuple[Any, Any, Any, Any]:
     """ranked SQL row → (old_name, old_server, new_name, new_server)。"""
-    return (row[5], row[6], row[1], row[2])
+    return (
+        row[IDX_OLD_NAME],
+        row[IDX_OLD_SERVER],
+        row[IDX_NEW_NAME],
+        row[IDX_NEW_SERVER],
+    )
 
 
 async def lookup_alerted_pairs(
@@ -99,13 +111,13 @@ async def filter_viable_ranked(
         if key in already_alerted:
             continue
         candidates.append(row)
-        old_keys.append((row[5], row[6]))
+        old_keys.append((row[IDX_OLD_NAME], row[IDX_OLD_SERVER]))
 
     present = await players_present_at_times(db, miss_times, old_keys)
 
     viable: list[tuple] = []
     for row in candidates:
-        old_name, old_server = row[5], row[6]
+        old_name, old_server = row[IDX_OLD_NAME], row[IDX_OLD_SERVER]
         if any((t, old_name, old_server) in present for t in miss_times):
             continue
         viable.append(row)

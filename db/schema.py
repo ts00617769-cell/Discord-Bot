@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -155,6 +155,37 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        7,
+        "guild_name on history/profile + transfer_missing queue",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS transfer_missing (
+                player_name TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                last_seen TIMESTAMP NOT NULL,
+                last_exp REAL NOT NULL,
+                level INTEGER,
+                class_name TEXT,
+                subjugation_grade INTEGER,
+                guild_name TEXT,
+                miss_count INTEGER NOT NULL DEFAULT 1,
+                window_label TEXT,
+                created_at TIMESTAMP NOT NULL,
+                resolved_at TIMESTAMP,
+                PRIMARY KEY (player_name, server_name)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_transfer_missing_open
+            ON transfer_missing(resolved_at, last_seen)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_transfer_missing_guild
+            ON transfer_missing(guild_name, server_name, resolved_at)
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -257,6 +288,7 @@ _PRAGMA_TABLE_ALLOWLIST = frozenset(
         "quiz_votes",
         "horoscope_cache",
         "alert_dedupe",
+        "transfer_missing",
     }
 )
 
@@ -281,6 +313,10 @@ async def _ensure_exp_history_columns(db) -> None:
         await db.execute(
             "ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0"
         )
+    if "guild_name" not in cols:
+        await db.execute(
+            "ALTER TABLE exp_history ADD COLUMN guild_name TEXT DEFAULT ''"
+        )
 
 
 _PLAYER_PROFILE_STAT_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -290,6 +326,7 @@ _PLAYER_PROFILE_STAT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("last_seen", "TIMESTAMP"),
     ("max_level", "INTEGER"),
     ("max_sub_grade", "INTEGER"),
+    ("guild_name", "TEXT"),
 )
 
 
@@ -308,6 +345,7 @@ async def _ensure_player_profile_columns(db) -> None:
             last_seen TIMESTAMP,
             max_level INTEGER,
             max_sub_grade INTEGER,
+            guild_name TEXT DEFAULT '',
             PRIMARY KEY (player_name, server_name)
         )
         """
@@ -332,6 +370,7 @@ def _ensure_player_profile_columns_sync(conn: sqlite3.Connection) -> None:
             last_seen TIMESTAMP,
             max_level INTEGER,
             max_sub_grade INTEGER,
+            guild_name TEXT DEFAULT '',
             PRIMARY KEY (player_name, server_name)
         )
         """
@@ -342,6 +381,26 @@ def _ensure_player_profile_columns_sync(conn: sqlite3.Connection) -> None:
     for name, decl in _PLAYER_PROFILE_STAT_COLUMNS:
         if name not in cols:
             conn.execute(f"ALTER TABLE player_profile ADD COLUMN {name} {decl}")
+
+
+def _ensure_exp_history_columns_sync(conn: sqlite3.Connection) -> None:
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(exp_history)").fetchall()
+    }
+    if not cols:
+        return
+    if "class_name" not in cols:
+        conn.execute(
+            "ALTER TABLE exp_history ADD COLUMN class_name TEXT DEFAULT '未知'"
+        )
+    if "subjugation_grade" not in cols:
+        conn.execute(
+            "ALTER TABLE exp_history ADD COLUMN subjugation_grade INTEGER DEFAULT 0"
+        )
+    if "guild_name" not in cols:
+        conn.execute(
+            "ALTER TABLE exp_history ADD COLUMN guild_name TEXT DEFAULT ''"
+        )
 
 
 async def apply_migrations(db) -> int:
@@ -358,6 +417,9 @@ async def apply_migrations(db) -> int:
         if version >= 1:
             await _ensure_exp_history_columns(db)
         if version >= 4:
+            await _ensure_player_profile_columns(db)
+        if version >= 7:
+            await _ensure_exp_history_columns(db)
             await _ensure_player_profile_columns(db)
         await _set_schema_version(db, version)
         await db.commit()
@@ -475,6 +537,7 @@ async def ensure_search_indexes(
 
 def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
     """離線重建 player_profile（職業 + min/max EXP／首末見／等級／討伐）。回傳寫入列數。"""
+    _ensure_exp_history_columns_sync(conn)
     _ensure_player_profile_columns_sync(conn)
     try:
         conn.execute("DELETE FROM player_profile")
@@ -490,7 +553,8 @@ def rebuild_player_profiles_sync(conn: sqlite3.Connection) -> int:
 _PLAYER_PROFILE_REBUILD_INSERT_SQL = """
         INSERT INTO player_profile (
             player_name, server_name, class_name, updated_at,
-            min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade
+            min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade,
+            guild_name
         )
         SELECT
             a.player_name,
@@ -502,7 +566,8 @@ _PLAYER_PROFILE_REBUILD_INSERT_SQL = """
             a.first_seen,
             a.last_seen,
             a.max_level,
-            a.max_sub_grade
+            a.max_sub_grade,
+            COALESCE(latest.guild_name, '')
         FROM (
             SELECT player_name, server_name,
                    MIN(exp) AS min_exp,
@@ -515,9 +580,9 @@ _PLAYER_PROFILE_REBUILD_INSERT_SQL = """
             GROUP BY player_name, server_name
         ) a
         LEFT JOIN (
-            SELECT player_name, server_name, class_name
+            SELECT player_name, server_name, class_name, guild_name
             FROM (
-                SELECT player_name, server_name, class_name,
+                SELECT player_name, server_name, class_name, guild_name,
                        ROW_NUMBER() OVER (
                            PARTITION BY player_name, server_name
                            ORDER BY record_time DESC
@@ -533,6 +598,7 @@ _PLAYER_PROFILE_REBUILD_INSERT_SQL = """
 
 async def rebuild_player_profiles(db) -> int:
     """線上重建 player_profile；失敗必 rollback，避免留下空表。"""
+    await _ensure_exp_history_columns(db)
     await _ensure_player_profile_columns(db)
     try:
         await db.execute("DELETE FROM player_profile")

@@ -43,12 +43,18 @@ async def test_apply_migrations_fresh_db(tmp_path):
 
         assert "player_profile" in tables
         assert "alert_dedupe" in tables
+        assert "transfer_missing" in tables
 
         async with db.execute("PRAGMA table_info(player_profile)") as cur:
             pp_cols = {row[1] for row in await cur.fetchall()}
         assert "min_exp" in pp_cols
         assert "max_exp" in pp_cols
         assert "first_seen" in pp_cols
+        assert "guild_name" in pp_cols
+
+        async with db.execute("PRAGMA table_info(exp_history)") as cur:
+            eh_cols = {row[1] for row in await cur.fetchall()}
+        assert "guild_name" in eh_cols
 
         created = await ensure_search_indexes(db, skip_if_rows_above=1_000_000)
         assert "idx_exp" in created or created == []

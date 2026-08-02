@@ -15,6 +15,7 @@ def test_players_to_insert_batch_skips_nameless():
                 "gc_level": 60,
                 "gc_exp": 1e12,
                 "class_name": "太陽監視者",
+                "guild_name": "狼團",
                 "string_map": {"grade": "10"},
             },
             {
@@ -28,16 +29,19 @@ def test_players_to_insert_batch_skips_nameless():
     assert len(batch) == 2
     assert batch[0][2] == "Hero"
     assert batch[0][6] == 10
+    assert batch[0][7] == "狼團"
     assert batch[1][2] == "BadGrade"
     assert batch[1][6] == 0
+    assert batch[1][7] == ""
 
     profiles = profiles_from_insert_batch(batch)
     by_name = {p[0]: p for p in profiles}
     assert by_name["Hero"][2] == "太陽監視者"
     assert by_name["BadGrade"][2] == "未知"
-    assert len(by_name["Hero"]) == 10
+    assert len(by_name["Hero"]) == 11
     assert by_name["Hero"][4] == 1e12  # min_exp
     assert by_name["Hero"][5] == 1e12  # max_exp
+    assert by_name["Hero"][10] == "狼團"
 
 
 def test_pad_and_timeutil():

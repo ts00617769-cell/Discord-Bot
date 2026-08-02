@@ -4,6 +4,15 @@ from __future__ import annotations
 from typing import Iterable
 
 
+def _normalize_guild(raw) -> str:
+    if raw is None:
+        return ""
+    text = str(raw).strip()
+    if text in ("", "None", "null", "未知"):
+        return ""
+    return text
+
+
 def players_to_insert_batch(record_time, server_name: str, players: Iterable[dict]) -> list[tuple]:
     """將 Ranking API 玩家列轉成 exp_history INSERT 參數列。"""
     insert_batch: list[tuple] = []
@@ -25,6 +34,7 @@ def players_to_insert_batch(record_time, server_name: str, players: Iterable[dic
                 p.get("gc_exp", 0),
                 p.get("class_name", "未知"),
                 grade,
+                _normalize_guild(p.get("guild_name")),
             )
         )
     return insert_batch
@@ -34,11 +44,20 @@ def profiles_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]:
     """由 insert batch 去重產生 player_profile upsert 參數（同名同服取最後一筆）。
 
     回傳：(name, server, class, updated_at, min_exp, max_exp, first_seen,
-           last_seen, max_level, max_sub_grade)
+           last_seen, max_level, max_sub_grade, guild_name)
     單次快照內同名同服合併 min/max；跨快照由 SQL ON CONFLICT 再合併。
     """
     latest: dict[tuple[str, str], tuple] = {}
-    for record_time, server_name, name, level, exp, class_name, grade in insert_batch:
+    for (
+        record_time,
+        server_name,
+        name,
+        level,
+        exp,
+        class_name,
+        grade,
+        guild_name,
+    ) in insert_batch:
         key = (name, server_name)
         prev = latest.get(key)
         if prev is None:
@@ -53,6 +72,7 @@ def profiles_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]:
                 record_time,
                 level,
                 grade,
+                guild_name or "",
             )
             continue
         (
@@ -66,6 +86,7 @@ def profiles_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]:
             prev_last,
             prev_lvl,
             prev_sub,
+            prev_guild,
         ) = prev
         use_newer = record_time >= prev_updated
 
@@ -94,22 +115,24 @@ def profiles_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]:
             _max_num(prev_last, record_time),
             _max_num(prev_lvl, level),
             _max_num(prev_sub, grade),
+            (guild_name or "") if use_newer else prev_guild,
         )
     return list(latest.values())
 
 
 EXP_HISTORY_INSERT_SQL = """
     INSERT OR IGNORE INTO exp_history
-    (record_time, server_name, player_name, level, exp, class_name, subjugation_grade)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    (record_time, server_name, player_name, level, exp, class_name, subjugation_grade, guild_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 PLAYER_PROFILE_UPSERT_SQL = """
     INSERT INTO player_profile (
         player_name, server_name, class_name, updated_at,
-        min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade
+        min_exp, max_exp, first_seen, last_seen, max_level, max_sub_grade,
+        guild_name
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(player_name, server_name) DO UPDATE SET
         class_name = CASE
             WHEN excluded.updated_at IS NOT NULL
@@ -154,5 +177,12 @@ PLAYER_PROFILE_UPSERT_SQL = """
             WHEN player_profile.max_sub_grade IS NULL THEN excluded.max_sub_grade
             WHEN excluded.max_sub_grade IS NULL THEN player_profile.max_sub_grade
             ELSE MAX(player_profile.max_sub_grade, excluded.max_sub_grade)
+        END,
+        guild_name = CASE
+            WHEN excluded.updated_at IS NOT NULL
+             AND (player_profile.updated_at IS NULL
+                  OR excluded.updated_at >= player_profile.updated_at)
+            THEN excluded.guild_name
+            ELSE player_profile.guild_name
         END
 """
