@@ -40,12 +40,15 @@ def _pid_is_running(pid: int) -> bool:
     if os.name == "nt":
         try:
             import ctypes
+
+            # windll 僅存在於 Windows；CI（Linux）mypy 會報 attr-defined
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(
+            handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
             if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32.CloseHandle(handle)
                 return True
             return False
         except OSError:
