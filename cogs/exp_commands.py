@@ -31,7 +31,7 @@ class ExpCommands(commands.Cog):
 
     @commands.command(
         name="警報",
-        help="開啟或關閉自動測速警報 (用法: !警報 開 或 !警報 開 50 萊涅01 或 !警報 關)",
+        help="開關指定伺服器、旅團的測速警報 (用法: !警報 開 50 萊涅01 旅團名稱)",
     )
     @allowed_channel()
     async def toggle_alerts(self, ctx, *args):
@@ -42,10 +42,12 @@ class ExpCommands(commands.Cog):
         state, cs = parse_alert_toggle(args)
         if state is None:
             current_state = "🟢 開啟中" if tracker.alerts_enabled else "🔴 關閉中"
+            guild = tracker.alert_guild or "未設定"
             return await ctx.send(
                 f"目前警報狀態為：**{current_state}** "
-                f"（{tracker.alert_server}、前 {tracker.alert_count} 名）\n"
-                f"👉 請輸入 `!警報 開 [數量] [伺服器]` 或 `!警報 關` 切換。"
+                f"（{tracker.alert_server}、旅團：{guild}、前 {tracker.alert_count} 名）\n"
+                f"👉 請輸入 `!警報 開 [數量] [伺服器] [旅團名稱]` "
+                f"或 `!警報 關` 切換。"
             )
 
         if state == "關":
@@ -56,10 +58,12 @@ class ExpCommands(commands.Cog):
         tracker.alerts_enabled = True
         tracker.alert_count = cs.count
         tracker.alert_server = cs.server
+        tracker.alert_guild = cs.rest[0] if cs.rest else ""
         await tracker._save_alert_settings()
         return await ctx.send(
             f"🚨 **【自動測速警報】已開啟！** "
-            f"(設定: {tracker.alert_server}、門檻 ≥{tracker.SPEED_LIMIT:,.0f}億、"
+            f"(設定: {tracker.alert_server}、旅團：{tracker.alert_guild}、"
+            f"門檻 ≥{tracker.SPEED_LIMIT:,.0f}億、"
             f"前 {tracker.alert_count} 名、每 {tracker.alert_interval_minutes} 分鐘)\n"
             f"💾 設定已寫入資料庫，重啟後仍會保持開啟。"
         )

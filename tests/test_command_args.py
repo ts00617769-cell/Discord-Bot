@@ -63,10 +63,34 @@ def test_parse_rank_filters_bad_grade():
 
 
 def test_parse_alert_toggle_on():
-    state, cs = parse_alert_toggle(["開", "40", "全服"])
+    state, cs = parse_alert_toggle(["開", "40", "萊涅01", "守護者"])
     assert state == "開"
     assert cs.count == 40
-    assert cs.is_global is True
+    assert cs.server == "萊涅01"
+    assert cs.is_global is False
+    assert cs.rest == ("守護者",)
+
+
+def test_parse_alert_toggle_bad_server_message():
+    with pytest.raises(BadArg, match="找不到伺服器"):
+        parse_alert_toggle(["開", "40", "不存在的服", "守護者"])
+
+
+def test_parse_alert_toggle_rejects_placeholder_guild():
+    with pytest.raises(BadArg, match="伺服器與旅團"):
+        parse_alert_toggle(["開", "40", "萊涅01", "未知"])
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["開", "40", "全服", "守護者"],
+        ["開", "40", "萊涅01"],
+    ],
+)
+def test_parse_alert_toggle_requires_server_and_guild(args):
+    with pytest.raises(BadArg):
+        parse_alert_toggle(args)
 
 
 def test_parse_alert_toggle_off():

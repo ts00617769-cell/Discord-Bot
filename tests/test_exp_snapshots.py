@@ -1,7 +1,18 @@
 """EXP snapshot helpers."""
 from __future__ import annotations
 
-from services.exp_snapshots import players_to_insert_batch, profiles_from_insert_batch
+from services.exp_snapshots import (
+    normalize_guild,
+    players_to_insert_batch,
+    profiles_from_insert_batch,
+)
+
+
+def test_normalize_guild_placeholders():
+    assert normalize_guild(None) == ""
+    assert normalize_guild("未知") == ""
+    assert normalize_guild("null") == ""
+    assert normalize_guild(" 守護者 ") == "守護者"
 
 
 def test_players_to_insert_batch_skips_nameless():

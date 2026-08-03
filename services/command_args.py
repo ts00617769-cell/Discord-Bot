@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 from discord.ext import commands
 
 from game_data import SERVER_MAP
+from services.exp_snapshots import normalize_guild
 
 GLOBAL_ALIASES = frozenset({"全服", "全部", "global", ""})
 
@@ -73,9 +74,13 @@ def parse_count_server(
         # 不合併：第一個非數字 token 若是伺服器就吃掉，其餘留給呼叫端
         server_raw = default_server
         rest = tuple(parts)
-        if parts and (parts[0] in SERVER_MAP or parts[0] in GLOBAL_ALIASES):
-            server_raw = parts[0]
-            rest = tuple(parts[1:])
+        if parts:
+            if parts[0] in SERVER_MAP or parts[0] in GLOBAL_ALIASES:
+                server_raw = parts[0]
+                rest = tuple(parts[1:])
+            else:
+                # 拼錯伺服器時給出「找不到伺服器」，勿把 typo 當成旅團名
+                normalize_server(parts[0], allow_global=True)
 
     server = normalize_server(server_raw, allow_global=True)
     return CountServer(
@@ -177,7 +182,8 @@ def parse_rank_filters(target_class: Optional[str]) -> RankFilters:
 def parse_alert_toggle(args: Sequence[str]) -> tuple[Optional[str], CountServer]:
     """解析 `!警報`：回傳 (state|None, CountServer)。
 
-    state 為 ``開`` / ``關`` / None（查詢現況）。
+    開啟語法為 ``開 [數量] [伺服器] [旅團名稱]``；旅團名稱保留在
+    ``CountServer.rest``。警報必須同時指定單一伺服器與旅團。
     """
     parts = [a for a in args if str(a).strip()]
     if not parts:
@@ -187,6 +193,24 @@ def parse_alert_toggle(args: Sequence[str]) -> tuple[Optional[str], CountServer]
     if state in ("關", "off"):
         return "關", CountServer(count=30, server="全服", is_global=True)
     if state in ("開", "on"):
-        cs = parse_count_server(parts, default_count=30, max_count=100)
-        return "開", cs
-    raise BadArg("❌ 請輸入 `開` / `關`，例如：`!警報 開 50 萊涅01`")
+        cs = parse_count_server(
+            parts,
+            default_count=30,
+            max_count=100,
+            join_server_rest=False,
+        )
+        guild = normalize_guild(" ".join(cs.rest))
+        if cs.is_global or not guild:
+            raise BadArg(
+                "❌ 開啟警報時必須指定伺服器與旅團，"
+                "例如：`!警報 開 50 萊涅01 旅團名稱`"
+            )
+        return "開", CountServer(
+            count=cs.count,
+            server=cs.server,
+            is_global=False,
+            rest=(guild,),
+        )
+    raise BadArg(
+        "❌ 請輸入 `開` / `關`，例如：`!警報 開 50 萊涅01 旅團名稱`"
+    )
