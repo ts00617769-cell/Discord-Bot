@@ -12,6 +12,7 @@ from services.retention_windows import (
     merge_ranges,
     search_retention_cutoff,
     select_recent_transfer_windows,
+    should_persist_exp_history,
 )
 
 
@@ -48,7 +49,7 @@ def test_transfer_pad_after_only():
 
 
 def test_defaults_transfer_and_recent_may_gap():
-    """預設 轉移後+3 / 近3：第27次與最近區間中間可能留空洞。"""
+    """轉移後 pad 與 recent 不相接時中間可留空洞。"""
     windows = [
         ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ]
@@ -158,19 +159,20 @@ def test_outside_keep_batch_sql_has_limit():
     assert params[:2] == ("2026-05-01 00:00:00", "2026-05-20 00:00:00")
 
 
-def test_thin_ranges_official_window_without_pad():
+def test_thin_ranges_include_pad():
     windows = [
         ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次領域轉移"),
         ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ]
     thin = build_transfer_thin_ranges(
         max_transfer_windows=3,
+        pad_days=3,
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
     assert thin == [
-        ("2026-06-03 12:00:00", "2026-06-07 23:59:59"),
-        ("2026-07-01 12:00:00", "2026-07-05 23:59:59"),
+        ("2026-06-03 12:00:00", "2026-06-10 23:59:59"),
+        ("2026-07-01 12:00:00", "2026-07-08 23:59:59"),
     ]
     keep = build_search_keep_ranges(
         recent_days=0,
@@ -179,9 +181,26 @@ def test_thin_ranges_official_window_without_pad():
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
-    # keep 有 pad；thin 沒有
-    assert keep[0][1] == "2026-06-10 23:59:59"
-    assert thin[0][1] == "2026-06-07 23:59:59"
+    # keep 與 thin 皆含 pad，區間對齊
+    assert keep[0][1] == thin[0][1] == "2026-06-10 23:59:59"
+
+
+def test_should_persist_exp_history_sparse_outside_transfer(monkeypatch):
+    """非轉移期僅 :00/:30 寫入；活躍期每輪寫入。"""
+    monkeypatch.setattr(
+        "services.game_event_windows.is_transfer_active_period",
+        lambda when, **kwargs: False,
+    )
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 0, 0)) is True
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 30, 0)) is True
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 10, 0)) is False
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 20, 0)) is False
+
+    monkeypatch.setattr(
+        "services.game_event_windows.is_transfer_active_period",
+        lambda when, **kwargs: True,
+    )
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 10, 0)) is True
 
 
 def test_transfer_middle_sql_params_match_window():

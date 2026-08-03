@@ -115,7 +115,7 @@ async def run_track_search(
 
     while queue and hops < BFS_LIMIT:
         if time.monotonic() > search_deadline:
-            raise asyncio.TimeoutError()
+            raise match.TrackSearchTimeout("overall")
         current = queue.popleft()
         profile = current["profile"]
         (
@@ -317,12 +317,20 @@ async def run_track_search(
 
         hop_added = exact_added
         if not exact_added:
-            seamless = await asyncio.wait_for(
-                store._find_seamless_candidates(
-                    profile, None, window_days=30, limit=5
-                ),
-                timeout=match.QUERY_TIMEOUT_SEC,
-            )
+            try:
+                seamless = await asyncio.wait_for(
+                    store._find_seamless_candidates(
+                        profile, None, window_days=30, limit=5
+                    ),
+                    timeout=match.QUERY_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "seamless 查詢逾時 %s@%s，略過此 hop",
+                    t_name,
+                    t_server,
+                )
+                seamless = []
             for cand in seamless:
                 soft_candidates.append(cand)
                 if cand["confidence"] == "high":

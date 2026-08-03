@@ -184,9 +184,31 @@ class PlayerSearch(commands.Cog):
                 await processing_msg.edit(content="❌ 天眼系統資料庫錯誤")
             except discord.NotFound:
                 pass
+        except match.TrackSearchTimeout as e:
+            tip = (
+                "總時限已到"
+                if e.kind == "overall"
+                else "單次查詢過久"
+            )
+            try:
+                await processing_msg.edit(
+                    content=(
+                        f"❌ 天眼系統查詢逾時（{tip}），請重試。\n"
+                        "提示：停 bot 後執行 `python cleanup_db.py --for-search`"
+                        "（會瘦身＋建索引；NAS 請維持預設瘦身參數）。"
+                    )
+                )
+            except discord.NotFound:
+                pass
         except asyncio.TimeoutError:
             try:
-                await processing_msg.edit(content="❌ 天眼系統查詢逾時，請重試")
+                await processing_msg.edit(
+                    content=(
+                        "❌ 天眼系統查詢逾時，請重試。\n"
+                        "提示：停 bot 後執行 `python cleanup_db.py --for-search`"
+                        "（會瘦身＋建索引；NAS 請維持預設瘦身參數）。"
+                    )
+                )
             except discord.NotFound:
                 pass
         except KeyError as e:

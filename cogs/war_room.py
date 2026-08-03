@@ -214,6 +214,7 @@ class WarRoom(commands.Cog):
             deleted_middle = 0
             thin_ranges = build_transfer_thin_ranges(
                 max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
+                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
             )
             for thin_sql, thin_params in exp_history_transfer_middle_statements(
                 thin_ranges, for_delete=True

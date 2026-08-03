@@ -91,6 +91,14 @@ SEARCH_TIMEOUT_SEC = 90.0
 QUERY_TIMEOUT_SEC = 30.0
 
 
+class TrackSearchTimeout(Exception):
+    """尋人逾時。kind: overall（總時限）或 query（單查詢）。"""
+
+    def __init__(self, kind: str = "overall"):
+        self.kind = kind if kind in ("overall", "query") else "overall"
+        super().__init__(self.kind)
+
+
 def is_unknown_class(cls_name: Optional[str]) -> bool:
     return cls_name in (None, "", "None", "未知")
 

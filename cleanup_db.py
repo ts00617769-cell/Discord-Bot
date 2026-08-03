@@ -9,6 +9,7 @@
   python cleanup_db.py --days 30 --dry-run
   python cleanup_db.py --for-search
   python cleanup_db.py --for-search --dry-run
+  # 預設：近1天 ∪ 最近1次轉移窗+pad2天；窗+pad 稀疏化；建索引 + VACUUM（NAS 建議）
   python cleanup_db.py --build-indexes   # 離線建立尋人索引 + player_profile（大庫必做）
   python cleanup_db.py --wipe-history
 """
@@ -292,7 +293,7 @@ def build_cleanup_parser(default_db: Path | None = None) -> argparse.ArgumentPar
         help=(
             "尋人導向：保留最近 N 天 ∪ 最近 K 次領域轉移窗"
             "（窗開始～結束後 pad 天），其餘刪除；"
-            "轉移窗內同角同服只留首尾"
+            "轉移窗+pad 同角同服只留首尾"
         ),
     )
     parser.add_argument(
@@ -493,6 +494,7 @@ def main() -> int:
             )
             thin_ranges = build_transfer_thin_ranges(
                 max_transfer_windows=args.max_transfer_windows,
+                pad_days=args.transfer_pad_days,
             )
             settings_cutoff = search_retention_cutoff(
                 recent_days=args.recent_days,
@@ -504,7 +506,7 @@ def main() -> int:
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
                 f"最近 {args.max_transfer_windows} 次轉移窗"
                 f"～結束後+{args.transfer_pad_days} 天；"
-                f"轉移窗內同角同服只留首尾）"
+                f"轉移窗+pad 同角同服只留首尾）"
             )
             # 先印區間，避免大庫 COUNT 讓人以為卡住
             _log(f"模式：{mode}")
@@ -513,7 +515,7 @@ def main() -> int:
                 for start, end in keep_ranges:
                     _log(f"  {start}  ~  {end}")
             if thin_ranges:
-                _log("轉移窗稀疏化（同角同服只留首尾）：")
+                _log("轉移窗+pad 稀疏化（同角同服只留首尾）：")
                 for start, end in thin_ranges:
                     _log(f"  {start}  ~  {end}")
             if do_precount:
@@ -651,7 +653,7 @@ def main() -> int:
                 for start, end in keep_ranges:
                     _log(f"  {start}  ~  {end}")
             if thin_ranges:
-                _log("轉移窗稀疏化（同角同服只留首尾）：")
+                _log("轉移窗+pad 稀疏化（同角同服只留首尾）：")
                 for start, end in thin_ranges:
                     _log(f"  {start}  ~  {end}")
 
@@ -717,7 +719,7 @@ def main() -> int:
             if has_exp and thin_ranges:
                 for i, (start, end) in enumerate(thin_ranges, start=1):
                     _log(
-                        f"正在分批稀疏化轉移窗 #{i}/{len(thin_ranges)} "
+                        f"正在分批稀疏化轉移窗+pad #{i}/{len(thin_ranges)} "
                         f"{start} ~ {end}…"
                     )
                     thin_sql, thin_params = exp_history_transfer_middle_batch_sql(

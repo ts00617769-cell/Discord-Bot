@@ -9,10 +9,13 @@ from services.timeutil import FMT_SQL, now_naive_taipei
 
 DEFAULT_RECENT_DAYS = 1
 # 轉移窗結束後再留 N 天：窗尾（如 23:50）轉移後，可能隔幾天才上新服榜
-DEFAULT_TRANSFER_PAD_DAYS = 3
-DEFAULT_MAX_TRANSFER_WINDOWS = 3
+# NAS 部署偏緊：少留歷史窗與 pad，避免 exp_history 肥大拖慢尋人
+DEFAULT_TRANSFER_PAD_DAYS = 2
+DEFAULT_MAX_TRANSFER_WINDOWS = 1
 # 轉服警報 log 與 history 脫鉤，可留較久
 DEFAULT_TRANSFER_ALERT_DAYS = 180
+# 非轉移活躍期：exp_history 寫入間隔（分鐘）；活躍期仍每輪寫入
+HISTORY_SPARSE_INTERVAL_MINUTES = 30
 
 
 def _parse(s: str) -> Optional[datetime.datetime]:
@@ -181,17 +184,24 @@ def exp_history_outside_keep_batch_sql(
 def build_transfer_thin_ranges(
     *,
     max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
+    pad_days: int = DEFAULT_TRANSFER_PAD_DAYS,
     now: Optional[datetime.datetime] = None,
     transfer_windows: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str]]:
-    """官方領域轉移窗 [start, end]（不加 pad），供窗內稀疏化。"""
+    """轉移保留區間 [start, end+pad] 稀疏化：同角同服只留首尾。
+
+    pad 一併納入，避免窗結束後全密度快照把 NAS 庫撐大。
+    """
     if max_transfer_windows < 0:
         raise ValueError("max_transfer_windows must be >= 0")
+    if pad_days < 0:
+        raise ValueError("pad_days must be >= 0")
 
     now_dt = now if now is not None else now_naive_taipei()
     if now_dt.tzinfo is not None:
         now_dt = now_dt.replace(tzinfo=None)
 
+    pad = datetime.timedelta(days=int(pad_days))
     windows = transfer_windows if transfer_windows is not None else REALM_TRANSFER_WINDOWS
     selected = select_recent_transfer_windows(
         windows, max_windows=max_transfer_windows, now=now_dt
@@ -201,10 +211,31 @@ def build_transfer_thin_ranges(
         start, end = _parse(start_s), _parse(end_s)
         if start is None or end is None:
             continue
-        ranges.append((_fmt(start), _fmt(end)))
+        ranges.append((_fmt(start), _fmt(end + pad)))
     # 依開始時間排序，方便 dry-run／測試穩定輸出
     ranges.sort(key=lambda x: x[0])
     return ranges
+
+
+def should_persist_exp_history(
+    when: datetime.datetime,
+    *,
+    sparse_interval_minutes: int = HISTORY_SPARSE_INTERVAL_MINUTES,
+) -> bool:
+    """是否寫入本輪 exp_history。
+
+    轉移活躍期：每輪都寫。
+    非活躍期：僅在對齊 sparse_interval_minutes 的整點分鐘寫入（預設每 30 分）。
+    """
+    from services.game_event_windows import is_transfer_active_period
+
+    if when.tzinfo is not None:
+        when = when.replace(tzinfo=None)
+    if sparse_interval_minutes < 1:
+        raise ValueError("sparse_interval_minutes must be >= 1")
+    if is_transfer_active_period(_fmt(when)):
+        return True
+    return int(when.minute) % int(sparse_interval_minutes) == 0
 
 
 def exp_history_transfer_middle_sql(

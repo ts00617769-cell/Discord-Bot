@@ -1,8 +1,13 @@
 """天眼尋人資料庫查詢與無縫接軌候選（Discord 無關）。"""
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from db.schema import DENORM_COVERAGE_READY_RATIO, denorm_is_ready
 from services import player_matching as match
+
+logger = logging.getLogger(__name__)
 
 _PROFILE_SELECT = match.PROFILE_SELECT
 _PROFILE_FROM = match.PROFILE_FROM
@@ -198,7 +203,7 @@ class PlayerSearchStore:
 
         use_denorm = await self._has_denorm_stats()
         merged: list[dict] = []
-        for margin in tiers:
+        for tier_i, margin in enumerate(tiers):
             batch = await self._seamless_one_margin(
                 profile=(
                     t_name, t_server, t_lvl, t_first, t_last,
@@ -210,19 +215,32 @@ class PlayerSearchStore:
                 unknown_cls=unknown_cls,
                 use_denorm=use_denorm,
             )
-            # denorm 可能漏掉尚未進 profile 的歷史角：無 high 時補跑 CTE
-            if use_denorm and not any(c.get("confidence") == "high" for c in batch):
-                batch_cte = await self._seamless_one_margin(
-                    profile=(
-                        t_name, t_server, t_lvl, t_first, t_last,
-                        t_min_exp, t_max_exp, t_cls, t_sub,
-                    ),
-                    exp_margin=margin,
-                    window_days=window_days,
-                    limit=limit,
-                    unknown_cls=unknown_cls,
-                    use_denorm=False,
-                )
+            # denorm 就緒時：僅最窄 tier 且 denorm 候選為空才補跑 CTE（避免 NAS 大庫連掃）
+            if (
+                use_denorm
+                and tier_i == 0
+                and not batch
+            ):
+                try:
+                    batch_cte = await asyncio.wait_for(
+                        self._seamless_one_margin(
+                            profile=(
+                                t_name, t_server, t_lvl, t_first, t_last,
+                                t_min_exp, t_max_exp, t_cls, t_sub,
+                            ),
+                            exp_margin=margin,
+                            window_days=window_days,
+                            limit=limit,
+                            unknown_cls=unknown_cls,
+                            use_denorm=False,
+                        ),
+                        timeout=match.QUERY_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "seamless CTE 逾時（margin=%s），略過此 tier", margin
+                    )
+                    batch_cte = []
                 by_batch = {
                     (c["name"], c["server"], c["direction"]): c for c in batch
                 }

@@ -154,13 +154,15 @@ ruff check .
 ```bash
 python cleanup_db.py
 python cleanup_db.py --days 30 --dry-run
-python cleanup_db.py --for-search --dry-run   # 尋人導向：近1天 ∪ 最近3次轉移窗～結束後再+3天（延遲登入）；轉移窗內同角同服只留首尾
-python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引 + player_profile
+python cleanup_db.py --for-search --dry-run   # 尋人導向：近1天 ∪ 最近1次轉移窗～結束後再+2天；窗+pad 同角同服只留首尾
+python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引 + player_profile（NAS 大庫必做）
 python cleanup_db.py --build-indexes          # 僅離線建索引（大庫啟動時會略過）
 python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 ```
 
 > `exp_history` 超過約 5 萬筆時，bot 啟動**不會**自動建索引（避免鎖庫）。清庫後務必跑 `--for-search` 或 `--build-indexes`，否則 `!尋人` 仍會全表掃描而很慢。
+>
+> NAS 部署：預設已偏瘦（1 窗／pad 2 天）；非轉移期 `exp_history` 每 30 分鐘才寫一輪。尋人逾時時請**停 bot** 後跑 `--for-search`（含 VACUUM）。
 
 ### HTTP／Ranking
 

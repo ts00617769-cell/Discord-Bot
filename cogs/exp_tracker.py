@@ -34,6 +34,10 @@ from services.game_event_windows import (
     TRANSFER_LOGIN_GRACE_DAYS,
     is_transfer_active_period,
 )
+from services.retention_windows import (
+    HISTORY_SPARSE_INTERVAL_MINUTES,
+    should_persist_exp_history,
+)
 from services.transfer_alert_flow import (
     filter_viable_ranked,
     lookup_alerted_pairs,
@@ -196,6 +200,13 @@ class ExpTracker(commands.Cog):
             servers_failed = []
             servers_thin = []
             min_players = min_snapshot_players()
+            persist_history = should_persist_exp_history(now_time)
+            if not persist_history:
+                logger.info(
+                    "本輪略過 exp_history 寫入（非轉移期每 %s 分一筆）；"
+                    "仍更新 player_profile",
+                    HISTORY_SPARSE_INTERVAL_MINUTES,
+                )
 
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
@@ -212,9 +223,11 @@ class ExpTracker(commands.Cog):
                     )
 
                     if insert_batch:
-                        await self.bot.db.executemany(
-                            EXP_HISTORY_INSERT_SQL, insert_batch
-                        )
+                        # 非轉移活躍期降頻寫入 exp_history（NAS 減量）；profile 每輪更新
+                        if persist_history:
+                            await self.bot.db.executemany(
+                                EXP_HISTORY_INSERT_SQL, insert_batch
+                            )
                         profile_batch = profiles_from_insert_batch(insert_batch)
                         if profile_batch:
                             await self.bot.db.executemany(
@@ -247,6 +260,9 @@ class ExpTracker(commands.Cog):
                 await asyncio.sleep(0.5)
 
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
+            if not persist_history:
+                # 本輪沒有 now_time 的 history 列，轉服／測速改等下一筆寫入輪
+                return
             if not snapshot_complete:
                 logger.warning(
                     f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/"
