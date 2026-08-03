@@ -177,7 +177,8 @@ def parse_rank_filters(target_class: Optional[str]) -> RankFilters:
 def parse_alert_toggle(args: Sequence[str]) -> tuple[Optional[str], CountServer]:
     """解析 `!警報`：回傳 (state|None, CountServer)。
 
-    state 為 ``開`` / ``關`` / None（查詢現況）。
+    開啟語法為 ``開 [數量] [伺服器] [旅團名稱]``；旅團名稱保留在
+    ``CountServer.rest``。警報必須同時指定單一伺服器與旅團。
     """
     parts = [a for a in args if str(a).strip()]
     if not parts:
@@ -187,6 +188,18 @@ def parse_alert_toggle(args: Sequence[str]) -> tuple[Optional[str], CountServer]
     if state in ("關", "off"):
         return "關", CountServer(count=30, server="全服", is_global=True)
     if state in ("開", "on"):
-        cs = parse_count_server(parts, default_count=30, max_count=100)
+        cs = parse_count_server(
+            parts,
+            default_count=30,
+            max_count=100,
+            join_server_rest=False,
+        )
+        if cs.is_global or not cs.rest:
+            raise BadArg(
+                "❌ 開啟警報時必須指定伺服器與旅團，"
+                "例如：`!警報 開 50 萊涅01 旅團名稱`"
+            )
         return "開", cs
-    raise BadArg("❌ 請輸入 `開` / `關`，例如：`!警報 開 50 萊涅01`")
+    raise BadArg(
+        "❌ 請輸入 `開` / `關`，例如：`!警報 開 50 萊涅01 旅團名稱`"
+    )

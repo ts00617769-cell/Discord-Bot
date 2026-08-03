@@ -28,7 +28,10 @@ class HelpCog(commands.Cog):
         )
         embed.add_field(
             name="🚨 飆車警報",
-            value="`!警報 [開/關]`\n例：`!警報 開 50 萊涅01` 或 `!警報 關`",
+            value=(
+                "`!警報 開 [數量] [伺服器] [旅團名稱]`\n"
+                "例：`!警報 開 50 萊涅01 守護者` 或 `!警報 關`"
+            ),
             inline=False,
         )
         embed.add_field(

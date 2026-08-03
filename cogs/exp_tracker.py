@@ -27,17 +27,17 @@ from services.exp_speed import (
     collect_overspeed,
     pick_interval_baseline,
 )
-from services.ranking_api import get_ranking_client
-from services.text_display import pad_text
-from services.timeutil import now_naive_taipei
 from services.game_event_windows import (
     TRANSFER_LOGIN_GRACE_DAYS,
     is_transfer_active_period,
 )
+from services.ranking_api import get_ranking_client
 from services.retention_windows import (
     HISTORY_SPARSE_INTERVAL_MINUTES,
     should_persist_exp_history,
 )
+from services.text_display import pad_text
+from services.timeutil import now_naive_taipei
 from services.transfer_alert_flow import (
     filter_viable_ranked,
     lookup_alerted_pairs,
@@ -73,6 +73,7 @@ class ExpTracker(commands.Cog):
         self.alerts_enabled = False
         self.alert_count = 30
         self.alert_server = "全服"
+        self.alert_guild = ""
         self.alert_interval_minutes = 30
 
     @property
@@ -119,9 +120,20 @@ class ExpTracker(commands.Cog):
                     )
             if "alert_server" in rows and rows["alert_server"]:
                 self.alert_server = rows["alert_server"]
+            if "alert_guild" in rows:
+                self.alert_guild = rows["alert_guild"].strip()
+            if self.alerts_enabled and (
+                self.alert_server == "全服" or not self.alert_guild
+            ):
+                self.alerts_enabled = False
+                logger.warning(
+                    "舊版警報設定缺少指定伺服器或旅團，已安全停用；"
+                    "請重新執行 !警報 開 [數量] [伺服器] [旅團名稱]"
+                )
             logger.info(
                 f"警報設定已載入: enabled={self.alerts_enabled} "
-                f"count={self.alert_count} server={self.alert_server}"
+                f"count={self.alert_count} server={self.alert_server} "
+                f"guild={self.alert_guild or '未設定'}"
             )
         except sqlite3.DatabaseError as e:
             logger.error(f"載入警報設定失敗: {e}")
@@ -131,6 +143,7 @@ class ExpTracker(commands.Cog):
             ("alert_enabled", "1" if self.alerts_enabled else "0"),
             ("alert_count", str(self.alert_count)),
             ("alert_server", self.alert_server),
+            ("alert_guild", self.alert_guild),
         ]
         await self.bot.db.executemany(
             '''
@@ -300,7 +313,11 @@ class ExpTracker(commands.Cog):
 
         fmt = "%Y-%m-%d %H:%M:%S"
 
-        should_alert = self.alerts_enabled
+        should_alert = (
+            self.alerts_enabled
+            and self.alert_server != "全服"
+            and bool(self.alert_guild)
+        )
         if should_alert and isinstance(current_time, datetime.datetime):
             should_alert = (current_time.minute % self.alert_interval_minutes) == 0
 
@@ -309,24 +326,20 @@ class ExpTracker(commands.Cog):
                 times, self.alert_interval_minutes, fmt=fmt
             )
             if time_prev and minutes_diff > 0:
-                if self.alert_server == "全服":
-                    sql = '''
-                        SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                        FROM exp_history t1
-                        JOIN exp_history t2
-                          ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                        WHERE t1.record_time = ? AND t2.record_time = ?
-                    '''
-                    params: tuple = (time_now, time_prev)
-                else:
-                    sql = '''
-                        SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                        FROM exp_history t1
-                        JOIN exp_history t2
-                          ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                        WHERE t1.record_time = ? AND t2.record_time = ? AND t1.server_name = ?
-                    '''
-                    params = (time_now, time_prev, self.alert_server)
+                sql = '''
+                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
+                    FROM exp_history t1
+                    JOIN exp_history t2
+                      ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
+                    WHERE t1.record_time = ? AND t2.record_time = ?
+                      AND t1.server_name = ? AND t1.guild_name = ?
+                '''
+                params = (
+                    time_now,
+                    time_prev,
+                    self.alert_server,
+                    self.alert_guild,
+                )
 
                 async with read_db(self.bot).execute(sql, params) as cursor:
                     records = [tuple(r) for r in await cursor.fetchall()]
@@ -338,13 +351,13 @@ class ExpTracker(commands.Cog):
                 if alert_list:
                     dedupe_key = (
                         f"overspeed:{time_now}|{time_prev}|"
-                        f"{self.alert_server}|{self.alert_count}"
+                        f"{self.alert_server}|{self.alert_guild}|{self.alert_count}"
                     )
                     try:
                         if await self._setting_exists(dedupe_key):
                             logger.info(
                                 f"略過重複超速警報 interval={time_prev}→{time_now} "
-                                f"server={self.alert_server}"
+                                f"server={self.alert_server} guild={self.alert_guild}"
                             )
                             alert_list = []
                     except sqlite3.DatabaseError as e:
@@ -356,7 +369,10 @@ class ExpTracker(commands.Cog):
                     for i in range(0, len(alert_list), chunk_size):
                         chunk = alert_list[i : i + chunk_size]
                         embed = discord.Embed(
-                            title=f"🚨 超速警報 ({self.alert_server} ≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})",
+                            title=(
+                                f"🚨 超速警報 ({self.alert_server}／{self.alert_guild} "
+                                f"≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})"
+                            ),
                             color=0xff0000,
                         )
                         desc = ""

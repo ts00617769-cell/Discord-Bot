@@ -63,10 +63,24 @@ def test_parse_rank_filters_bad_grade():
 
 
 def test_parse_alert_toggle_on():
-    state, cs = parse_alert_toggle(["開", "40", "全服"])
+    state, cs = parse_alert_toggle(["開", "40", "萊涅01", "守護者"])
     assert state == "開"
     assert cs.count == 40
-    assert cs.is_global is True
+    assert cs.server == "萊涅01"
+    assert cs.is_global is False
+    assert cs.rest == ("守護者",)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["開", "40", "全服", "守護者"],
+        ["開", "40", "萊涅01"],
+    ],
+)
+def test_parse_alert_toggle_requires_server_and_guild(args):
+    with pytest.raises(BadArg):
+        parse_alert_toggle(args)
 
 
 def test_parse_alert_toggle_off():
