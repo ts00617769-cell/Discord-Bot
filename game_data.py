@@ -28,13 +28,3 @@ SERVER_MAP = {
     "基安05": ("livegm_w09", "livegm_w09_r5"),
     "黛庫爾01": ("livegm_w11", "livegm_w11_r1"),
 }
-
-# 大區顯示名（僅供參考 / 除錯）
-GROUP_MAP = {
-    "livegm_w02": "戴摩爾克",
-    "livegm_w04": "萊涅",
-    "livegm_w06": "困特",
-    "livegm_w08": "伊奈司",
-    "livegm_w09": "基安",
-    "livegm_w11": "黛庫爾",
-}

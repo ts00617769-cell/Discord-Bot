@@ -44,10 +44,16 @@ async def test_apply_migrations_fresh_db(tmp_path):
         assert "player_profile" in tables
         assert "alert_dedupe" in tables
         assert "transfer_missing" in tables
+        assert "member_registry" not in tables
 
         async with db.execute("PRAGMA table_info(player_profile)") as cur:
             pp_cols = {row[1] for row in await cur.fetchall()}
         assert "min_exp" in pp_cols
+
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_class_exp_time'"
+        ) as cur:
+            assert await cur.fetchone() is None
         assert "max_exp" in pp_cols
         assert "first_seen" in pp_cols
         assert "guild_name" in pp_cols
@@ -173,5 +179,105 @@ async def test_legacy_column_backfill(tmp_path):
             cols = {row[1] for row in await cur.fetchall()}
         assert "class_name" in cols
         assert "subjugation_grade" in cols
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v8_drops_unused_and_migrates_legacy_dedupe(tmp_path):
+    db_path = tmp_path / "v8.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        # 先套用到 v7，再塞舊資料，最後跑完整 migration 觸發 v8
+        await db.execute(
+            """
+            CREATE TABLE schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('version', '7')"
+        )
+        await db.execute(
+            """
+            CREATE TABLE exp_history (
+                record_time TIMESTAMP,
+                server_name TEXT,
+                player_name TEXT,
+                level INTEGER,
+                exp REAL,
+                class_name TEXT DEFAULT '未知'
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE member_registry (
+                player_name TEXT PRIMARY KEY,
+                original_identity TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE alert_dedupe (
+                kind TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (kind, dedupe_key)
+            )
+            """
+        )
+        await db.execute(
+            "CREATE INDEX idx_class_exp_time ON exp_history(class_name, exp, record_time)"
+        )
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+            ("overspeed:legacy-a", "1"),
+        )
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+            ("boss_reminder:2026-01-01:23", "1"),
+        )
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+            ("alert_enabled", "1"),
+        )
+        await db.commit()
+
+        ver = await apply_migrations(db)
+        assert ver == SCHEMA_VERSION
+
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='member_registry'"
+        ) as cur:
+            assert await cur.fetchone() is None
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_class_exp_time'"
+        ) as cur:
+            assert await cur.fetchone() is None
+
+        async with db.execute(
+            "SELECT kind, dedupe_key FROM alert_dedupe ORDER BY kind, dedupe_key"
+        ) as cur:
+            rows = await cur.fetchall()
+        assert ("boss_reminder", "boss_reminder:2026-01-01:23") in rows
+        assert ("overspeed", "overspeed:legacy-a") in rows
+
+        async with db.execute(
+            "SELECT key FROM bot_settings ORDER BY key"
+        ) as cur:
+            keys = [r[0] for r in await cur.fetchall()]
+        assert keys == ["alert_enabled"]
     finally:
         await db.close()

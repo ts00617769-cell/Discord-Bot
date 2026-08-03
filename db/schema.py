@@ -7,7 +7,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -186,6 +186,46 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        8,
+        "drop unused member_registry / class index; migrate legacy dedupe keys",
+        [
+            "DROP TABLE IF EXISTS member_registry",
+            "DROP INDEX IF EXISTS idx_class_exp_time",
+            # 舊庫若略過 v1，仍可能缺表；先確保再搬移
+            """
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS alert_dedupe (
+                kind TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (kind, dedupe_key)
+            )
+            """,
+            # 舊 bot_settings 去重鍵搬到 alert_dedupe 後刪除，避免重發
+            """
+            INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)
+            SELECT 'overspeed', key, datetime('now','localtime')
+            FROM bot_settings
+            WHERE key LIKE 'overspeed:%'
+            """,
+            """
+            INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)
+            SELECT 'boss_reminder', key, datetime('now','localtime')
+            FROM bot_settings
+            WHERE key LIKE 'boss_reminder:%'
+            """,
+            """
+            DELETE FROM bot_settings
+            WHERE key LIKE 'overspeed:%' OR key LIKE 'boss_reminder:%'
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -207,10 +247,6 @@ _SEARCH_INDEXES: list[tuple[str, str]] = [
     (
         "idx_exp",
         "CREATE INDEX IF NOT EXISTS idx_exp ON exp_history(exp)",
-    ),
-    (
-        "idx_class_exp_time",
-        "CREATE INDEX IF NOT EXISTS idx_class_exp_time ON exp_history(class_name, exp, record_time)",
     ),
     (
         "idx_exp_player_server",
@@ -278,7 +314,6 @@ _PRAGMA_TABLE_ALLOWLIST = frozenset(
     {
         "exp_history",
         "player_profile",
-        "member_registry",
         "transfer_alerts_log",
         "bot_settings",
         "cmd_dedupe",

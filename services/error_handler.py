@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import traceback
 from typing import Optional
 
@@ -166,15 +165,6 @@ async def handle_api_error(ctx, error_msg: str, detail: str = ""):
         logger.error(f"Failed to send error message: {e}")
 
 
-async def handle_db_error(ctx, error_msg: str, exception: Exception):
-    """處理資料庫錯誤"""
-    try:
-        await ctx.send(f"❌ 資料庫錯誤: {error_msg}")
-        logger.error(f"DB Error: {error_msg} | Exception: {exception}")
-    except discord.HTTPException as e:
-        logger.error(f"Failed to handle DB error: {e}")
-
-
 def log_command_error(ctx, command_name: str, exception: Exception):
     """記錄指令執行錯誤"""
     logger.error(
@@ -182,15 +172,3 @@ def log_command_error(ctx, command_name: str, exception: Exception):
         f"{type(exception).__name__}: {exception}\n"
         f"Traceback:\n{traceback.format_exc()}"
     )
-
-
-async def safe_database_operation(operation_name: str, operation_func, *args, **kwargs):
-    """安全的資料庫操作包裝器；僅吞資料庫錯誤，其餘向上拋。"""
-    try:
-        return await operation_func(*args, **kwargs)
-    except sqlite3.DatabaseError as e:
-        logger.error(
-            f"Database operation '{operation_name}' failed: "
-            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        )
-        return None
