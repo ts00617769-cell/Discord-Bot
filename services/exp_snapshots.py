@@ -4,13 +4,17 @@ from __future__ import annotations
 from typing import Iterable
 
 
-def _normalize_guild(raw) -> str:
+def normalize_guild(raw) -> str:
     if raw is None:
         return ""
     text = str(raw).strip()
     if text in ("", "None", "null", "未知"):
         return ""
     return text
+
+
+# 相容舊呼叫名稱
+_normalize_guild = normalize_guild
 
 
 def players_to_insert_batch(record_time, server_name: str, players: Iterable[dict]) -> list[tuple]:

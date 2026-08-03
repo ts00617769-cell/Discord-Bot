@@ -71,6 +71,16 @@ def test_parse_alert_toggle_on():
     assert cs.rest == ("守護者",)
 
 
+def test_parse_alert_toggle_bad_server_message():
+    with pytest.raises(BadArg, match="找不到伺服器"):
+        parse_alert_toggle(["開", "40", "不存在的服", "守護者"])
+
+
+def test_parse_alert_toggle_rejects_placeholder_guild():
+    with pytest.raises(BadArg, match="伺服器與旅團"):
+        parse_alert_toggle(["開", "40", "萊涅01", "未知"])
+
+
 @pytest.mark.parametrize(
     "args",
     [

@@ -58,7 +58,7 @@ class ExpCommands(commands.Cog):
         tracker.alerts_enabled = True
         tracker.alert_count = cs.count
         tracker.alert_server = cs.server
-        tracker.alert_guild = " ".join(cs.rest).strip()
+        tracker.alert_guild = cs.rest[0] if cs.rest else ""
         await tracker._save_alert_settings()
         return await ctx.send(
             f"🚨 **【自動測速警報】已開啟！** "

@@ -41,7 +41,6 @@ from db.schema import (  # noqa: E402
 from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
-    DEFAULT_TRANSFER_ALERT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
     build_search_keep_ranges,
     build_transfer_thin_ranges,

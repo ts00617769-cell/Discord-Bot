@@ -20,6 +20,7 @@ from services.error_handler import (
 from services.exp_snapshots import (
     EXP_HISTORY_INSERT_SQL,
     PLAYER_PROFILE_UPSERT_SQL,
+    normalize_guild,
     players_to_insert_batch,
     profiles_from_insert_batch,
 )
@@ -121,7 +122,7 @@ class ExpTracker(commands.Cog):
             if "alert_server" in rows and rows["alert_server"]:
                 self.alert_server = rows["alert_server"]
             if "alert_guild" in rows:
-                self.alert_guild = rows["alert_guild"].strip()
+                self.alert_guild = normalize_guild(rows["alert_guild"])
             if self.alerts_enabled and (
                 self.alert_server == "全服" or not self.alert_guild
             ):
@@ -130,6 +131,10 @@ class ExpTracker(commands.Cog):
                     "舊版警報設定缺少指定伺服器或旅團，已安全停用；"
                     "請重新執行 !警報 開 [數量] [伺服器] [旅團名稱]"
                 )
+                try:
+                    await self._save_alert_settings()
+                except sqlite3.DatabaseError as e:
+                    logger.error(f"持久化停用舊版警報設定失敗: {e}")
             logger.info(
                 f"警報設定已載入: enabled={self.alerts_enabled} "
                 f"count={self.alert_count} server={self.alert_server} "
@@ -332,12 +337,15 @@ class ExpTracker(commands.Cog):
                     JOIN exp_history t2
                       ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
                     WHERE t1.record_time = ? AND t2.record_time = ?
-                      AND t1.server_name = ? AND t1.guild_name = ?
+                      AND t1.server_name = ?
+                      AND lower(t1.guild_name) = lower(?)
+                      AND lower(t2.guild_name) = lower(?)
                 '''
                 params = (
                     time_now,
                     time_prev,
                     self.alert_server,
+                    self.alert_guild,
                     self.alert_guild,
                 )
 

@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 from discord.ext import commands
 
 from game_data import SERVER_MAP
+from services.exp_snapshots import normalize_guild
 
 GLOBAL_ALIASES = frozenset({"全服", "全部", "global", ""})
 
@@ -73,9 +74,13 @@ def parse_count_server(
         # 不合併：第一個非數字 token 若是伺服器就吃掉，其餘留給呼叫端
         server_raw = default_server
         rest = tuple(parts)
-        if parts and (parts[0] in SERVER_MAP or parts[0] in GLOBAL_ALIASES):
-            server_raw = parts[0]
-            rest = tuple(parts[1:])
+        if parts:
+            if parts[0] in SERVER_MAP or parts[0] in GLOBAL_ALIASES:
+                server_raw = parts[0]
+                rest = tuple(parts[1:])
+            else:
+                # 拼錯伺服器時給出「找不到伺服器」，勿把 typo 當成旅團名
+                normalize_server(parts[0], allow_global=True)
 
     server = normalize_server(server_raw, allow_global=True)
     return CountServer(
@@ -194,12 +199,18 @@ def parse_alert_toggle(args: Sequence[str]) -> tuple[Optional[str], CountServer]
             max_count=100,
             join_server_rest=False,
         )
-        if cs.is_global or not cs.rest:
+        guild = normalize_guild(" ".join(cs.rest))
+        if cs.is_global or not guild:
             raise BadArg(
                 "❌ 開啟警報時必須指定伺服器與旅團，"
                 "例如：`!警報 開 50 萊涅01 旅團名稱`"
             )
-        return "開", cs
+        return "開", CountServer(
+            count=cs.count,
+            server=cs.server,
+            is_global=False,
+            rest=(guild,),
+        )
     raise BadArg(
         "❌ 請輸入 `開` / `關`，例如：`!警報 開 50 萊涅01 旅團名稱`"
     )
