@@ -14,14 +14,16 @@ def _tracker_for_embeds() -> ExpTracker:
     cog.alert_server = "萊涅01"
     cog.alert_guild = "狼團"
     cog.alert_count = 30
-    cog.SPEED_LIMIT = 4000
+    cog.SPEED_LIMIT = 2000
     return cog
 
 
-def test_alert_output_and_speed_windows_are_independent():
+def test_alert_output_and_speed_windows_are_ten_minutes(monkeypatch):
+    monkeypatch.delenv("EXP_ALERT_THRESHOLD", raising=False)
     tracker = ExpTracker(MagicMock())
     assert tracker.alert_interval_minutes == 10
-    assert tracker.alert_speed_window_minutes == 30
+    assert tracker.alert_speed_window_minutes == 10
+    assert tracker.SPEED_LIMIT == 2000
 
 
 def test_build_overspeed_embeds_reports_clear_round():
@@ -29,11 +31,11 @@ def test_build_overspeed_embeds_reports_clear_round():
         [],
         record_count=12,
         time_now="2026-08-04 12:10:00",
-        minutes_diff=30,
+        minutes_diff=10,
     )
     assert len(embeds) == 1
     assert "10 分鐘超速巡檢" in embeds[0].title
-    assert "監控週期: 30min" in embeds[0].footer.text
+    assert "監控週期: 10min" in embeds[0].footer.text
     assert "12" in embeds[0].description
     assert "沒有人超過" in embeds[0].description
 
@@ -43,10 +45,21 @@ def test_build_overspeed_embeds_warns_when_guild_has_no_records():
         [],
         record_count=0,
         time_now="2026-08-04 12:10:00",
-        minutes_diff=30,
+        minutes_diff=10,
     )
     assert "找不到" in embeds[0].description
     assert "狼團" in embeds[0].description
+
+
+def test_build_overspeed_embeds_uses_new_threshold_and_window():
+    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+        [{"name": "玩家", "server": "萊涅01", "level": 90, "speed": 2500}],
+        record_count=1,
+        time_now="2026-08-04 12:10:00",
+        minutes_diff=10,
+    )
+    assert "≥2,000億" in embeds[0].title
+    assert "監控週期: 10min" in embeds[0].footer.text
 
 
 @pytest.mark.asyncio

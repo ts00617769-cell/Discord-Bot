@@ -65,14 +65,14 @@ logger = logging.getLogger(__name__)
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        threshold_raw = parse_env_float("EXP_ALERT_THRESHOLD", 4000 * 100_000_000)
+        threshold_raw = parse_env_float("EXP_ALERT_THRESHOLD", 2000 * 100_000_000)
         self.SPEED_LIMIT = threshold_raw / 100_000_000
         self.alerts_enabled = False
         self.alert_count = 30
         self.alert_server = "全服"
         self.alert_guild = ""
         self.alert_interval_minutes = 10
-        self.alert_speed_window_minutes = 30
+        self.alert_speed_window_minutes = 10
 
     @property
     def ALERT_CHANNEL_IDS(self):
