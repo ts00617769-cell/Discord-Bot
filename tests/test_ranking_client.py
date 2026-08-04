@@ -111,6 +111,28 @@ async def test_fetch_server_merges_partial_class_success():
 
 
 @pytest.mark.asyncio
+async def test_fetch_server_prefers_nonempty_guild():
+    """總榜缺旅團時，後續職業榜有 guild 應補上。"""
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    client.fetch_class = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            FetchResult(
+                ok=True,
+                players=[{"gc_name": "Hero", "guild_name": "", "gc_level": 60}],
+            ),
+            FetchResult(
+                ok=True,
+                players=[{"gc_name": "Hero", "guild_name": "狼團", "gc_level": 60}],
+            ),
+        ]
+    )
+    result = await client.fetch_server("g", "w", classes=[None, "MirageBlade"])
+    assert result.ok
+    assert len(result.players) == 1
+    assert result.players[0]["guild_name"] == "狼團"
+
+@pytest.mark.asyncio
 async def test_fetch_server_overall_fail_marks_overall_ok_false():
     session = MagicMock()
     client = RankingClient(session, cache_ttl=0, max_retries=0)

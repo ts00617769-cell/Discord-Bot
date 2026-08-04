@@ -19,10 +19,12 @@ from services.error_handler import (
 )
 from services.exp_snapshots import (
     EXP_HISTORY_INSERT_SQL,
+    EXP_HISTORY_TOUCH_SQL,
     PLAYER_PROFILE_UPSERT_SQL,
     normalize_guild,
     players_to_insert_batch,
     profiles_from_insert_batch,
+    touch_params_from_insert_batch,
 )
 from services.exp_speed import (
     collect_overspeed,
@@ -246,6 +248,10 @@ class ExpTracker(commands.Cog):
                             await self.bot.db.executemany(
                                 EXP_HISTORY_INSERT_SQL, insert_batch
                             )
+                            await self.bot.db.executemany(
+                                EXP_HISTORY_TOUCH_SQL,
+                                touch_params_from_insert_batch(insert_batch),
+                            )
                         profile_batch = profiles_from_insert_batch(insert_batch)
                         if profile_batch:
                             await self.bot.db.executemany(
@@ -374,6 +380,7 @@ class ExpTracker(commands.Cog):
 
                 if alert_list:
                     chunk_size = 50
+                    embeds = []
                     for i in range(0, len(alert_list), chunk_size):
                         chunk = alert_list[i : i + chunk_size]
                         embed = discord.Embed(
@@ -396,22 +403,49 @@ class ExpTracker(commands.Cog):
                             embed.set_footer(
                                 text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)"
                             )
-                        for channel_id in self.ALERT_CHANNEL_IDS:
-                            channel = self.bot.get_channel(channel_id)
-                            if channel:
-                                try:
-                                    await channel.send(embed=embed)
-                                except discord.HTTPException as e:
-                                    logger.error(f"Failed to send alert to {channel_id}: {e}")
-                    try:
-                        await self._mark_setting(dedupe_key)
-                    except sqlite3.DatabaseError as e:
-                        logger.error(f"Failed to persist overspeed dedupe: {e}")
+                        embeds.append(embed)
+                    sent = await self._send_overspeed_embeds(embeds)
+                    if sent > 0:
+                        try:
+                            await self._mark_setting(dedupe_key)
+                        except sqlite3.DatabaseError as e:
+                            logger.error(f"Failed to persist overspeed dedupe: {e}")
+                    else:
+                        logger.warning(
+                            "超速警報送出失敗，未寫入 dedupe："
+                            f"{self.alert_server}/{self.alert_guild} "
+                            f"interval={time_prev}→{time_now}"
+                        )
 
         if run_transfers:
             await self.check_for_transfers(time_now, time_prev_scan, complete_times=times)
         else:
             logger.info("本輪略過轉服偵測（快照不完整）")
+
+    async def _resolve_alert_channel(self, channel_id: int):
+        channel = self.bot.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        try:
+            return await self.bot.fetch_channel(channel_id)
+        except (discord.HTTPException, discord.NotFound) as e:
+            logger.error(f"Failed to resolve alert channel {channel_id}: {e}")
+            return None
+
+    async def _send_overspeed_embeds(self, embeds: list) -> int:
+        """送出超速 embed；回傳成功次數（跨頻道合計）。失敗不寫 dedupe。"""
+        sent = 0
+        for embed in embeds:
+            for channel_id in self.ALERT_CHANNEL_IDS:
+                channel = await self._resolve_alert_channel(channel_id)
+                if channel is None:
+                    continue
+                try:
+                    await channel.send(embed=embed)
+                    sent += 1
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to send alert to {channel_id}: {e}")
+        return sent
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
         """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""

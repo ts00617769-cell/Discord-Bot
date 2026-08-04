@@ -130,6 +130,51 @@ EXP_HISTORY_INSERT_SQL = """
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+# 同時間戳再寫入時更新可變欄位（不依賴 unique index；有索引時仍正確）
+EXP_HISTORY_TOUCH_SQL = """
+    UPDATE exp_history SET
+      level = ?,
+      exp = ?,
+      class_name = ?,
+      subjugation_grade = ?,
+      guild_name = CASE
+        WHEN ? != '' THEN ?
+        ELSE guild_name
+      END
+    WHERE record_time = ? AND server_name = ? AND player_name = ?
+"""
+
+
+def touch_params_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]:
+    """將 insert batch 轉成 EXP_HISTORY_TOUCH_SQL 參數。"""
+    out: list[tuple] = []
+    for (
+        record_time,
+        server_name,
+        name,
+        level,
+        exp,
+        class_name,
+        grade,
+        guild_name,
+    ) in insert_batch:
+        guild = guild_name or ""
+        out.append(
+            (
+                level,
+                exp,
+                class_name,
+                grade,
+                guild,
+                guild,
+                record_time,
+                server_name,
+                name,
+            )
+        )
+    return out
+
+
 PLAYER_PROFILE_UPSERT_SQL = """
     INSERT INTO player_profile (
         player_name, server_name, class_name, updated_at,

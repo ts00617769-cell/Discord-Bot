@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import sqlite3
@@ -16,14 +17,17 @@ from db.schema import (
     rebuild_player_profiles,
 )
 from services.error_handler import parse_env_channel_id
+from services.game_event_windows import transfer_calendar_health_notes
 from services.retention_windows import (
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
+    ONLINE_CHECKPOINT_EVERY_BATCHES,
+    ONLINE_DELETE_BATCH_SIZE,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
-    exp_history_outside_keep_sql,
-    exp_history_transfer_middle_statements,
+    exp_history_outside_keep_batch_sql,
+    exp_history_transfer_middle_batch_sql,
     search_retention_cutoff,
     transfer_alert_retention_cutoff,
 )
@@ -191,9 +195,52 @@ class WarRoom(commands.Cog):
             logger.warning(f"denorm coverage failed: {e}")
         return stats
 
+    async def _execute_delete_with_busy_retry(self, sql: str, params: tuple):
+        """database is locked 時短重試（避免卡住 event loop 用 asyncio.sleep）。"""
+        last: BaseException | None = None
+        for attempt in range(1, 9):
+            try:
+                cursor = await self.bot.db.execute(sql, params)
+                return cursor
+            except sqlite3.OperationalError as e:
+                last = e
+                msg = str(e).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                logger.warning(
+                    "線上清庫忙碌（%s），重試 %s/8…", e, attempt
+                )
+                await asyncio.sleep(min(2.0 * attempt, 10.0))
+        assert last is not None
+        raise last
+
+    async def _delete_exp_history_in_batches(
+        self, sql: str, params: tuple, *, label: str
+    ) -> int:
+        """分批 DELETE + commit；每數批 WAL checkpoint。"""
+        total = 0
+        batch_no = 0
+        while True:
+            cursor = await self._execute_delete_with_busy_retry(sql, params)
+            n = cursor.rowcount or 0
+            await cursor.close()
+            await self.bot.db.commit()
+            total += n
+            batch_no += 1
+            if batch_no % ONLINE_CHECKPOINT_EVERY_BATCHES == 0:
+                try:
+                    await self.bot.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except sqlite3.DatabaseError as e:
+                    logger.warning("%s checkpoint 略過: %s", label, e)
+            if n < ONLINE_DELETE_BATCH_SIZE:
+                break
+        if total:
+            logger.info("線上清庫 %s 刪除 %s 筆（%s 批）", label, total, batch_no)
+        return total
+
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點：尋人導向保留（近 N 天 ∪ 轉移窗）外刪除；不過期 VACUUM。"""
+        """每天凌晨 4 點：尋人導向保留（近 N 天 ∪ 轉移窗）外分批刪除；不過期 VACUUM。"""
         try:
             retention_cutoff = search_retention_cutoff(
                 recent_days=DEFAULT_RECENT_DAYS,
@@ -205,22 +252,25 @@ class WarRoom(commands.Cog):
                 pad_days=DEFAULT_TRANSFER_PAD_DAYS,
                 max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
             )
-            del_sql, del_params = exp_history_outside_keep_sql(
-                keep_ranges, for_delete=True
+            outside_sql, outside_params = exp_history_outside_keep_batch_sql(
+                keep_ranges, batch_size=ONLINE_DELETE_BATCH_SIZE
             )
-            async with self.bot.db.execute(del_sql, del_params) as cursor:
-                deleted_exp = cursor.rowcount or 0
+            deleted_exp = await self._delete_exp_history_in_batches(
+                outside_sql, outside_params, label="保留窗外"
+            )
 
             deleted_middle = 0
             thin_ranges = build_transfer_thin_ranges(
                 max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
                 pad_days=DEFAULT_TRANSFER_PAD_DAYS,
             )
-            for thin_sql, thin_params in exp_history_transfer_middle_statements(
-                thin_ranges, for_delete=True
-            ):
-                async with self.bot.db.execute(thin_sql, thin_params) as cursor:
-                    deleted_middle += cursor.rowcount or 0
+            for i, (start, end) in enumerate(thin_ranges, 1):
+                thin_sql, thin_params = exp_history_transfer_middle_batch_sql(
+                    start, end, batch_size=ONLINE_DELETE_BATCH_SIZE
+                )
+                deleted_middle += await self._delete_exp_history_in_batches(
+                    thin_sql, thin_params, label=f"轉移窗中間#{i}"
+                )
 
             pruned_profiles = 0
             rebuilt_profiles = 0
@@ -353,12 +403,15 @@ class WarRoom(commands.Cog):
                     f"\n⚠️ denorm 覆蓋 {df:,}/{dt:,}；"
                     "可用 `!重建履歷` 增量或離線 `--for-search`。"
                 )
+            calendar_note = ""
+            for line in transfer_calendar_health_notes():
+                calendar_note += f"\n{line}"
             await channel.send(
                 f"📊 **【每週健康摘要】**\n"
                 f"> `exp_history`：{stats['exp_rows']:,} 筆\n"
                 f"> `transfer_alerts_log`：{stats['transfer_rows']:,} 筆\n"
                 f"> 最近快照：`{last}`（{stats['server_count_last']} 服）"
-                f"{vacuum_note}{denorm_note}"
+                f"{vacuum_note}{denorm_note}{calendar_note}"
             )
         except sqlite3.DatabaseError as e:
             logger.error(f"Health summary failed: {e}", exc_info=True)

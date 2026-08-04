@@ -9,7 +9,7 @@
   python cleanup_db.py --days 30 --dry-run
   python cleanup_db.py --for-search
   python cleanup_db.py --for-search --dry-run
-  # 預設：近1天 ∪ 最近1次轉移窗+pad2天；窗+pad 稀疏化；建索引 + VACUUM（NAS 建議）
+  # 預設：近3天 ∪ 最近1次轉移窗+pad3天；窗+pad 稀疏化；建索引 + VACUUM（NAS 建議）
   python cleanup_db.py --build-indexes   # 離線建立尋人索引 + player_profile（大庫必做）
   python cleanup_db.py --wipe-history
 """

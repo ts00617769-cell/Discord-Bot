@@ -159,8 +159,19 @@ class RankingClient:
                 if not isinstance(p, dict):
                     continue
                 name = p.get("gc_name")
-                if name and name not in unique_players:
+                if not name:
+                    continue
+                prev = unique_players.get(name)
+                if prev is None:
                     unique_players[name] = p
+                    continue
+                # 總榜常缺旅團；後續職業榜有 guild 時補上，勿永遠卡在空字串
+                prev_guild = (prev.get("guild_name") or "").strip()
+                new_guild = (p.get("guild_name") or "").strip()
+                if (not prev_guild or prev_guild in ("None", "null", "未知")) and new_guild:
+                    merged = dict(prev)
+                    merged["guild_name"] = p.get("guild_name")
+                    unique_players[name] = merged
         return FetchResult(
             ok=True,
             players=list(unique_players.values()),

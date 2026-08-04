@@ -24,6 +24,13 @@ REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = [
     ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次領域轉移"),
     ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ("2026-07-29 12:00:00", "2026-08-02 23:59:59", "第28次領域轉移"),
+    # 以下依「週三 12:00～週日 23:59、約每 28 天」自 #28 推算；以官網公告為準。
+    # 若實際跳週（例如 #24→#25 為 35 天）請手動改日期並去掉「預估」。
+    ("2026-08-26 12:00:00", "2026-08-30 23:59:59", "第29次領域轉移（預估）"),
+    ("2026-09-23 12:00:00", "2026-09-27 23:59:59", "第30次領域轉移（預估）"),
+    ("2026-10-21 12:00:00", "2026-10-25 23:59:59", "第31次領域轉移（預估）"),
+    ("2026-11-18 12:00:00", "2026-11-22 23:59:59", "第32次領域轉移（預估）"),
+    ("2026-12-16 12:00:00", "2026-12-20 23:59:59", "第33次領域轉移（預估）"),
 ]
 
 # 可轉職時段：公告「職業變更商品」販售職業變更幣的期間，
@@ -239,3 +246,39 @@ def disappear_in_transfer_window(
         if end < dt <= (end + grace):
             return label
     return None
+
+
+def transfer_calendar_health_notes(
+    when: Optional[str] = None,
+    *,
+    grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+) -> list[str]:
+    """健康摘要用：無後續窗／含預估窗時回傳提示字串列表。"""
+    if when is None:
+        from services.timeutil import now_naive_taipei
+
+        dt = now_naive_taipei()
+    else:
+        dt = _parse(when)
+    if dt is None:
+        return []
+    grace = datetime.timedelta(days=int(grace_days))
+    future_or_active: list[str] = []
+    for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is None or end is None:
+            continue
+        if dt <= (end + grace):
+            future_or_active.append(label)
+    if not future_or_active:
+        return [
+            "⚠️ 領域轉移日曆已無後續場次；請至官網確認後更新 "
+            "`game_event_windows.REALM_TRANSFER_WINDOWS`。"
+        ]
+    estimated = [lab for lab in future_or_active if "預估" in lab]
+    if not estimated:
+        return []
+    return [
+        f"💡 後續轉移窗含預估：{estimated[0]} 等 "
+        f"{len(estimated)} 場；請以官網公告核對日期。"
+    ]

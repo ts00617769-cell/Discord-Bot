@@ -285,3 +285,29 @@ def test_transfer_middle_keeps_first_last_per_name_server(tmp_path):
         ]
     finally:
         conn.close()
+
+
+def test_default_retention_is_three_days_and_pad_three():
+    from services.retention_windows import (
+        DEFAULT_RECENT_DAYS,
+        DEFAULT_TRANSFER_PAD_DAYS,
+    )
+
+    assert DEFAULT_RECENT_DAYS == 3
+    assert DEFAULT_TRANSFER_PAD_DAYS == 3
+
+
+def test_transfer_calendar_health_notes_estimated():
+    from services.game_event_windows import transfer_calendar_health_notes
+
+    notes = transfer_calendar_health_notes("2026-08-10 12:00:00")
+    assert notes
+    assert any("預估" in n for n in notes)
+
+
+def test_transfer_calendar_health_notes_exhausted():
+    from services.game_event_windows import transfer_calendar_health_notes
+
+    notes = transfer_calendar_health_notes("2027-01-15 12:00:00")
+    assert notes
+    assert any("已無後續" in n for n in notes)

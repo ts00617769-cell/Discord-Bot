@@ -1,6 +1,8 @@
 """EXP snapshot helpers."""
 from __future__ import annotations
 
+import pytest
+
 from services.exp_snapshots import (
     normalize_guild,
     players_to_insert_batch,
@@ -63,3 +65,40 @@ def test_pad_and_timeutil():
     assert pad_text("A", 3) == "A  "
     assert now_taipei().tzinfo == TAIPEI
     assert len(today_taipei_str()) == 10
+
+
+@pytest.mark.asyncio
+async def test_exp_history_upsert_fills_empty_guild(tmp_path):
+    import aiosqlite
+
+    from db.schema import apply_migrations
+    from services.exp_snapshots import (
+        EXP_HISTORY_INSERT_SQL,
+        EXP_HISTORY_TOUCH_SQL,
+        touch_params_from_insert_batch,
+    )
+
+    db = await aiosqlite.connect(str(tmp_path / "upsert.db"))
+    try:
+        await apply_migrations(db)
+        t = "2026-08-04 12:00:00"
+        first = (t, "萊涅01", "Hero", 60, 1e12, "太陽監視者", 10, "")
+        second = (t, "萊涅01", "Hero", 61, 1.1e12, "太陽監視者", 11, "狼團")
+        await db.execute(EXP_HISTORY_INSERT_SQL, first)
+        await db.executemany(
+            EXP_HISTORY_TOUCH_SQL, touch_params_from_insert_batch([first])
+        )
+        await db.execute(EXP_HISTORY_INSERT_SQL, second)
+        await db.executemany(
+            EXP_HISTORY_TOUCH_SQL, touch_params_from_insert_batch([second])
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT level, exp, guild_name, subjugation_grade FROM exp_history "
+            "WHERE player_name=? AND record_time=?",
+            ("Hero", t),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row == (61, 1.1e12, "狼團", 11)
+    finally:
+        await db.close()
