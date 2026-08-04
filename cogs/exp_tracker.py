@@ -72,6 +72,7 @@ class ExpTracker(commands.Cog):
         self.alert_server = "全服"
         self.alert_guild = ""
         self.alert_interval_minutes = 10
+        self.alert_speed_window_minutes = 30
 
     @property
     def ALERT_CHANNEL_IDS(self):
@@ -311,7 +312,7 @@ class ExpTracker(commands.Cog):
 
         if should_alert:
             time_prev, minutes_diff = pick_interval_baseline(
-                times, self.alert_interval_minutes, fmt=fmt
+                times, self.alert_speed_window_minutes, fmt=fmt
             )
             if time_prev and minutes_diff > 0:
                 sql = '''

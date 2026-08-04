@@ -64,7 +64,8 @@ class ExpCommands(commands.Cog):
             f"🚨 **【自動測速警報】已開啟！** "
             f"(設定: {tracker.alert_server}、旅團：{tracker.alert_guild}、"
             f"門檻 ≥{tracker.SPEED_LIMIT:,.0f}億、"
-            f"前 {tracker.alert_count} 名、每 {tracker.alert_interval_minutes} 分鐘)\n"
+            f"前 {tracker.alert_count} 名、每 {tracker.alert_interval_minutes} 分鐘輸出、"
+            f"監控週期 {tracker.alert_speed_window_minutes} 分鐘)\n"
             f"💾 設定已寫入資料庫，重啟後仍會保持開啟。"
         )
 

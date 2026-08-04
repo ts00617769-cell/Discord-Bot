@@ -18,15 +18,22 @@ def _tracker_for_embeds() -> ExpTracker:
     return cog
 
 
+def test_alert_output_and_speed_windows_are_independent():
+    tracker = ExpTracker(MagicMock())
+    assert tracker.alert_interval_minutes == 10
+    assert tracker.alert_speed_window_minutes == 30
+
+
 def test_build_overspeed_embeds_reports_clear_round():
     embeds = _tracker_for_embeds()._build_overspeed_embeds(
         [],
         record_count=12,
         time_now="2026-08-04 12:10:00",
-        minutes_diff=10,
+        minutes_diff=30,
     )
     assert len(embeds) == 1
     assert "10 分鐘超速巡檢" in embeds[0].title
+    assert "監控週期: 30min" in embeds[0].footer.text
     assert "12" in embeds[0].description
     assert "沒有人超過" in embeds[0].description
 
@@ -36,7 +43,7 @@ def test_build_overspeed_embeds_warns_when_guild_has_no_records():
         [],
         record_count=0,
         time_now="2026-08-04 12:10:00",
-        minutes_diff=10,
+        minutes_diff=30,
     )
     assert "找不到" in embeds[0].description
     assert "狼團" in embeds[0].description
