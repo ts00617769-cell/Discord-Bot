@@ -24,8 +24,11 @@ REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = [
     ("2026-06-03 12:00:00", "2026-06-07 23:59:59", "第26次領域轉移"),
     ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ("2026-07-29 12:00:00", "2026-08-02 23:59:59", "第28次領域轉移"),
-    # 以下依「週三 12:00～週日 23:59、約每 28 天」自 #28 推算；以官網公告為準。
-    # 若實際跳週（例如 #24→#25 為 35 天）請手動改日期並去掉「預估」。
+]
+
+# 提醒維護者核對公告用；未證實日期絕不參與轉服／改名放寬邏輯。
+# 以下依「週三 12:00～週日 23:59、約每 28 天」自 #28 推算。
+PROJECTED_REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = [
     ("2026-08-26 12:00:00", "2026-08-30 23:59:59", "第29次領域轉移（預估）"),
     ("2026-09-23 12:00:00", "2026-09-27 23:59:59", "第30次領域轉移（預估）"),
     ("2026-10-21 12:00:00", "2026-10-25 23:59:59", "第31次領域轉移（預估）"),
@@ -253,7 +256,8 @@ def transfer_calendar_health_notes(
     *,
     grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
 ) -> list[str]:
-    """健康摘要用：無後續窗／含預估窗時回傳提示字串列表。"""
+    """健康摘要用：無官方後續窗時提示最近的預估日期。"""
+    dt: datetime.datetime | None
     if when is None:
         from services.timeutil import now_naive_taipei
 
@@ -271,14 +275,18 @@ def transfer_calendar_health_notes(
         if dt <= (end + grace):
             future_or_active.append(label)
     if not future_or_active:
+        projected = []
+        for start_s, _end_s, label in PROJECTED_REALM_TRANSFER_WINDOWS:
+            start = _parse(start_s)
+            if start is not None and start >= dt:
+                projected.append((start_s, label))
+        projection_note = (
+            f" 最近推算為 {projected[0][1]}（{projected[0][0]}），但未經官方證實。"
+            if projected
+            else ""
+        )
         return [
             "⚠️ 領域轉移日曆已無後續場次；請至官網確認後更新 "
-            "`game_event_windows.REALM_TRANSFER_WINDOWS`。"
+            f"`game_event_windows.REALM_TRANSFER_WINDOWS`。{projection_note}"
         ]
-    estimated = [lab for lab in future_or_active if "預估" in lab]
-    if not estimated:
-        return []
-    return [
-        f"💡 後續轉移窗含預估：{estimated[0]} 等 "
-        f"{len(estimated)} 場；請以官網公告核對日期。"
-    ]
+    return []

@@ -11,15 +11,20 @@ from typing import Any, cast
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from db import apply_migrations, connect_db, connect_db_ro
 from db.connection import DatabaseIntegrityError, resolve_db_path
+from db.instance_lock import (
+    make_holder_id,
+    refresh_instance_lock,
+    release_instance_lock,
+    try_acquire_instance_lock,
+)
 from db.schema import (
-    backfill_player_profile_denorm,
-    denorm_coverage_stats,
-    list_missing_search_indexes_async,
+    StartupReadinessError,
+    ensure_startup_db_readiness,
 )
 from services.ranking_api import get_ranking_client
 from services.timeutil import now_naive_taipei, taipei_cutoff_str
@@ -29,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+CRITICAL_EXTENSIONS = frozenset(
+    {
+        "cogs.exp_commands",
+        "cogs.exp_tracker",
+        "cogs.player_search",
+        "cogs.rank",
+        "cogs.war_room",
+    }
+)
 
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
 _lock_fp = None
@@ -136,6 +150,18 @@ class PrasiaBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
+        self.instance_holder_id = make_holder_id()
+
+    @tasks.loop(seconds=30)
+    async def instance_heartbeat(self):
+        try:
+            if not await refresh_instance_lock(
+                self.instance_db, self.instance_holder_id
+            ):
+                logger.critical("共享 DB 實例鎖已失效，立即關閉避免重複執行")
+                await self.close()
+        except sqlite3.DatabaseError as e:
+            logger.error("更新共享 DB 實例 heartbeat 失敗: %s", e)
 
     async def setup_hook(self):
         try:
@@ -159,6 +185,16 @@ class PrasiaBot(commands.Bot):
                 raise
             schema_ver = await apply_migrations(self.db)
             logger.info(f"✅ schema 版本: v{schema_ver}")
+            # heartbeat 使用獨立連線，避免其 commit 切斷快照的原子交易
+            self.instance_db = await connect_db(db_path, check_integrity=False)
+            self.snapshot_db = await connect_db(db_path, check_integrity=False)
+            if not await try_acquire_instance_lock(
+                self.instance_db, self.instance_holder_id
+            ):
+                raise RuntimeError(
+                    "共享 DB 已有另一個 bot 實例持有鎖；請關閉舊實例或等待鎖逾時"
+                )
+            self.instance_heartbeat.start()
 
             try:
                 self.db_ro = await connect_db_ro(db_path)
@@ -166,29 +202,12 @@ class PrasiaBot(commands.Bot):
                 logger.warning(f"唯讀連線開啟失敗，重查詢將共用寫入連線: {e}")
                 self.db_ro = self.db
 
-            missing_idx = await list_missing_search_indexes_async(self.db_ro)
-            if missing_idx:
-                logger.warning(
-                    "⚠️ 缺少尋人索引 %s。大庫請停 bot 後執行 "
-                    "`python cleanup_db.py --build-indexes` 或 `--for-search`。",
-                    ", ".join(missing_idx),
-                )
-
             try:
-                total_pp, filled_pp = await denorm_coverage_stats(self.db_ro)
-                if total_pp > 0 and filled_pp < total_pp:
-                    logger.info(
-                        "⏳ player_profile denorm 覆蓋 %s/%s，啟動增量回填…",
-                        filled_pp,
-                        total_pp,
-                    )
-                    filled_n = await backfill_player_profile_denorm(
-                        self.db, batch_limit=500
-                    )
-                    if filled_n:
-                        logger.info("✅ denorm 回填 %s 筆", filled_n)
-            except Exception as e:
-                logger.warning(f"denorm 覆蓋檢查／回填略過: {e}")
+                await ensure_startup_db_readiness(self.db)
+                logger.info("✅ 搜尋索引與 player_profile denorm 已就緒")
+            except StartupReadinessError as e:
+                logger.critical("❌ 資料庫搜尋條件未就緒，拒絕啟動: %s", e)
+                raise
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.error(
@@ -214,26 +233,51 @@ class PrasiaBot(commands.Bot):
                     logger.info(f"⏳ 正在掛載模組 {filename}...")
                     await self.load_extension(ext_name)
                     logger.info(f"✅ 模組 {filename} 已成功掛載！")
-                except commands.ExtensionFailed as e:
-                    logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
-                except (commands.NoEntryPointError, commands.ExtensionError) as e:
-                    logger.warning(f"⏭️ 略過模組 {filename}: {e}")
                 except Exception as e:
-                    logger.error(f"❌ 模組 {filename} 掛載失敗: {e}", exc_info=True)
+                    if ext_name in CRITICAL_EXTENSIONS:
+                        logger.critical(
+                            "❌ 必要模組 %s 掛載失敗，拒絕半殘啟動",
+                            filename,
+                            exc_info=True,
+                        )
+                        raise RuntimeError(
+                            f"critical extension failed: {ext_name}"
+                        ) from e
+                    logger.warning(
+                        "⏭️ 非必要模組 %s 掛載失敗，繼續啟動: %s",
+                        filename,
+                        e,
+                        exc_info=True,
+                    )
             logger.info(f"✅ setup_hook 完成，已掛載 {len(self.extensions)} 個模組")
         except Exception as e:
             logger.error(f"❌ 初始化失敗: {e}", exc_info=True)
             raise
 
     async def close(self):
+        if self.instance_heartbeat.is_running():
+            self.instance_heartbeat.cancel()
         if hasattr(self, "session"):
             await self.session.close()
         db_ro = getattr(self, "db_ro", None)
         db = getattr(self, "db", None)
+        snapshot_db = getattr(self, "snapshot_db", None)
         if db_ro is not None and db_ro is not db:
             await db_ro.close()
             logger.info("✅ 唯讀資料庫已關閉")
         if db is not None:
+            instance_db = getattr(self, "instance_db", None)
+            try:
+                if instance_db is not None:
+                    await release_instance_lock(
+                        instance_db, self.instance_holder_id
+                    )
+            except sqlite3.DatabaseError as e:
+                logger.warning("釋放共享 DB 實例鎖失敗: %s", e)
+            if instance_db is not None:
+                await instance_db.close()
+            if snapshot_db is not None:
+                await snapshot_db.close()
             await db.close()
             logger.info("✅ 資料庫已安全關閉")
         await super().close()
@@ -243,22 +287,35 @@ bot = PrasiaBot()
 _app_commands_synced = False
 
 
+def invoke_dedupe_id(ctx: commands.Context) -> int | None:
+    """prefix 用 message snowflake，slash/hybrid 用 interaction snowflake。"""
+    interaction_id = getattr(ctx.interaction, "id", None)
+    if interaction_id is not None:
+        return int(interaction_id)
+    message_id = getattr(ctx.message, "id", None)
+    return int(message_id) if message_id is not None else None
+
+
 @bot.before_invoke
 async def claim_command_once(ctx: commands.Context):
     """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
-    if not hasattr(ctx.bot, "db") or ctx.message is None:
+    if not hasattr(ctx.bot, "db"):
+        return
+    invoke_id = invoke_dedupe_id(ctx)
+    if invoke_id is None:
+        logger.warning("指令無 message/interaction ID，無法執行去重")
         return
     host = socket.gethostname()
     try:
         claimed_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         await ctx.bot.db.execute(
             "INSERT INTO cmd_dedupe (message_id, claimed_at, pid, host) VALUES (?, ?, ?, ?)",
-            (ctx.message.id, claimed_at, os.getpid(), host),
+            (invoke_id, claimed_at, os.getpid(), host),
         )
         await ctx.bot.db.commit()
     except sqlite3.IntegrityError:
         logger.warning(
-            f"⚠️ 略過重複指令: msg={ctx.message.id} cmd={getattr(ctx.command, 'name', '?')} "
+            f"⚠️ 略過重複指令: invoke={invoke_id} cmd={getattr(ctx.command, 'name', '?')} "
             f"pid={os.getpid()} host={host}"
         )
         raise commands.CheckFailure("duplicate_invoke") from None

@@ -44,7 +44,7 @@ def _init_minimal_db(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
 
 
 def test_validate_cleanup_args_rejects_wipe_with_for_search():

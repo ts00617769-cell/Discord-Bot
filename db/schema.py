@@ -7,7 +7,11 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+
+class StartupReadinessError(RuntimeError):
+    """必要尋人索引或 denorm 尚未就緒。"""
+
+SCHEMA_VERSION = 9
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -226,6 +230,20 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        9,
+        "shared bot instance lease",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS bot_instance_lock (
+                lock_name TEXT PRIMARY KEY,
+                holder_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL
+            )
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -324,6 +342,7 @@ _PRAGMA_TABLE_ALLOWLIST = frozenset(
         "horoscope_cache",
         "alert_dedupe",
         "transfer_missing",
+        "bot_instance_lock",
     }
 )
 
@@ -733,6 +752,11 @@ async def backfill_player_profile_denorm(db, *, batch_limit: int = 500) -> int:
         ) as cursor:
             row = await cursor.fetchone()
         if not row or row[0] is None:
+            await db.execute(
+                "DELETE FROM player_profile WHERE player_name = ? AND server_name = ?",
+                (player_name, server_name),
+            )
+            updated += 1
             continue
         min_exp, max_exp, first_seen, last_seen, max_level, max_sub = row
         await db.execute(
@@ -760,6 +784,50 @@ async def backfill_player_profile_denorm(db, *, batch_limit: int = 500) -> int:
     if updated:
         await db.commit()
     return updated
+
+
+async def ensure_startup_db_readiness(
+    db,
+    *,
+    large_index_threshold: int = 50_000,
+    denorm_batch_limit: int = 1_000,
+    denorm_max_batches: int = 200,
+) -> None:
+    """啟動前確保搜尋索引與 denorm 完整，避免 bot 半殘但表面在線。"""
+    missing = await list_missing_search_indexes_async(db)
+    if missing:
+        async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+            row = await cursor.fetchone()
+        row_count = int(row[0] or 0) if row else 0
+        if row_count > large_index_threshold:
+            raise StartupReadinessError(
+                f"exp_history={row_count:,} 且缺索引 {missing}；"
+                "請停 bot 後執行 `python cleanup_db.py --build-indexes`"
+            )
+        await ensure_search_indexes(
+            db,
+            skip_if_rows_above=max(large_index_threshold, row_count + 1),
+            index_names=missing,
+        )
+        still_missing = await list_missing_search_indexes_async(db)
+        if still_missing:
+            raise StartupReadinessError(f"建立搜尋索引失敗: {still_missing}")
+
+    await prune_orphaned_player_profiles(db)
+    for _ in range(denorm_max_batches):
+        total, filled = await denorm_coverage_stats(db)
+        if total == 0 or filled == total:
+            return
+        changed = await backfill_player_profile_denorm(
+            db, batch_limit=denorm_batch_limit
+        )
+        if changed == 0:
+            break
+    total, filled = await denorm_coverage_stats(db)
+    if total and filled < total:
+        raise StartupReadinessError(
+            f"player_profile denorm 尚未完成: {filled:,}/{total:,}"
+        )
 
 
 async def list_missing_search_indexes_async(db) -> list[str]:

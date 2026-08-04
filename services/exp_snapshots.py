@@ -175,6 +175,34 @@ def touch_params_from_insert_batch(insert_batch: Iterable[tuple]) -> list[tuple]
     return out
 
 
+async def persist_snapshot_round(
+    db,
+    server_batches: Iterable[Iterable[tuple]],
+    *,
+    persist_history: bool = True,
+) -> None:
+    """整輪伺服器快照單一交易寫入；任一失敗即 rollback，不留下半套時間點。"""
+    batches = [list(batch) for batch in server_batches if batch]
+    if not batches:
+        return
+    insert_batch = [row for batch in batches for row in batch]
+    profile_batch = profiles_from_insert_batch(insert_batch)
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        if persist_history:
+            await db.executemany(EXP_HISTORY_INSERT_SQL, insert_batch)
+            await db.executemany(
+                EXP_HISTORY_TOUCH_SQL,
+                touch_params_from_insert_batch(insert_batch),
+            )
+        if profile_batch:
+            await db.executemany(PLAYER_PROFILE_UPSERT_SQL, profile_batch)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+
 PLAYER_PROFILE_UPSERT_SQL = """
     INSERT INTO player_profile (
         player_name, server_name, class_name, updated_at,

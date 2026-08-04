@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 CHANNEL_DENIED = "channel_denied"
 
 
+async def resolve_bot_channel(bot, channel_id: int, *, label: str = "channel"):
+    """先查 Discord cache，未命中時再走 REST；解析失敗回傳 None。"""
+    if not channel_id:
+        return None
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(channel_id)
+    except discord.HTTPException as e:
+        logger.error("Failed to resolve %s %s: %s", label, channel_id, e)
+        return None
+
+
 def parse_env_channel_ids(
     env_name: Optional[str] = None, env_value: Optional[str] = None
 ) -> list[int]:

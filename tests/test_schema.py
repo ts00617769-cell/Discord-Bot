@@ -11,7 +11,9 @@ from db.schema import (
     apply_migrations,
     build_search_indexes_sync,
     ensure_search_indexes,
+    ensure_startup_db_readiness,
     list_missing_search_indexes,
+    list_missing_search_indexes_async,
     rebuild_player_profiles,
     rebuild_player_profiles_sync,
 )
@@ -44,6 +46,7 @@ async def test_apply_migrations_fresh_db(tmp_path):
         assert "player_profile" in tables
         assert "alert_dedupe" in tables
         assert "transfer_missing" in tables
+        assert "bot_instance_lock" in tables
         assert "member_registry" not in tables
 
         async with db.execute("PRAGMA table_info(player_profile)") as cur:
@@ -67,6 +70,36 @@ async def test_apply_migrations_fresh_db(tmp_path):
         # 再跑一次應無新建
         created2 = await ensure_search_indexes(db, skip_if_rows_above=1_000_000)
         assert created2 == []
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_readiness_builds_indexes_and_finishes_denorm(tmp_path):
+    db = await aiosqlite.connect(str(tmp_path / "ready.db"))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO exp_history
+            (record_time, server_name, player_name, level, exp)
+            VALUES ('2026-08-04 12:00:00', 'S1', 'Hero', 60, 1000)
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO player_profile
+            (player_name, server_name, class_name, updated_at)
+            VALUES ('Hero', 'S1', '戰士', '2026-08-04 12:00:00')
+            """
+        )
+        await db.commit()
+        await ensure_startup_db_readiness(db)
+        assert await list_missing_search_indexes_async(db) == []
+        async with db.execute(
+            "SELECT min_exp, max_exp FROM player_profile WHERE player_name='Hero'"
+        ) as cursor:
+            assert await cursor.fetchone() == (1000.0, 1000.0)
     finally:
         await db.close()
 

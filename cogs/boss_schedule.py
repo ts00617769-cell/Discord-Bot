@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands, tasks
 
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
-from services.error_handler import parse_env_channel_id
+from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import now_naive_taipei, now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,11 @@ class BossSchedule(commands.Cog):
             logger.error(f"Boss reminder dedupe check failed: {e}")
             return
 
-        channel = self.bot.get_channel(self.REMINDER_CHANNEL_ID)
+        channel = await resolve_bot_channel(
+            self.bot,
+            self.REMINDER_CHANNEL_ID,
+            label="boss reminder channel",
+        )
         if not channel:
             logger.warning(f"Boss reminder channel {self.REMINDER_CHANNEL_ID} not found")
             return

@@ -103,9 +103,11 @@ def test_online_cleanup_delete_sql_matches_for_search():
     assert len(params) == 2
 
 
-def test_search_retention_cutoff_matches_recent_days():
+def test_search_retention_cutoff_matches_recent_days_without_transfer_windows():
     now = datetime.datetime(2026, 7, 27, 12, 0, 0)
-    cutoff = search_retention_cutoff(recent_days=3, now=now)
+    cutoff = search_retention_cutoff(
+        recent_days=3, max_transfer_windows=0, now=now
+    )
     assert cutoff == "2026-07-24 12:00:00"
 
 

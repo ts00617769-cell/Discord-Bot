@@ -13,7 +13,7 @@ from typing import cast
 import discord
 from discord.ext import commands, tasks
 
-from services.error_handler import parse_env_channel_id
+from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import TAIPEI, now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -312,7 +312,9 @@ class QuizSystem(commands.Cog):
             if not channel_id:
                 logger.warning("QUIZ_CHANNEL_ID unset; skip auto-post quiz")
                 return
-            channel = self.bot.get_channel(channel_id)
+            channel = await resolve_bot_channel(
+                self.bot, channel_id, label="quiz channel"
+            )
             if not channel:
                 logger.warning(f"Quiz channel {channel_id} not found")
                 return
@@ -349,7 +351,11 @@ class QuizSystem(commands.Cog):
             return
 
         try:
-            channel = self.bot.get_channel(self.active_poll["channel_id"])
+            channel = await resolve_bot_channel(
+                self.bot,
+                self.active_poll["channel_id"],
+                label="quiz reveal channel",
+            )
             if not channel:
                 logger.warning(
                     f"Quiz reveal channel {self.active_poll['channel_id']} missing; "

@@ -42,6 +42,7 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
+    build_bridge_thin_ranges,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
     exp_history_outside_keep_batch_sql,
@@ -495,6 +496,14 @@ def main() -> int:
                 max_transfer_windows=args.max_transfer_windows,
                 pad_days=args.transfer_pad_days,
             )
+            thin_ranges.extend(
+                build_bridge_thin_ranges(
+                    recent_days=args.recent_days,
+                    max_transfer_windows=args.max_transfer_windows,
+                    pad_days=args.transfer_pad_days,
+                )
+            )
+            thin_ranges.sort(key=lambda item: item[0])
             settings_cutoff = search_retention_cutoff(
                 recent_days=args.recent_days,
                 pad_days=args.transfer_pad_days,
@@ -514,7 +523,7 @@ def main() -> int:
                 for start, end in keep_ranges:
                     _log(f"  {start}  ~  {end}")
             if thin_ranges:
-                _log("轉移窗+pad 稀疏化（同角同服只留首尾）：")
+                _log("轉移窗+橋接區稀疏化（同角同服只留首尾）：")
                 for start, end in thin_ranges:
                     _log(f"  {start}  ~  {end}")
             if do_precount:
@@ -652,7 +661,7 @@ def main() -> int:
                 for start, end in keep_ranges:
                     _log(f"  {start}  ~  {end}")
             if thin_ranges:
-                _log("轉移窗+pad 稀疏化（同角同服只留首尾）：")
+                _log("轉移窗+橋接區稀疏化（同角同服只留首尾）：")
                 for start, end in thin_ranges:
                     _log(f"  {start}  ~  {end}")
 

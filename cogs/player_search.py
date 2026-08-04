@@ -17,7 +17,11 @@ from db.schema import (
 )
 from game_data import SERVER_MAP
 from services import player_matching as match
-from services.error_handler import allowed_channel, parse_env_channel_ids
+from services.error_handler import (
+    allowed_channel,
+    parse_env_channel_ids,
+    resolve_bot_channel,
+)
 from services.player_search_db import PlayerSearchStore
 from services.player_search_engine import (
     build_causal_scan_sections,
@@ -381,7 +385,9 @@ class PlayerSearch(commands.Cog):
 
         channels = []
         for cid in channel_ids:
-            ch = self.bot.get_channel(cid)
+            ch = await resolve_bot_channel(
+                self.bot, cid, label="transfer alert test channel"
+            )
             if ch:
                 channels.append(ch)
             else:

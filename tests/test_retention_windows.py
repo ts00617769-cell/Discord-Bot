@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime
 
 from services.retention_windows import (
+    build_bridge_thin_ranges,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
     exp_history_outside_keep_batch_sql,
@@ -48,8 +49,8 @@ def test_transfer_pad_after_only():
     ]
 
 
-def test_defaults_transfer_and_recent_may_gap():
-    """轉移後 pad 與 recent 不相接時中間可留空洞。"""
+def test_defaults_keep_contiguous_and_thin_bridge():
+    """轉移窗至 recent 之間連續保留，橋接區另行稀疏化。"""
     windows = [
         ("2026-07-01 12:00:00", "2026-07-05 23:59:59", "第27次領域轉移"),
     ]
@@ -62,8 +63,16 @@ def test_defaults_transfer_and_recent_may_gap():
         transfer_windows=windows,
     )
     assert ranges == [
-        ("2026-07-01 12:00:00", "2026-07-08 23:59:59"),
-        ("2026-07-18 04:00:00", "2026-07-21 04:00:00"),
+        ("2026-07-01 12:00:00", "2026-07-21 04:00:00"),
+    ]
+    assert build_bridge_thin_ranges(
+        recent_days=3,
+        pad_days=3,
+        max_transfer_windows=3,
+        now=datetime(2026, 7, 21, 4, 0, 0),
+        transfer_windows=windows,
+    ) == [
+        ("2026-07-09 00:00:00", "2026-07-18 03:59:59"),
     ]
 
 
@@ -105,9 +114,7 @@ def test_only_last_n_transfer_windows():
         transfer_windows=windows,
     )
     assert ranges == [
-        ("2026-05-06 12:00:00", "2026-05-10 23:59:59"),
-        ("2026-06-03 12:00:00", "2026-06-07 23:59:59"),
-        ("2026-07-01 12:00:00", "2026-07-05 23:59:59"),
+        ("2026-05-06 12:00:00", "2026-07-21 04:00:00"),
     ]
 
 
@@ -181,26 +188,16 @@ def test_thin_ranges_include_pad():
         now=datetime(2026, 7, 21, 4, 0, 0),
         transfer_windows=windows,
     )
-    # keep 與 thin 皆含 pad，區間對齊
-    assert keep[0][1] == thin[0][1] == "2026-06-10 23:59:59"
+    # keep 是連續 envelope；thin 仍個別依窗+pad
+    assert keep == [("2026-06-03 12:00:00", "2026-07-21 04:00:00")]
 
 
-def test_should_persist_exp_history_sparse_outside_transfer(monkeypatch):
-    """非轉移期僅 :00/:30 寫入；活躍期每輪寫入。"""
-    monkeypatch.setattr(
-        "services.game_event_windows.is_transfer_active_period",
-        lambda when, **kwargs: False,
-    )
+def test_should_persist_exp_history_every_round():
+    """即時警報需要每個 10 分鐘輪次都有歷史快照。"""
     assert should_persist_exp_history(datetime(2026, 7, 20, 12, 0, 0)) is True
     assert should_persist_exp_history(datetime(2026, 7, 20, 12, 30, 0)) is True
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 10, 0)) is False
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 20, 0)) is False
-
-    monkeypatch.setattr(
-        "services.game_event_windows.is_transfer_active_period",
-        lambda when, **kwargs: True,
-    )
     assert should_persist_exp_history(datetime(2026, 7, 20, 12, 10, 0)) is True
+    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 20, 0)) is True
 
 
 def test_transfer_middle_sql_params_match_window():

@@ -16,7 +16,7 @@ from db.schema import (
     prune_orphaned_player_profiles,
     rebuild_player_profiles,
 )
-from services.error_handler import parse_env_channel_id
+from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.game_event_windows import transfer_calendar_health_notes
 from services.retention_windows import (
     DEFAULT_MAX_TRANSFER_WINDOWS,
@@ -24,6 +24,7 @@ from services.retention_windows import (
     DEFAULT_TRANSFER_PAD_DAYS,
     ONLINE_CHECKPOINT_EVERY_BATCHES,
     ONLINE_DELETE_BATCH_SIZE,
+    build_bridge_thin_ranges,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
     exp_history_outside_keep_batch_sql,
@@ -69,7 +70,9 @@ class WarRoom(commands.Cog):
         if self._ready_announced or not self.log_channel_id:
             return
         self._ready_announced = True
-        channel = self.bot.get_channel(self.log_channel_id)
+        channel = await resolve_bot_channel(
+            self.bot, self.log_channel_id, label="war room log channel"
+        )
         if channel:
             try:
                 await channel.send(
@@ -134,7 +137,9 @@ class WarRoom(commands.Cog):
         if not self.log_channel_id:
             return
 
-        channel = self.bot.get_channel(self.log_channel_id)
+        channel = await resolve_bot_channel(
+            self.bot, self.log_channel_id, label="war room log channel"
+        )
         if channel:
             error_msg = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
@@ -264,6 +269,14 @@ class WarRoom(commands.Cog):
                 max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
                 pad_days=DEFAULT_TRANSFER_PAD_DAYS,
             )
+            thin_ranges.extend(
+                build_bridge_thin_ranges(
+                    recent_days=DEFAULT_RECENT_DAYS,
+                    max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
+                    pad_days=DEFAULT_TRANSFER_PAD_DAYS,
+                )
+            )
+            thin_ranges.sort(key=lambda item: item[0])
             for i, (start, end) in enumerate(thin_ranges, 1):
                 thin_sql, thin_params = exp_history_transfer_middle_batch_sql(
                     start, end, batch_size=ONLINE_DELETE_BATCH_SIZE
@@ -318,7 +331,9 @@ class WarRoom(commands.Cog):
             except sqlite3.DatabaseError as e:
                 logger.warning(f"PRAGMA optimize 略過: {e}")
 
-            log_channel = self.bot.get_channel(self.log_channel_id)
+            log_channel = await resolve_bot_channel(
+                self.bot, self.log_channel_id, label="war room log channel"
+            )
             if log_channel and (
                 deleted_exp > 0
                 or deleted_middle > 0
@@ -361,7 +376,9 @@ class WarRoom(commands.Cog):
                 await self.bot.db.rollback()
             except sqlite3.DatabaseError:
                 pass
-            log_channel = self.bot.get_channel(self.log_channel_id)
+            log_channel = await resolve_bot_channel(
+                self.bot, self.log_channel_id, label="war room log channel"
+            )
             if log_channel:
                 await log_channel.send(f"⚠️ **【資料庫清理異常】**\n```python\n{e}\n```")
             logger.error(f"DB cleanup failed: {e}", exc_info=True)
@@ -378,7 +395,9 @@ class WarRoom(commands.Cog):
             return
         if not self.log_channel_id:
             return
-        channel = self.bot.get_channel(self.log_channel_id)
+        channel = await resolve_bot_channel(
+            self.bot, self.log_channel_id, label="war room log channel"
+        )
         if not channel:
             return
         try:

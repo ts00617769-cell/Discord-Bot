@@ -16,15 +16,12 @@ from services.error_handler import (
     min_snapshot_players,
     parse_env_channel_ids,
     parse_env_float,
+    resolve_bot_channel,
 )
 from services.exp_snapshots import (
-    EXP_HISTORY_INSERT_SQL,
-    EXP_HISTORY_TOUCH_SQL,
-    PLAYER_PROFILE_UPSERT_SQL,
     normalize_guild,
+    persist_snapshot_round,
     players_to_insert_batch,
-    profiles_from_insert_batch,
-    touch_params_from_insert_batch,
 )
 from services.exp_speed import (
     collect_overspeed,
@@ -35,10 +32,7 @@ from services.game_event_windows import (
     is_transfer_active_period,
 )
 from services.ranking_api import get_ranking_client
-from services.retention_windows import (
-    HISTORY_SPARSE_INTERVAL_MINUTES,
-    should_persist_exp_history,
-)
+from services.retention_windows import should_persist_exp_history
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
 from services.transfer_alert_flow import (
@@ -77,7 +71,7 @@ class ExpTracker(commands.Cog):
         self.alert_count = 30
         self.alert_server = "全服"
         self.alert_guild = ""
-        self.alert_interval_minutes = 30
+        self.alert_interval_minutes = 10
 
     @property
     def ALERT_CHANNEL_IDS(self):
@@ -219,14 +213,9 @@ class ExpTracker(commands.Cog):
             servers_ok = []
             servers_failed = []
             servers_thin = []
+            round_batches: list[list[tuple]] = []
             min_players = min_snapshot_players()
             persist_history = should_persist_exp_history(now_time)
-            if not persist_history:
-                logger.info(
-                    "本輪略過 exp_history 寫入（非轉移期每 %s 分一筆）；"
-                    "仍更新 player_profile",
-                    HISTORY_SPARSE_INTERVAL_MINUTES,
-                )
 
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
@@ -243,21 +232,7 @@ class ExpTracker(commands.Cog):
                     )
 
                     if insert_batch:
-                        # 非轉移活躍期降頻寫入 exp_history（NAS 減量）；profile 每輪更新
-                        if persist_history:
-                            await self.bot.db.executemany(
-                                EXP_HISTORY_INSERT_SQL, insert_batch
-                            )
-                            await self.bot.db.executemany(
-                                EXP_HISTORY_TOUCH_SQL,
-                                touch_params_from_insert_batch(insert_batch),
-                            )
-                        profile_batch = profiles_from_insert_batch(insert_batch)
-                        if profile_batch:
-                            await self.bot.db.executemany(
-                                PLAYER_PROFILE_UPSERT_SQL, profile_batch
-                            )
-                        await self.bot.db.commit()
+                        round_batches.append(insert_batch)
 
                     # 總榜成功且人數達標才算完整服；薄名冊仍寫入但不計入轉服門檻
                     quality_ok = (
@@ -283,10 +258,12 @@ class ExpTracker(commands.Cog):
                     continue
                 await asyncio.sleep(0.5)
 
+            await persist_snapshot_round(
+                getattr(self.bot, "snapshot_db", self.bot.db),
+                round_batches,
+                persist_history=persist_history,
+            )
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
-            if not persist_history:
-                # 本輪沒有 now_time 的 history 列，轉服／測速改等下一筆寫入輪
-                return
             if not snapshot_complete:
                 logger.warning(
                     f"⚠️ 本輪快照不完整 ok={len(servers_ok)}/"
@@ -423,14 +400,9 @@ class ExpTracker(commands.Cog):
             logger.info("本輪略過轉服偵測（快照不完整）")
 
     async def _resolve_alert_channel(self, channel_id: int):
-        channel = self.bot.get_channel(channel_id)
-        if channel is not None:
-            return channel
-        try:
-            return await self.bot.fetch_channel(channel_id)
-        except (discord.HTTPException, discord.NotFound) as e:
-            logger.error(f"Failed to resolve alert channel {channel_id}: {e}")
-            return None
+        return await resolve_bot_channel(
+            self.bot, channel_id, label="overspeed alert channel"
+        )
 
     async def _send_overspeed_embeds(self, embeds: list) -> int:
         """送出超速 embed；回傳成功次數（跨頻道合計）。失敗不寫 dedupe。"""
@@ -482,13 +454,16 @@ class ExpTracker(commands.Cog):
         )
         success = 0
         for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
-            channel = self.bot.get_channel(channel_id)
-            if channel:
-                try:
-                    await channel.send(embed=embed)
-                    success += 1
-                except discord.HTTPException as e:
-                    logger.error(f"Failed to send transfer alert to {channel_id}: {e}")
+            channel = await resolve_bot_channel(
+                self.bot, channel_id, label="transfer alert channel"
+            )
+            if channel is None:
+                continue
+            try:
+                await channel.send(embed=embed)
+                success += 1
+            except discord.HTTPException as e:
+                logger.error(f"Failed to send transfer alert to {channel_id}: {e}")
         return success
 
     async def check_for_transfers(self, time_now, time_prev, complete_times=None):

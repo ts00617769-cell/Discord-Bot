@@ -94,10 +94,10 @@ def build_search_keep_ranges(
     now: Optional[datetime.datetime] = None,
     transfer_windows: Sequence[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str]]:
-    """回傳合併後的保留區間 (start, end) SQL 字串列表。
+    """回傳連續保留區間 (start, end)。
 
-    領域轉移：只保留最近 max_transfer_windows 次，
-    區間為 [窗開始, 窗結束 + pad_days]（轉移前不另留）。
+    最早保留點取「最近 K 次轉移窗開始」與「最近 N 天」較早者，直到現在。
+    中間橋接區由 build_bridge_thin_ranges 稀疏化，避免時間斷層又控制 NAS 容量。
     """
     if recent_days < 0:
         raise ValueError("recent_days must be >= 0")
@@ -110,27 +110,71 @@ def build_search_keep_ranges(
     if now_dt.tzinfo is not None:
         now_dt = now_dt.replace(tzinfo=None)
 
-    pad = datetime.timedelta(days=int(pad_days))
-    raw: list[tuple[str, str]] = []
-
     windows = transfer_windows if transfer_windows is not None else REALM_TRANSFER_WINDOWS
     selected = select_recent_transfer_windows(
         windows, max_windows=max_transfer_windows, now=now_dt
     )
+    starts: list[datetime.datetime] = []
+    ends: list[datetime.datetime] = [now_dt]
     for start_s, end_s, _label in selected:
         start, end = _parse(start_s), _parse(end_s)
         if start is None or end is None:
             continue
-        raw.append((_fmt(start), _fmt(end + pad)))
+        starts.append(start)
+        ends.append(end + datetime.timedelta(days=int(pad_days)))
 
     recent_start = now_dt - datetime.timedelta(days=int(recent_days))
     if recent_days > 0:
-        raw.append((_fmt(recent_start), _fmt(now_dt)))
-    elif recent_days == 0 and not raw:
-        # 無轉移窗且 recent=0：仍保留「當下」單點，避免 empty → 誤刪全表
-        raw.append((_fmt(now_dt), _fmt(now_dt)))
+        starts.append(recent_start)
+    if not starts:
+        starts.append(now_dt)
 
-    return merge_ranges(raw)
+    return [(_fmt(min(starts)), _fmt(max(ends)))]
+
+
+def build_bridge_thin_ranges(
+    *,
+    recent_days: int = DEFAULT_RECENT_DAYS,
+    pad_days: int = DEFAULT_TRANSFER_PAD_DAYS,
+    max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
+    now: Optional[datetime.datetime] = None,
+    transfer_windows: Sequence[tuple[str, str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """回傳轉移窗+pad 與 recent 區間之間的橋接區；橋接區只留首尾。"""
+    now_dt = now if now is not None else now_naive_taipei()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+    windows = transfer_windows if transfer_windows is not None else REALM_TRANSFER_WINDOWS
+    selected = select_recent_transfer_windows(
+        windows, max_windows=max_transfer_windows, now=now_dt
+    )
+    pad = datetime.timedelta(days=int(pad_days))
+    dense_ranges: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for start_s, end_s, _label in selected:
+        start, end = _parse(start_s), _parse(end_s)
+        if start is not None and end is not None:
+            dense_ranges.append((start, min(end + pad, now_dt)))
+    if recent_days > 0:
+        dense_ranges.append(
+            (now_dt - datetime.timedelta(days=int(recent_days)), now_dt)
+        )
+    if len(dense_ranges) < 2:
+        return []
+    merged = merge_ranges([(_fmt(a), _fmt(b)) for a, b in dense_ranges])
+    bridges: list[tuple[str, str]] = []
+    one_second = datetime.timedelta(seconds=1)
+    for (_start_a, end_a), (start_b, _end_b) in zip(
+        merged, merged[1:], strict=False
+    ):
+        bridge_start = _parse(end_a)
+        bridge_end = _parse(start_b)
+        if bridge_start is None or bridge_end is None:
+            continue
+        bridge_start += one_second
+        bridge_end -= one_second
+        if bridge_start <= bridge_end:
+            bridges.append((_fmt(bridge_start), _fmt(bridge_end)))
+    return bridges
 
 
 def exp_history_outside_keep_sql(
@@ -225,20 +269,15 @@ def should_persist_exp_history(
     *,
     sparse_interval_minutes: int = HISTORY_SPARSE_INTERVAL_MINUTES,
 ) -> bool:
-    """是否寫入本輪 exp_history。
+    """是否寫入本輪 exp_history；即時警報需要每個 10 分鐘快照。
 
-    轉移活躍期：每輪都寫。
-    非活躍期：僅在對齊 sparse_interval_minutes 的整點分鐘寫入（預設每 30 分）。
+    舊資料由每日清理的轉移／橋接端點稀疏化控制容量。
     """
-    from services.game_event_windows import is_transfer_active_period
-
     if when.tzinfo is not None:
         when = when.replace(tzinfo=None)
     if sparse_interval_minutes < 1:
         raise ValueError("sparse_interval_minutes must be >= 1")
-    if is_transfer_active_period(_fmt(when)):
-        return True
-    return int(when.minute) % int(sparse_interval_minutes) == 0
+    return True
 
 
 def exp_history_transfer_middle_sql(
@@ -342,13 +381,17 @@ def search_retention_cutoff(
     max_transfer_windows: int = DEFAULT_MAX_TRANSFER_WINDOWS,
     now: Optional[datetime.datetime] = None,
 ) -> str:
-    """與密層對齊的 alert_dedupe / settings 截止時間。"""
-    _ = (pad_days, max_transfer_windows)
+    """與 exp_history 連續保留區間對齊的 dedupe 截止時間。"""
+    ranges = build_search_keep_ranges(
+        recent_days=recent_days,
+        pad_days=pad_days,
+        max_transfer_windows=max_transfer_windows,
+        now=now,
+    )
+    if ranges:
+        return ranges[0][0]
     now_dt = now if now is not None else now_naive_taipei()
-    if now_dt.tzinfo is not None:
-        now_dt = now_dt.replace(tzinfo=None)
-    cutoff = now_dt - datetime.timedelta(days=int(recent_days))
-    return cutoff.strftime(FMT_SQL)
+    return _fmt(now_dt)
 
 
 def transfer_alert_retention_cutoff(
