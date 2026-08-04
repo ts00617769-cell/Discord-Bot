@@ -339,48 +339,27 @@ class ExpTracker(commands.Cog):
                     records, minutes_diff, self.SPEED_LIMIT
                 )[: self.alert_count]
 
-                if alert_list:
-                    dedupe_key = (
-                        f"overspeed:{time_now}|{time_prev}|"
-                        f"{self.alert_server}|{self.alert_guild}|{self.alert_count}"
+                dedupe_key = (
+                    f"overspeed:{time_now}|{time_prev}|"
+                    f"{self.alert_server}|{self.alert_guild}|{self.alert_count}"
+                )
+                try:
+                    already_sent = await self._setting_exists(dedupe_key)
+                except sqlite3.DatabaseError as e:
+                    logger.error(f"Overspeed dedupe check failed: {e}")
+                    already_sent = True
+                if already_sent:
+                    logger.info(
+                        f"略過重複超速巡檢 interval={time_prev}→{time_now} "
+                        f"server={self.alert_server} guild={self.alert_guild}"
                     )
-                    try:
-                        if await self._setting_exists(dedupe_key):
-                            logger.info(
-                                f"略過重複超速警報 interval={time_prev}→{time_now} "
-                                f"server={self.alert_server} guild={self.alert_guild}"
-                            )
-                            alert_list = []
-                    except sqlite3.DatabaseError as e:
-                        logger.error(f"Overspeed dedupe check failed: {e}")
-                        alert_list = []
-
-                if alert_list:
-                    chunk_size = 50
-                    embeds = []
-                    for i in range(0, len(alert_list), chunk_size):
-                        chunk = alert_list[i : i + chunk_size]
-                        embed = discord.Embed(
-                            title=(
-                                f"🚨 超速警報 ({self.alert_server}／{self.alert_guild} "
-                                f"≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})"
-                            ),
-                            color=0xff0000,
-                        )
-                        desc = ""
-                        if i == 0:
-                            desc += f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** 的前 {len(alert_list)} 名玩家：\n"
-                        desc += "```yaml\n"
-                        for p in chunk:
-                            name_padded = pad_text(p["name"], 14)
-                            desc += f"[{p['server']}] {name_padded} | Lv.{p['level']} | 時速: {p['speed']:,.0f}億\n"
-                        desc += "```"
-                        embed.description = desc
-                        if i + chunk_size >= len(alert_list):
-                            embed.set_footer(
-                                text=f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)"
-                            )
-                        embeds.append(embed)
+                else:
+                    embeds = self._build_overspeed_embeds(
+                        alert_list,
+                        record_count=len(records),
+                        time_now=time_now,
+                        minutes_diff=minutes_diff,
+                    )
                     sent = await self._send_overspeed_embeds(embeds)
                     if sent > 0:
                         try:
@@ -389,7 +368,7 @@ class ExpTracker(commands.Cog):
                             logger.error(f"Failed to persist overspeed dedupe: {e}")
                     else:
                         logger.warning(
-                            "超速警報送出失敗，未寫入 dedupe："
+                            "超速巡檢送出失敗，未寫入 dedupe："
                             f"{self.alert_server}/{self.alert_guild} "
                             f"interval={time_prev}→{time_now}"
                         )
@@ -403,6 +382,68 @@ class ExpTracker(commands.Cog):
         return await resolve_bot_channel(
             self.bot, channel_id, label="overspeed alert channel"
         )
+
+    def _build_overspeed_embeds(
+        self,
+        alert_list: list[dict],
+        *,
+        record_count: int,
+        time_now: str,
+        minutes_diff: float,
+    ) -> list[discord.Embed]:
+        """每輪都產生訊息；無超速者時送出綠色巡檢結果。"""
+        footer = f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)"
+        if not alert_list:
+            if record_count:
+                description = (
+                    f"本輪已比對 **{record_count}** 名玩家，"
+                    f"沒有人超過 **{self.SPEED_LIMIT:,.0f} 億／小時**。"
+                )
+                color = 0x2ECC71
+            else:
+                description = (
+                    f"本輪找不到「{self.alert_server}／{self.alert_guild}」"
+                    "可比較的玩家資料，請確認旅團名稱與榜單資料。"
+                )
+                color = 0xF1C40F
+            embed = discord.Embed(
+                title=f"✅ 10 分鐘超速巡檢 ({self.alert_server}／{self.alert_guild})",
+                description=description,
+                color=color,
+            )
+            embed.set_footer(text=footer)
+            return [embed]
+
+        embeds: list[discord.Embed] = []
+        chunk_size = 50
+        for i in range(0, len(alert_list), chunk_size):
+            chunk = alert_list[i : i + chunk_size]
+            desc = ""
+            if i == 0:
+                desc += (
+                    f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** "
+                    f"的前 {len(alert_list)} 名玩家：\n"
+                )
+            desc += "```yaml\n"
+            for player in chunk:
+                name_padded = pad_text(player["name"], 14)
+                desc += (
+                    f"[{player['server']}] {name_padded} | "
+                    f"Lv.{player['level']} | 時速: {player['speed']:,.0f}億\n"
+                )
+            desc += "```"
+            embed = discord.Embed(
+                title=(
+                    f"🚨 超速警報 ({self.alert_server}／{self.alert_guild} "
+                    f"≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})"
+                ),
+                description=desc,
+                color=0xFF0000,
+            )
+            if i + chunk_size >= len(alert_list):
+                embed.set_footer(text=footer)
+            embeds.append(embed)
+        return embeds
 
     async def _send_overspeed_embeds(self, embeds: list) -> int:
         """送出超速 embed；回傳成功次數（跨頻道合計）。失敗不寫 dedupe。"""
