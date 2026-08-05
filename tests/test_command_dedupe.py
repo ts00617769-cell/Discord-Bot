@@ -1,11 +1,11 @@
 """prefix 與 slash/hybrid 都有穩定 invoke ID；失敗時釋放 claim。"""
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import sqlite3
 
 from bot import claim_command_once, release_command_claim_on_failure
 from db.schema import apply_migrations

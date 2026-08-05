@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 import discord
@@ -14,6 +15,7 @@ from services.alert_dedupe import (
     release_alert_claim,
     try_claim_alert,
 )
+from services.db_lock import run_locked
 from services.discord_send import send_embeds_to_channels
 from services.exp_speed import collect_overspeed, pick_interval_baseline
 from services.text_display import pad_text
@@ -30,7 +32,11 @@ class OverspeedSettings(Protocol):
     alert_interval_minutes: int
     alert_speed_window_minutes: int
     SPEED_LIMIT: float
-    ALERT_CHANNEL_IDS: list[int]
+
+    # 唯讀：實作端（ExpTracker）以 property 從環境變數解析
+    @property
+    def ALERT_CHANNEL_IDS(self) -> list[int]:
+        ...
 
 
 def send_clear_patrol_enabled() -> bool:
@@ -121,6 +127,45 @@ def build_overspeed_embeds(
     return embeds
 
 
+async def _claim_channels(
+    read_db: Any,
+    write_db: Any,
+    channel_ids: Sequence[int],
+    dedupe_key: str,
+    created_at: str,
+) -> list[int]:
+    claimed: list[int] = []
+    for channel_id in channel_ids:
+        channel_key = f"{dedupe_key}|channel:{channel_id}"
+        try:
+            if await alert_already_sent(read_db, KIND_OVERSPEED, channel_key):
+                continue
+            if not await try_claim_alert(
+                write_db, KIND_OVERSPEED, channel_key, created_at=created_at
+            ):
+                continue
+        except sqlite3.DatabaseError as e:
+            logger.error(
+                "Overspeed dedupe claim failed for channel %s: %s", channel_id, e
+            )
+            continue
+        claimed.append(channel_id)
+    return claimed
+
+
+async def _release_channels(
+    write_db: Any, dedupe_key: str, channels: Sequence[int]
+) -> None:
+    for channel_id in channels:
+        channel_key = f"{dedupe_key}|channel:{channel_id}"
+        try:
+            await release_alert_claim(write_db, KIND_OVERSPEED, channel_key)
+        except sqlite3.DatabaseError as e:
+            logger.error(
+                "Failed to release overspeed claim for channel %s: %s", channel_id, e
+            )
+
+
 async def run_overspeed_patrol(
     bot,
     settings: OverspeedSettings,
@@ -190,40 +235,29 @@ async def run_overspeed_patrol(
         )
         return
 
-    dedupe_key = (
-        f"overspeed:{time_now}|{time_prev}|"
-        f"{settings.alert_server}|{settings.alert_guild}|{settings.alert_count}"
-    )
-    claimed_channels: list[int] = []
+    if not records:
+        # 旅團查無資料是設定問題，不需要每 10 分鐘重複提醒：以「小時」為
+        # 去重粒度，同一小時內最多送一次。
+        dedupe_key = (
+            f"overspeed_norecords:{str(time_now)[:13]}|"
+            f"{settings.alert_server}|{settings.alert_guild}"
+        )
+    else:
+        dedupe_key = (
+            f"overspeed:{time_now}|{time_prev}|"
+            f"{settings.alert_server}|{settings.alert_guild}|{settings.alert_count}"
+        )
     created_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-
-    async def _claim_channels() -> list[int]:
-        claimed: list[int] = []
-        for channel_id in settings.ALERT_CHANNEL_IDS:
-            channel_key = f"{dedupe_key}|channel:{channel_id}"
-            try:
-                if await alert_already_sent(read_db, KIND_OVERSPEED, channel_key):
-                    continue
-                if not await try_claim_alert(
-                    write_db, KIND_OVERSPEED, channel_key, created_at=created_at
-                ):
-                    continue
-            except sqlite3.DatabaseError as e:
-                logger.error(
-                    "Overspeed dedupe claim failed for channel %s: %s",
-                    channel_id,
-                    e,
-                )
-                continue
-            claimed.append(channel_id)
-        return claimed
-
     try:
-        if write_lock is not None:
-            async with write_lock:
-                claimed_channels = await _claim_channels()
-        else:
-            claimed_channels = await _claim_channels()
+        claimed_channels = await run_locked(
+            write_lock,
+            _claim_channels,
+            read_db,
+            write_db,
+            settings.ALERT_CHANNEL_IDS,
+            dedupe_key,
+            created_at,
+        )
     except sqlite3.DatabaseError as e:
         logger.error("Overspeed claim phase failed: %s", e)
         return
@@ -241,29 +275,15 @@ async def run_overspeed_patrol(
         embeds,
         label="overspeed alert channel",
     )
-    failed_channels = set(claimed_channels) - sent_channels
-
-    async def _release_failed() -> None:
-        for channel_id in failed_channels:
-            channel_key = f"{dedupe_key}|channel:{channel_id}"
-            try:
-                await release_alert_claim(write_db, KIND_OVERSPEED, channel_key)
-            except sqlite3.DatabaseError as e:
-                logger.error(
-                    "Failed to release overspeed claim for channel %s: %s",
-                    channel_id,
-                    e,
-                )
+    failed_channels = sorted(set(claimed_channels) - sent_channels)
 
     if failed_channels:
-        if write_lock is not None:
-            async with write_lock:
-                await _release_failed()
-        else:
-            await _release_failed()
+        await run_locked(
+            write_lock, _release_channels, write_db, dedupe_key, failed_channels
+        )
         logger.warning(
             "超速巡檢部分頻道送出失敗，已釋放該頻道 claim："
             f"{settings.alert_server}/{settings.alert_guild} "
             f"interval={time_prev}→{time_now} "
-            f"channels={sorted(failed_channels)}"
+            f"channels={failed_channels}"
         )

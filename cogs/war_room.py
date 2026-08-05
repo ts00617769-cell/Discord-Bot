@@ -3,7 +3,6 @@ import datetime
 import logging
 import sqlite3
 
-import discord
 from discord.ext import commands, tasks
 
 from db.connection import read_db
@@ -15,10 +14,10 @@ from db.schema import (
     prune_orphaned_player_profiles,
     rebuild_player_profiles,
 )
+from services.discord_send import send_text_to_channels
 from services.error_handler import (
     handle_command_error,
     parse_env_channel_id,
-    resolve_bot_channel,
 )
 from services.game_event_windows import transfer_calendar_health_notes
 from services.retention_cleanup import (
@@ -64,16 +63,12 @@ class WarRoom(commands.Cog):
         if self._ready_announced or not self.log_channel_id:
             return
         self._ready_announced = True
-        channel = await resolve_bot_channel(
-            self.bot, self.log_channel_id, label="war room log channel"
+        await send_text_to_channels(
+            self.bot,
+            [self.log_channel_id],
+            "🟢 **【系統廣播】** 戰情雷達已重新啟動，後勤監視與自動排程上線。",
+            label="war room log channel",
         )
-        if channel:
-            try:
-                await channel.send(
-                    "🟢 **【系統廣播】** 戰情雷達已重新啟動，後勤監視與自動排程上線。"
-                )
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send war room ready message: {e}")
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
@@ -241,10 +236,7 @@ class WarRoom(commands.Cog):
             except sqlite3.DatabaseError as e:
                 logger.warning(f"PRAGMA optimize 略過: {e}")
 
-            log_channel = await resolve_bot_channel(
-                self.bot, self.log_channel_id, label="war room log channel"
-            )
-            if log_channel and (
+            if self.log_channel_id and (
                 deleted_exp > 0
                 or deleted_middle > 0
                 or deleted_transfer > 0
@@ -272,7 +264,9 @@ class WarRoom(commands.Cog):
                     if deleted_middle
                     else ""
                 )
-                await log_channel.send(
+                await send_text_to_channels(
+                    self.bot,
+                    [self.log_channel_id],
                     f"🧹 **【資料庫維護】** 尋人保留窗外清理 "
                     f"`exp_history` {deleted_exp + deleted_middle} 筆{middle_note}、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆、"
@@ -280,7 +274,8 @@ class WarRoom(commands.Cog):
                     f"`alert_dedupe` {deleted_alert_dedupe} 筆、"
                     f"`cmd_dedupe` {deleted_cmd_dedupe} 筆"
                     f"{profile_note}。"
-                    f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
+                    f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}",
+                    label="war room log channel",
                 )
 
         except sqlite3.DatabaseError as e:
@@ -288,11 +283,13 @@ class WarRoom(commands.Cog):
                 await self.bot.db.rollback()
             except sqlite3.DatabaseError:
                 pass
-            log_channel = await resolve_bot_channel(
-                self.bot, self.log_channel_id, label="war room log channel"
-            )
-            if log_channel:
-                await log_channel.send(f"⚠️ **【資料庫清理異常】**\n```python\n{e}\n```")
+            if self.log_channel_id:
+                await send_text_to_channels(
+                    self.bot,
+                    [self.log_channel_id],
+                    f"⚠️ **【資料庫清理異常】**\n```python\n{e}\n```",
+                    label="war room log channel",
+                )
             logger.error(f"DB cleanup failed: {e}", exc_info=True)
 
     @db_cleanup_task.before_loop
@@ -306,11 +303,6 @@ class WarRoom(commands.Cog):
         if now.weekday() != 6:  # Sunday
             return
         if not self.log_channel_id:
-            return
-        channel = await resolve_bot_channel(
-            self.bot, self.log_channel_id, label="war room log channel"
-        )
-        if not channel:
             return
         try:
             stats = await self._gather_health_stats()
@@ -337,19 +329,24 @@ class WarRoom(commands.Cog):
             calendar_note = ""
             for line in transfer_calendar_health_notes():
                 calendar_note += f"\n{line}"
-            await channel.send(
+            await send_text_to_channels(
+                self.bot,
+                [self.log_channel_id],
                 f"📊 **【每週健康摘要】**\n"
                 f"> `exp_history`：{stats['exp_rows']:,} 筆\n"
                 f"> `transfer_alerts_log`：{stats['transfer_rows']:,} 筆\n"
                 f"> 最近快照：`{last}`（{stats['server_count_last']} 服）"
-                f"{vacuum_note}{denorm_note}{calendar_note}"
+                f"{vacuum_note}{denorm_note}{calendar_note}",
+                label="war room log channel",
             )
         except sqlite3.DatabaseError as e:
             logger.error(f"Health summary failed: {e}", exc_info=True)
-            try:
-                await channel.send(f"⚠️ **【健康摘要失敗】**\n```python\n{e}\n```")
-            except discord.HTTPException:
-                pass
+            await send_text_to_channels(
+                self.bot,
+                [self.log_channel_id],
+                f"⚠️ **【健康摘要失敗】**\n```python\n{e}\n```",
+                label="war room log channel",
+            )
 
     @health_summary_task.before_loop
     async def before_health_summary_task(self):

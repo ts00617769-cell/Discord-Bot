@@ -208,8 +208,11 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             """
         ) as cursor:
             assert await cursor.fetchone() is None
-        from services.alert_dedupe import KIND_TRANSFER, alert_already_sent
-        from services.alert_dedupe import transfer_channel_dedupe_key
+        from services.alert_dedupe import (
+            KIND_TRANSFER,
+            alert_already_sent,
+            transfer_channel_dedupe_key,
+        )
 
         key = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 7)
         assert await alert_already_sent(db, KIND_TRANSFER, key, check_legacy_settings=False) is False

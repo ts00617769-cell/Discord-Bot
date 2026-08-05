@@ -13,6 +13,7 @@ from typing import cast
 import discord
 from discord.ext import commands, tasks
 
+from services.discord_send import send_to_channel
 from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import TAIPEI, now_taipei, today_taipei_str
 
@@ -392,9 +393,13 @@ class QuizSystem(commands.Cog):
                 logger.info("今日測驗已被其他發布流程 claim，略過重複發布")
                 return
             self._start_poll(channel.id, current_date, question)
-            try:
-                await channel.send(embed=embed, view=SecretQuizView(question))
-            except discord.HTTPException:
+
+            async def _send(target) -> None:
+                await target.send(embed=embed, view=SecretQuizView(question))
+
+            if not await send_to_channel(
+                channel, send_fn=_send, label="quiz channel"
+            ):
                 self._reset_poll()
                 try:
                     await self.rollback_quiz_post(current_date, question)
@@ -403,7 +408,7 @@ class QuizSystem(commands.Cog):
                         "auto_post 發送失敗且無法回滾 quiz claim",
                         exc_info=True,
                     )
-                raise
+                logger.error("每日測驗發送失敗，已回滾 claim")
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
         except (discord.HTTPException, sqlite3.DatabaseError, OSError) as e:
@@ -433,10 +438,13 @@ class QuizSystem(commands.Cog):
                 return
 
             embed = self._build_reveal_embed("🕕 每日測驗開獎時間！", self.active_poll["data"])
-            try:
-                await channel.send(embed=embed)
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send quiz reveal: {e}")
+
+            async def _send(target) -> None:
+                await target.send(embed=embed)
+
+            await send_to_channel(
+                channel, send_fn=_send, label="quiz reveal channel"
+            )
             # 無論是否送達，結束本日盲投，避免整天卡住
             await self._finalize_reveal()
         except KeyError as e:

@@ -5,7 +5,6 @@ import logging
 import os
 import socket
 import sqlite3
-import sys
 from collections import Counter
 
 import aiohttp
@@ -33,6 +32,7 @@ from services.cmd_dedupe import (
     release_command_claim,
     try_claim_command,
 )
+from services.db_lock import run_locked
 from services.error_handler import handle_command_error
 from services.ranking_api import get_ranking_client
 
@@ -233,7 +233,12 @@ async def claim_command_once(ctx: commands.Context):
         logger.warning("指令無 message/interaction ID，無法執行去重")
         return
     host = socket.gethostname()
-    if not await try_claim_command(ctx.bot.db, invoke_id, host=host):
+    if not await try_claim_command(
+        ctx.bot.db,
+        invoke_id,
+        host=host,
+        write_lock=getattr(ctx.bot, "db_write_lock", None),
+    ):
         logger.warning(
             f"⚠️ 略過重複指令: invoke={invoke_id} cmd={getattr(ctx.command, 'name', '?')} "
             f"pid={os.getpid()} host={host}"
@@ -254,7 +259,12 @@ async def release_command_claim_on_failure(ctx: commands.Context):
     if invoke_id is None or not hasattr(ctx.bot, "db"):
         return
     try:
-        await release_command_claim(ctx.bot.db, invoke_id)
+        await run_locked(
+            getattr(ctx.bot, "db_write_lock", None),
+            release_command_claim,
+            ctx.bot.db,
+            invoke_id,
+        )
     except sqlite3.DatabaseError as e:
         logger.warning("釋放 cmd_dedupe claim 失敗: %s", e)
 

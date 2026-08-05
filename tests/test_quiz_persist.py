@@ -89,6 +89,8 @@ async def test_auto_post_rolls_back_claim_when_discord_send_fails():
         "cogs.quiz.resolve_bot_channel",
         new_callable=AsyncMock,
         return_value=channel,
+    ), patch(
+        "services.discord_send.asyncio.sleep", new_callable=AsyncMock
     ):
         await QuizSystem.auto_post_quiz.coro(cog)
 

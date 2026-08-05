@@ -20,6 +20,7 @@ from services.retention_windows import (
 from services.settings_prune import (
     PRUNE_ALERT_DEDUPE_SQL,
     PRUNE_DEDUPE_SQL,
+    PRUNE_TRANSFER_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
@@ -137,6 +138,11 @@ async def prune_secondary_async(
     ) as cursor:
         stats.deleted_alert_dedupe = cursor.rowcount or 0
 
+    async with db.execute(
+        PRUNE_TRANSFER_DEDUPE_SQL, (plan.transfer_cutoff,)
+    ) as cursor:
+        stats.deleted_alert_dedupe += cursor.rowcount or 0
+
     if prune_cmd_dedupe:
         cmd_cutoff = taipei_cutoff_str(cmd_dedupe_days)
         async with db.execute(
@@ -180,6 +186,9 @@ def prune_secondary_sync(
     if has_alert_dedupe:
         stats.deleted_alert_dedupe = conn.execute(
             PRUNE_ALERT_DEDUPE_SQL, (plan.retention_cutoff,)
+        ).rowcount
+        stats.deleted_alert_dedupe += conn.execute(
+            PRUNE_TRANSFER_DEDUPE_SQL, (plan.transfer_cutoff,)
         ).rowcount
     if prune_cmd_dedupe:
         stats.deleted_cmd_dedupe = prune_command_dedupe_sync(

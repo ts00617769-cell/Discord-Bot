@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -48,9 +47,9 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
+    build_bridge_thin_ranges,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
-    build_bridge_thin_ranges,
     exp_history_outside_keep_batch_sql,
     exp_history_outside_keep_sql,
     exp_history_transfer_middle_batch_sql,

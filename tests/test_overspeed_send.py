@@ -155,12 +155,30 @@ async def test_send_overspeed_embeds_tracks_success_per_channel():
     assert bad.send.await_count == 4  # 1 try + 3 retries on 5xx
 
 
+async def _seed_guild_snapshot(db, t_now: str, t_prev: str) -> None:
+    """讓 run_overspeed_patrol 取得到比對資料（records 非空）。"""
+    await db.executemany(
+        """
+        INSERT INTO exp_history
+        (record_time, player_name, server_name, level, exp, class_name,
+         subjugation_grade, guild_name)
+        VALUES (?, ?, ?, ?, ?, '戰士', 1, ?)
+        """,
+        [
+            (t_now, "Alice", "萊涅01", 90, 2e12, "狼團"),
+            (t_prev, "Alice", "萊涅01", 90, 1e12, "狼團"),
+        ],
+    )
+    await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_overspeed_claim_before_send_and_release_on_fail(tmp_path, monkeypatch):
     monkeypatch.setenv("EXP_ALERT_SEND_CLEAR", "1")
     db = await aiosqlite.connect(str(tmp_path / "os.db"))
     try:
         await apply_migrations(db)
+        await _seed_guild_snapshot(db, "2026-08-05 12:10:00", "2026-08-05 12:00:00")
         bot = MagicMock()
         settings = SimpleNamespace(
             alerts_enabled=True,
@@ -211,6 +229,7 @@ async def test_overspeed_claim_persists_when_send_ok(tmp_path, monkeypatch):
     db = await aiosqlite.connect(str(tmp_path / "os_ok.db"))
     try:
         await apply_migrations(db)
+        await _seed_guild_snapshot(db, "2026-08-05 12:10:00", "2026-08-05 12:00:00")
         bot = MagicMock()
         settings = SimpleNamespace(
             alerts_enabled=True,

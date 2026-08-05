@@ -28,8 +28,15 @@ WHERE (key LIKE 'overspeed:%' AND key < ?)
    OR (key LIKE 'boss_reminder:%' AND key < ?)
 """
 
-# alert_dedupe.created_at 為 SQL 時間字串，直接與 cutoff 比較
+# alert_dedupe.created_at 為 SQL 時間字串，直接與 cutoff 比較。
+# transfer kind 另用 transfer_alerts_log 的保留期，避免 per-channel claim
+# 先被清掉、pair log 卻還在（或反之）造成同一組轉服重複警報。
 PRUNE_ALERT_DEDUPE_SQL = """
 DELETE FROM alert_dedupe
-WHERE created_at < ?
+WHERE created_at < ? AND kind <> 'transfer'
+"""
+
+PRUNE_TRANSFER_DEDUPE_SQL = """
+DELETE FROM alert_dedupe
+WHERE created_at < ? AND kind = 'transfer'
 """
