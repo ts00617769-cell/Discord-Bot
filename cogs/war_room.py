@@ -43,6 +43,12 @@ from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipe
 logger = logging.getLogger(__name__)
 
 
+def _invalidate_player_search_cache() -> None:
+    from cogs.player_search import invalidate_search_cache
+
+    invalidate_search_cache()
+
+
 class WarRoom(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -242,19 +248,23 @@ class WarRoom(commands.Cog):
         total = 0
         batch_no = 0
         while True:
-            cursor = await self._execute_delete_with_busy_retry(sql, params)
-            n = cursor.rowcount or 0
-            await cursor.close()
-            await self.bot.db.commit()
+            async with self.bot.db_write_lock:
+                cursor = await self._execute_delete_with_busy_retry(sql, params)
+                n = cursor.rowcount or 0
+                await cursor.close()
+                await self.bot.db.commit()
             total += n
             batch_no += 1
             if batch_no % ONLINE_CHECKPOINT_EVERY_BATCHES == 0:
                 try:
-                    await self.bot.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    async with self.bot.db_write_lock:
+                        await self.bot.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 except sqlite3.DatabaseError as e:
                     logger.warning("%s checkpoint 略過: %s", label, e)
             if n < ONLINE_DELETE_BATCH_SIZE:
                 break
+            # 讓等待中的 10 分鐘快照優先取得寫入鎖，避免清庫長時間霸佔。
+            await asyncio.sleep(0.05)
         if total:
             logger.info("線上清庫 %s 刪除 %s 筆（%s 批）", label, total, batch_no)
         return total
@@ -306,55 +316,57 @@ class WarRoom(commands.Cog):
             backfilled = 0
             profile_touch = deleted_exp + deleted_middle
             if profile_touch > 0:
-                # 輕量：清掉已無歷史的履歷；大刪除量才全量 rebuild
-                pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
-                if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
-                    rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
-                else:
-                    backfilled = await backfill_player_profile_denorm(
-                        self.bot.db, batch_limit=1000
-                    )
+                async with self.bot.db_write_lock:
+                    # 輕量：清掉已無歷史的履歷；大刪除量才全量 rebuild
+                    pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
+                    if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
+                        rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
+                    else:
+                        backfilled = await backfill_player_profile_denorm(
+                            self.bot.db, batch_limit=1000
+                        )
 
-            async with self.bot.db.execute(
-                """
-                DELETE FROM transfer_alerts_log
-                WHERE alert_time < ?
-                """,
-                (transfer_alert_retention_cutoff(),),
-            ) as cursor:
-                deleted_transfer = cursor.rowcount or 0
+            async with self.bot.db_write_lock:
+                async with self.bot.db.execute(
+                    """
+                    DELETE FROM transfer_alerts_log
+                    WHERE alert_time < ?
+                    """,
+                    (transfer_alert_retention_cutoff(),),
+                ) as cursor:
+                    deleted_transfer = cursor.rowcount or 0
 
-            cutoff_date_only = (
-                retention_cutoff[:10] if len(retention_cutoff) >= 10 else today_taipei_str()
-            )
-            async with self.bot.db.execute(
-                PRUNE_DEDUPE_SQL,
-                (
-                    overspeed_prune_bound(retention_cutoff),
-                    boss_reminder_prune_bound(cutoff_date_only),
-                ),
-            ) as cursor:
-                deleted_settings = cursor.rowcount or 0
+                cutoff_date_only = (
+                    retention_cutoff[:10]
+                    if len(retention_cutoff) >= 10
+                    else today_taipei_str()
+                )
+                async with self.bot.db.execute(
+                    PRUNE_DEDUPE_SQL,
+                    (
+                        overspeed_prune_bound(retention_cutoff),
+                        boss_reminder_prune_bound(cutoff_date_only),
+                    ),
+                ) as cursor:
+                    deleted_settings = cursor.rowcount or 0
 
-            async with self.bot.db.execute(
-                PRUNE_ALERT_DEDUPE_SQL, (retention_cutoff,)
-            ) as cursor:
-                deleted_alert_dedupe = cursor.rowcount or 0
+                async with self.bot.db.execute(
+                    PRUNE_ALERT_DEDUPE_SQL, (retention_cutoff,)
+                ) as cursor:
+                    deleted_alert_dedupe = cursor.rowcount or 0
 
-            cmd_cutoff = taipei_cutoff_str(2)
-            async with self.bot.db.execute(
-                "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
-                (cmd_cutoff,),
-            ) as cursor:
-                deleted_cmd_dedupe = cursor.rowcount or 0
+                cmd_cutoff = taipei_cutoff_str(2)
+                async with self.bot.db.execute(
+                    "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
+                    (cmd_cutoff,),
+                ) as cursor:
+                    deleted_cmd_dedupe = cursor.rowcount or 0
 
-            await self.bot.db.commit()
+                await self.bot.db.commit()
             try:
-                from cogs.player_search import invalidate_search_cache
-
-                invalidate_search_cache()
+                _invalidate_player_search_cache()
             except ImportError:
-                pass
+                logger.warning("清庫後無法載入尋人 cache invalidator")
             try:
                 await self.bot.db.execute("PRAGMA optimize")
             except sqlite3.DatabaseError as e:

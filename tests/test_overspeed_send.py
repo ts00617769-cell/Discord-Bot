@@ -76,7 +76,7 @@ async def test_send_overspeed_embeds_counts_success():
         ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[111]
     ):
         sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
-    assert sent == 1
+    assert sent == {111}
     channel.send.assert_awaited_once()
     bot.fetch_channel.assert_not_awaited()
 
@@ -95,7 +95,7 @@ async def test_send_overspeed_embeds_fetch_fallback():
         ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[222]
     ):
         sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
-    assert sent == 1
+    assert sent == {222}
     bot.fetch_channel.assert_awaited_once_with(222)
 
 
@@ -114,4 +114,25 @@ async def test_send_overspeed_embeds_failure_returns_zero():
         ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[333]
     ):
         sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
-    assert sent == 0
+    assert sent == set()
+
+
+@pytest.mark.asyncio
+async def test_send_overspeed_embeds_tracks_success_per_channel():
+    bot = MagicMock()
+    good = MagicMock()
+    good.send = AsyncMock()
+    bad = MagicMock()
+    response = MagicMock(status=500)
+    bad.send = AsyncMock(side_effect=discord.HTTPException(response, "fail"))
+    bot.get_channel.side_effect = lambda channel_id: {1: good, 2: bad}[channel_id]
+
+    cog = ExpTracker.__new__(ExpTracker)
+    cog.bot = bot
+    sent = await cog._send_overspeed_embeds(
+        [discord.Embed(title="t")], channel_ids=[1, 2]
+    )
+
+    assert sent == {1}
+    good.send.assert_awaited_once()
+    bad.send.assert_awaited_once()

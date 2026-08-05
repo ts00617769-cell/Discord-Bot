@@ -230,7 +230,7 @@ class QuizSystem(commands.Cog):
                 logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
 
     async def get_unrepeated_quiz(self):
-        """抽出尚未用過的題目（不寫 history；成功發布後再 mark_quiz_used）。"""
+        """抽出尚未用過的題目；發布 claim 成功後才寫入 history。"""
         async with self.bot.db.execute("SELECT quiz_id FROM quiz_history") as cursor:
             used_ids = [row[0] for row in await cursor.fetchall()]
 
@@ -247,30 +247,18 @@ class QuizSystem(commands.Cog):
 
         return random.choice(available)
 
-    async def mark_quiz_used(self, question: dict) -> None:
+    async def claim_quiz_post(self, channel_id, date_str, question) -> bool:
+        """發布前以單一交易 claim 今日測驗；同日已有 active 時回 False。"""
         today_str = today_taipei_str()
-        await self.bot.db.execute(
-            "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)",
-            (question["title"], today_str),
-        )
-        await self.bot.db.commit()
-
-    async def save_active_status(self, channel_id, date_str, question):
-        await self.bot.db.execute("DELETE FROM quiz_votes")
-        await self.bot.db.execute(
-            """
-            INSERT OR REPLACE INTO active_quiz_status (id, is_active, quiz_id, channel_id, date_str)
-            VALUES (1, 1, ?, ?, ?)
-            """,
-            (question["title"], str(channel_id), date_str),
-        )
-        await self.bot.db.commit()
-
-    async def persist_posted_quiz(self, channel_id, date_str, question) -> None:
-        """同一交易寫入 active + history，避免題目被標記卻無 active 列。"""
-        today_str = today_taipei_str()
-        await self.bot.db.execute("BEGIN")
+        await self.bot.db.execute("BEGIN IMMEDIATE")
         try:
+            async with self.bot.db.execute(
+                "SELECT is_active, date_str FROM active_quiz_status WHERE id = 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row and row[0] == 1 and row[1] == date_str:
+                await self.bot.db.rollback()
+                return False
             await self.bot.db.execute("DELETE FROM quiz_votes")
             await self.bot.db.execute(
                 """
@@ -283,6 +271,28 @@ class QuizSystem(commands.Cog):
             await self.bot.db.execute(
                 "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)",
                 (question["title"], today_str),
+            )
+            await self.bot.db.commit()
+            return True
+        except Exception:
+            await self.bot.db.rollback()
+            raise
+
+    async def rollback_quiz_post(self, date_str: str, question: dict) -> None:
+        """Discord 發送失敗時，只撤銷本次 claim 與 history。"""
+        await self.bot.db.execute("BEGIN IMMEDIATE")
+        try:
+            await self.bot.db.execute(
+                """
+                UPDATE active_quiz_status SET is_active = 0
+                WHERE id = 1 AND date_str = ? AND quiz_id = ?
+                """,
+                (date_str, question["title"]),
+            )
+            await self.bot.db.execute("DELETE FROM quiz_votes")
+            await self.bot.db.execute(
+                "DELETE FROM quiz_history WHERE quiz_id = ? AND used_date = ?",
+                (question["title"], today_taipei_str()),
             )
             await self.bot.db.commit()
         except Exception:
@@ -307,9 +317,25 @@ class QuizSystem(commands.Cog):
         self.active_poll = _empty_poll()
 
     async def _finalize_reveal(self) -> None:
-        """結束盲投（無論是否成功送到頻道）。"""
-        await self.clear_active_status()
+        """重試持久化結束狀態；最終仍失敗時至少關閉記憶體投票。"""
+        last_error: sqlite3.DatabaseError | None = None
+        for attempt in range(3):
+            try:
+                await self.clear_active_status()
+                self._reset_poll()
+                return
+            except sqlite3.DatabaseError as e:
+                last_error = e
+                try:
+                    await self.bot.db.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
         self._reset_poll()
+        logger.critical("Quiz finalize 連續失敗，已停止記憶體投票", exc_info=last_error)
+        assert last_error is not None
+        raise last_error
 
     def _build_reveal_embed(self, title: str, question: dict) -> discord.Embed:
         embed = discord.Embed(
@@ -362,10 +388,22 @@ class QuizSystem(commands.Cog):
                 color=0x3498DB,
             )
             embed.set_footer(text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 準時公開！")
-            # 先成功送出再持久化；active + history 同一交易
-            await channel.send(embed=embed, view=SecretQuizView(question))
-            await self.persist_posted_quiz(channel.id, current_date, question)
+            if not await self.claim_quiz_post(channel.id, current_date, question):
+                logger.info("今日測驗已被其他發布流程 claim，略過重複發布")
+                return
             self._start_poll(channel.id, current_date, question)
+            try:
+                await channel.send(embed=embed, view=SecretQuizView(question))
+            except discord.HTTPException:
+                self._reset_poll()
+                try:
+                    await self.rollback_quiz_post(current_date, question)
+                except sqlite3.DatabaseError:
+                    logger.critical(
+                        "auto_post 發送失敗且無法回滾 quiz claim",
+                        exc_info=True,
+                    )
+                raise
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
         except (discord.HTTPException, sqlite3.DatabaseError, OSError) as e:
@@ -450,15 +488,20 @@ class QuizSystem(commands.Cog):
         embed.set_footer(
             text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 公開（可用 !測試開獎 提早結算）。"
         )
+        if not await self.claim_quiz_post(ctx.channel.id, current_date, question):
+            await ctx.send("⚠️ 今天的測驗已經由其他發布流程建立。")
+            return
+        self._start_poll(ctx.channel.id, current_date, question)
         try:
             await ctx.send(embed=embed, view=SecretQuizView(question))
         except discord.HTTPException as e:
+            self._reset_poll()
+            try:
+                await self.rollback_quiz_post(current_date, question)
+            except sqlite3.DatabaseError:
+                logger.critical("force_post 發送失敗且無法回滾 claim", exc_info=True)
             logger.error(f"force_post send failed: {e}")
             await ctx.send("❌ 測驗訊息發送失敗，請稍後再試。")
-            return
-
-        await self.persist_posted_quiz(ctx.channel.id, current_date, question)
-        self._start_poll(ctx.channel.id, current_date, question)
 
     @commands.command(name="測試開獎")
     @commands.is_owner()

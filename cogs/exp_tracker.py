@@ -89,7 +89,7 @@ class ExpTracker(commands.Cog):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     async def cog_load(self):
-        # schema 已在 bot.setup_hook 套用；!reload 時不必再 migrate
+        # schema 已在 bot.setup_hook 套用
         await self._load_alert_settings()
         if not self.ALERT_CHANNEL_IDS:
             logger.warning(
@@ -270,10 +270,11 @@ class ExpTracker(commands.Cog):
                     continue
                 await asyncio.sleep(0.5)
 
-            await persist_snapshot_round(
-                getattr(self.bot, "snapshot_db", self.bot.db),
-                round_batches,
-            )
+            async with self.bot.db_write_lock:
+                await persist_snapshot_round(
+                    getattr(self.bot, "snapshot_db", self.bot.db),
+                    round_batches,
+                )
             _invalidate_search_cache()
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
             if not snapshot_complete:
@@ -355,12 +356,22 @@ class ExpTracker(commands.Cog):
                     f"overspeed:{time_now}|{time_prev}|"
                     f"{self.alert_server}|{self.alert_guild}|{self.alert_count}"
                 )
-                try:
-                    already_sent = await self._setting_exists(dedupe_key)
-                except sqlite3.DatabaseError as e:
-                    logger.error(f"Overspeed dedupe check failed: {e}")
-                    already_sent = True
-                if already_sent:
+                pending_channels: list[int] = []
+                for channel_id in self.ALERT_CHANNEL_IDS:
+                    channel_key = f"{dedupe_key}|channel:{channel_id}"
+                    try:
+                        already_sent = await self._setting_exists(channel_key)
+                    except sqlite3.DatabaseError as e:
+                        # 去重讀取失敗時 fail-open，避免整輪巡檢靜默遺失。
+                        logger.error(
+                            "Overspeed dedupe check failed for channel %s: %s",
+                            channel_id,
+                            e,
+                        )
+                        already_sent = False
+                    if not already_sent:
+                        pending_channels.append(channel_id)
+                if not pending_channels:
                     logger.info(
                         f"略過重複超速巡檢 interval={time_prev}→{time_now} "
                         f"server={self.alert_server} guild={self.alert_guild}"
@@ -372,17 +383,27 @@ class ExpTracker(commands.Cog):
                         time_now=time_now,
                         minutes_diff=minutes_diff,
                     )
-                    sent = await self._send_overspeed_embeds(embeds)
-                    if sent > 0:
+                    sent_channels = await self._send_overspeed_embeds(
+                        embeds, channel_ids=pending_channels
+                    )
+                    for channel_id in sent_channels:
                         try:
-                            await self._mark_setting(dedupe_key)
+                            await self._mark_setting(
+                                f"{dedupe_key}|channel:{channel_id}"
+                            )
                         except sqlite3.DatabaseError as e:
-                            logger.error(f"Failed to persist overspeed dedupe: {e}")
-                    else:
+                            logger.error(
+                                "Failed to persist overspeed dedupe for channel %s: %s",
+                                channel_id,
+                                e,
+                            )
+                    failed_channels = set(pending_channels) - sent_channels
+                    if failed_channels:
                         logger.warning(
-                            "超速巡檢送出失敗，未寫入 dedupe："
+                            "超速巡檢部分頻道送出失敗，未寫入該頻道 dedupe："
                             f"{self.alert_server}/{self.alert_guild} "
-                            f"interval={time_prev}→{time_now}"
+                            f"interval={time_prev}→{time_now} "
+                            f"channels={sorted(failed_channels)}"
                         )
 
         if run_transfers:
@@ -457,20 +478,27 @@ class ExpTracker(commands.Cog):
             embeds.append(embed)
         return embeds
 
-    async def _send_overspeed_embeds(self, embeds: list) -> int:
-        """送出超速 embed；回傳成功次數（跨頻道合計）。失敗不寫 dedupe。"""
-        sent = 0
-        for embed in embeds:
-            for channel_id in self.ALERT_CHANNEL_IDS:
-                channel = await self._resolve_alert_channel(channel_id)
-                if channel is None:
-                    continue
-                try:
+    async def _send_overspeed_embeds(
+        self,
+        embeds: list,
+        *,
+        channel_ids: list[int] | None = None,
+    ) -> set[int]:
+        """每個頻道完整送出全部 embeds 才列為成功。"""
+        successful: set[int] = set()
+        targets = channel_ids if channel_ids is not None else self.ALERT_CHANNEL_IDS
+        for channel_id in targets:
+            channel = await self._resolve_alert_channel(channel_id)
+            if channel is None:
+                continue
+            try:
+                for embed in embeds:
                     await channel.send(embed=embed)
-                    sent += 1
-                except discord.HTTPException as e:
-                    logger.error(f"Failed to send alert to {channel_id}: {e}")
-        return sent
+            except discord.HTTPException as e:
+                logger.error(f"Failed to send alert to {channel_id}: {e}")
+            else:
+                successful.add(channel_id)
+        return successful
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
         """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""

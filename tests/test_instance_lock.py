@@ -72,3 +72,37 @@ async def test_heartbeat_closes_after_consecutive_db_errors():
 
     assert bot._heartbeat_fail_count >= PrasiaBot.HEARTBEAT_FAIL_LIMIT
     bot.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_closes_immediately_when_lease_is_lost():
+    bot = PrasiaBot.__new__(PrasiaBot)
+    bot.instance_db = object()
+    bot.instance_holder_id = "host:1"
+    bot._heartbeat_fail_count = 0
+    bot.close = AsyncMock()
+
+    with patch(
+        "bot.refresh_instance_lock", new_callable=AsyncMock, return_value=False
+    ):
+        await PrasiaBot.instance_heartbeat.coro(bot)
+
+    bot.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_unexpected_error_fails_closed():
+    bot = PrasiaBot.__new__(PrasiaBot)
+    bot.instance_db = object()
+    bot.instance_holder_id = "host:1"
+    bot._heartbeat_fail_count = 0
+    bot.close = AsyncMock()
+
+    with patch(
+        "bot.refresh_instance_lock",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("unexpected"),
+    ):
+        await PrasiaBot.instance_heartbeat.coro(bot)
+
+    bot.close.assert_awaited_once()

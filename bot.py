@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import logging
 import os
@@ -7,7 +8,6 @@ import socket
 import sqlite3
 import sys
 from collections import Counter
-from typing import Any, cast
 
 import aiohttp
 import discord
@@ -46,36 +46,6 @@ CRITICAL_EXTENSIONS = frozenset(
 
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
 _lock_fp = None
-
-
-def _pid_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            # windll 僅存在於 Windows；CI（Linux）mypy 會報 attr-defined
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-            )
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        except OSError:
-            return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def acquire_singleton_lock():
@@ -145,6 +115,8 @@ class PrasiaBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.instance_holder_id = make_holder_id()
         self._heartbeat_fail_count = 0
+        # 僅協調本程序內的大型寫入；heartbeat 保持獨立，避免 lease 被清庫拖住。
+        self.db_write_lock = asyncio.Lock()
 
     HEARTBEAT_FAIL_LIMIT = 3
 
@@ -171,6 +143,12 @@ class PrasiaBot(commands.Bot):
                     "共享 DB heartbeat 連續失敗，立即關閉避免 split-brain"
                 )
                 await self.close()
+        except Exception:
+            logger.critical(
+                "共享 DB heartbeat 發生非預期錯誤，立即關閉避免 split-brain",
+                exc_info=True,
+            )
+            await self.close()
 
     async def setup_hook(self):
         try:
@@ -309,6 +287,16 @@ def invoke_dedupe_id(ctx: commands.Context) -> int | None:
     return int(message_id) if message_id is not None else None
 
 
+async def prune_command_dedupe(db, *, days: int = 2) -> int:
+    cutoff = taipei_cutoff_str(days)
+    cursor = await db.execute(
+        "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
+        (cutoff,),
+    )
+    await db.commit()
+    return int(cursor.rowcount or 0)
+
+
 @bot.before_invoke
 async def claim_command_once(ctx: commands.Context):
     """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
@@ -438,25 +426,9 @@ async def on_ready():
         logger.warning(f"無法更新 presence: {e}")
 
     try:
-        cutoff = taipei_cutoff_str(2)
-        await bot.db.execute(
-            "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
-            (cutoff,),
-        )
-        await bot.db.commit()
+        await prune_command_dedupe(bot.db)
     except sqlite3.DatabaseError as e:
         logger.warning(f"清理 cmd_dedupe 失敗: {e}")
-
-@bot.command(name="reload", hidden=True)
-@cast(Any, commands.is_owner())
-async def reload_cog(ctx, extension: str):
-    """(開發者專用) 重新載入特定的模組，不用重開機器人！"""
-    try:
-        await bot.reload_extension(f"cogs.{extension}")
-        await ctx.send(f"✅ 模組 `cogs.{extension}` 重新載入成功！")
-    except commands.ExtensionError as e:
-        await ctx.send(f"❌ 重新載入失敗：\n```py\n{e}\n```")
-
 
 if __name__ == "__main__":
     if not TOKEN:

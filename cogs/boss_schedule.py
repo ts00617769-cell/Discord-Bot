@@ -53,6 +53,13 @@ class BossSchedule(commands.Cog):
         await self.bot.db.commit()
         return (cursor.rowcount or 0) == 1
 
+    async def _release_reminder_claim(self, key: str) -> None:
+        await self.bot.db.execute(
+            "DELETE FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
+            ("boss_reminder", key),
+        )
+        await self.bot.db.commit()
+
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):
         if not self.REMINDER_CHANNEL_ID:
@@ -85,6 +92,10 @@ class BossSchedule(commands.Cog):
         )
         if not channel:
             logger.warning(f"Boss reminder channel {self.REMINDER_CHANNEL_ID} not found")
+            try:
+                await self._release_reminder_claim(dedupe_key)
+            except sqlite3.DatabaseError:
+                logger.critical("Boss reminder 頻道不存在且無法釋放 claim", exc_info=True)
             return
         try:
             time_str = "點、".join(map(str, GAP_BOSS_SCHEDULE[weekday])) + "點"
@@ -99,6 +110,10 @@ class BossSchedule(commands.Cog):
             await channel.send(content="@everyone", embed=embed)
         except discord.HTTPException as e:
             logger.error(f"Failed to send boss reminder: {e}")
+            try:
+                await self._release_reminder_claim(dedupe_key)
+            except sqlite3.DatabaseError:
+                logger.critical("Boss reminder 發送失敗且無法釋放 claim", exc_info=True)
 
     @auto_boss_reminder.before_loop
     async def before_auto_boss_reminder(self):

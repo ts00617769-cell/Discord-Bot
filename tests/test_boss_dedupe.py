@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import aiosqlite
+import discord
 import pytest
 
 from cogs.boss_schedule import BossSchedule
@@ -61,6 +62,23 @@ async def test_try_claim_reminder_is_exclusive(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_release_reminder_claim_allows_retry(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "release.db")
+    try:
+        await apply_migrations(db)
+        bot = MagicMock()
+        bot.db = db
+        cog = BossSchedule(bot)
+        key = "boss_reminder:2026-08-05:20"
+        assert await cog._try_claim_reminder(key) is True
+        await cog._release_reminder_claim(key)
+        assert await cog._already_reminded(key) is False
+        assert await cog._try_claim_reminder(key) is True
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_boss_reminder_claims_before_send():
     bot = MagicMock()
     bot.db = MagicMock()
@@ -108,3 +126,38 @@ async def test_boss_reminder_claims_before_send():
 
     assert order == ["claim", "send"]
     assert channel.send.await_args.kwargs.get("content") == "@everyone"
+
+
+@pytest.mark.asyncio
+async def test_boss_reminder_releases_claim_when_send_fails():
+    bot = MagicMock()
+    channel = MagicMock()
+    response = MagicMock(status=500)
+    channel.send = AsyncMock(side_effect=discord.HTTPException(response, "fail"))
+    cog = BossSchedule(bot)
+    weekday = next(iter(GAP_BOSS_SCHEDULE))
+    hour = GAP_BOSS_SCHEDULE[weekday][0]
+
+    with patch.object(
+        BossSchedule, "REMINDER_CHANNEL_ID", new_callable=PropertyMock, return_value=1
+    ), patch("cogs.boss_schedule.now_taipei") as mock_now, patch(
+        "cogs.boss_schedule.resolve_bot_channel",
+        new_callable=AsyncMock,
+        return_value=channel,
+    ), patch.object(
+        cog, "_already_reminded", new_callable=AsyncMock, return_value=False
+    ), patch.object(
+        cog, "_try_claim_reminder", new_callable=AsyncMock, return_value=True
+    ), patch.object(
+        cog, "_release_reminder_claim", new_callable=AsyncMock
+    ) as release:
+        import datetime
+
+        from services.timeutil import TAIPEI
+
+        base = datetime.datetime(2026, 8, 3, hour, 0, tzinfo=TAIPEI)
+        target = base + datetime.timedelta(days=(weekday - base.weekday()) % 7)
+        mock_now.return_value = target - datetime.timedelta(minutes=10)
+        await cog.auto_boss_reminder()
+
+    release.assert_awaited_once()
