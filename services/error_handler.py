@@ -186,3 +186,79 @@ def log_command_error(ctx, command_name: str, exception: Exception):
         f"{type(exception).__name__}: {exception}\n"
         f"Traceback:\n{traceback.format_exc()}"
     )
+
+
+async def handle_command_error(
+    ctx,
+    error,
+    *,
+    log_channel_id: int | None = None,
+    bot=None,
+) -> bool:
+    """統一處理指令錯誤（WarRoom 與 bot 後備共用）。回傳 True 表示已處理。"""
+    if isinstance(error, commands.CheckFailure) and str(error) in (
+        "duplicate_invoke",
+        "channel_denied",
+    ):
+        return True
+
+    if isinstance(error, commands.CommandOnCooldown):
+        try:
+            await ctx.send(
+                f"⏳ 指令冷卻中，請再等 **{error.retry_after:.0f}** 秒。",
+                delete_after=10,
+            )
+        except discord.HTTPException:
+            pass
+        return True
+    if isinstance(error, commands.MaxConcurrencyReached):
+        try:
+            await ctx.send(
+                "⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10
+            )
+        except discord.HTTPException:
+            pass
+        return True
+    if isinstance(error, commands.UserInputError):
+        try:
+            usage = getattr(ctx.command, "help", None) or "請檢查指令參數。"
+            await ctx.send(f"❌ 參數錯誤。{usage}", delete_after=15)
+        except discord.HTTPException:
+            pass
+        return True
+
+    if isinstance(
+        error,
+        (commands.CommandNotFound, commands.NotOwner, commands.CheckFailure),
+    ):
+        return True
+
+    logger.error(
+        f"Command error in {getattr(ctx.command, 'name', '?')}: {error}\n"
+        f"{''.join(traceback.format_exception(type(error), error, error.__traceback__))}"
+    )
+
+    try:
+        await ctx.send("❌ 指令執行失敗，已記錄。", delete_after=15)
+    except discord.HTTPException:
+        pass
+
+    if not log_channel_id or bot is None:
+        return True
+
+    channel = await resolve_bot_channel(
+        bot, log_channel_id, label="war room log channel"
+    )
+    if channel:
+        error_msg = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        cmd_name = getattr(ctx.command, "qualified_name", "unknown")
+        try:
+            await channel.send(
+                f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`!{cmd_name}`\n"
+                f"```python\n{error_msg[:1900]}\n```"
+            )
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send war room error report: {e}")
+    return True

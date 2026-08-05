@@ -50,19 +50,6 @@ async def lookup_alerted_pairs(
     return found
 
 
-async def player_present_at(
-    db, record_time: str, player_name: str, server_name: str
-) -> bool:
-    async with db.execute(
-        """
-        SELECT 1 FROM exp_history
-        WHERE record_time = ? AND player_name = ? AND server_name = ?
-        """,
-        (record_time, player_name, server_name),
-    ) as cursor:
-        return await cursor.fetchone() is not None
-
-
 async def players_present_at_times(
     db,
     miss_times: Sequence[str],

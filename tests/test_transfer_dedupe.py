@@ -168,25 +168,28 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             "old_guild": "",
             "new_guild": "",
         }
-        cog._get_potential_transfers = AsyncMock(return_value=[row])
         cog._send_transfer_alert = AsyncMock(return_value=0)
 
         with patch(
-            "cogs.exp_tracker.is_transfer_active_period", return_value=False
+            "services.transfer_alert_runner.is_transfer_active_period", return_value=False
         ), patch(
-            "cogs.exp_tracker.rank_transfer_candidates", return_value=[row]
+            "services.transfer_alert_runner.rank_transfer_candidates", return_value=[row]
         ), patch(
-            "cogs.exp_tracker.lookup_alerted_pairs",
+            "services.transfer_alert_runner.lookup_alerted_pairs",
             new_callable=AsyncMock,
             return_value=set(),
         ), patch(
-            "cogs.exp_tracker.filter_viable_ranked",
+            "services.transfer_alert_runner.filter_viable_ranked",
             new_callable=AsyncMock,
             return_value=[row],
         ), patch(
-            "cogs.exp_tracker.pick_unique_pairs", return_value=[pair]
+            "services.transfer_alert_runner.pick_unique_pairs", return_value=[pair]
         ), patch(
-            "cogs.exp_tracker.prune_stale_missing", new_callable=AsyncMock
+            "services.transfer_alert_runner.prune_stale_missing", new_callable=AsyncMock
+        ), patch(
+            "services.transfer_alert_runner.fetch_potential_transfers",
+            new_callable=AsyncMock,
+            return_value=[row],
         ):
             await cog.check_for_transfers(
                 "2026-08-05 12:00:00", "2026-08-05 11:50:00"

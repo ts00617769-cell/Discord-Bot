@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import logging
 import os
 import socket
@@ -15,19 +14,23 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from db import apply_migrations, connect_db, connect_db_ro
-from db.connection import DatabaseIntegrityError, resolve_db_path
+from db.connection import DatabaseIntegrityError
 from db.instance_lock import (
     make_holder_id,
     refresh_instance_lock,
     release_instance_lock,
     try_acquire_instance_lock,
 )
+from db.paths import resolve_db_path
 from db.schema import (
     StartupReadinessError,
     ensure_startup_db_readiness,
 )
+from db.singleton_lock import acquire_process_lock
+from services.cmd_dedupe import prune_command_dedupe
+from services.error_handler import handle_command_error
 from services.ranking_api import get_ranking_client
-from services.timeutil import now_naive_taipei, taipei_cutoff_str
+from services.timeutil import now_naive_taipei
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,69 +46,6 @@ CRITICAL_EXTENSIONS = frozenset(
         "cogs.war_room",
     }
 )
-
-LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
-_lock_fp = None
-
-
-def acquire_singleton_lock():
-    """以作業系統檔案鎖阻擋同一台機器的第二個實例。"""
-    global _lock_fp
-    os.makedirs(os.path.dirname(LOCK_PATH) or ".", exist_ok=True)
-    _lock_fp = open(LOCK_PATH, "a+", encoding="utf-8")
-    try:
-        if os.name == "nt":
-            import msvcrt
-            _lock_fp.seek(0)
-            try:
-                msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                print("❌ 偵測到本機已有機器人實例正在執行（檔案鎖）。")
-                print("   請先結束舊的 python 程序，否則指令會回覆兩次。")
-                print("   可執行: taskkill /IM python.exe /F")
-                sys.exit(1)
-        else:
-            import fcntl
-            try:
-                fcntl.flock(_lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                print("❌ 偵測到本機已有機器人實例正在執行（檔案鎖）。")
-                print("   請先結束舊程序，否則指令會回覆兩次。")
-                sys.exit(1)
-    except OSError as e:
-        # 無法取得獨占鎖時直接拒絕啟動，避免僅靠 PID 檢查造成雙開
-        print(f"❌ 無法取得本機單例鎖，拒絕啟動: {e}")
-        print("   請確認 .bot.lock 可寫入，並結束其他 python 實例後重試。")
-        sys.exit(1)
-
-    _lock_fp.seek(0)
-    _lock_fp.truncate()
-    _lock_fp.write(str(os.getpid()))
-    _lock_fp.flush()
-
-    def _release():
-        global _lock_fp
-        try:
-            if _lock_fp:
-                if os.name == "nt":
-                    try:
-                        import msvcrt
-                        _lock_fp.seek(0)
-                        msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
-                    except OSError:
-                        pass
-                else:
-                    try:
-                        import fcntl
-                        fcntl.flock(_lock_fp.fileno(), fcntl.LOCK_UN)
-                    except OSError:
-                        pass
-                _lock_fp.close()
-                _lock_fp = None
-        except OSError:
-            pass
-
-    atexit.register(_release)
 
 
 class PrasiaBot(commands.Bot):
@@ -287,16 +227,6 @@ def invoke_dedupe_id(ctx: commands.Context) -> int | None:
     return int(message_id) if message_id is not None else None
 
 
-async def prune_command_dedupe(db, *, days: int = 2) -> int:
-    cutoff = taipei_cutoff_str(days)
-    cursor = await db.execute(
-        "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
-        (cutoff,),
-    )
-    await db.commit()
-    return int(cursor.rowcount or 0)
-
-
 @bot.before_invoke
 async def claim_command_once(ctx: commands.Context):
     """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
@@ -346,54 +276,10 @@ async def release_command_claim_on_failure(ctx: commands.Context):
 
 @bot.event
 async def on_command_error(ctx, error):
-    """去重略過；WarRoom 在場時由其處理；否則在此回覆使用者。"""
-    if isinstance(error, commands.CheckFailure) and str(error) in (
-        "duplicate_invoke",
-        "channel_denied",
-    ):
-        return
-    if isinstance(error, (commands.CommandNotFound, commands.NotOwner)):
-        return
-    # 冷卻／併發／參數錯誤由 WarRoom.on_command_error 統一回覆，避免雙重訊息
-    if isinstance(
-        error,
-        (
-            commands.CommandOnCooldown,
-            commands.MaxConcurrencyReached,
-            commands.UserInputError,
-        ),
-    ):
-        if bot.get_cog("WarRoom") is not None:
-            return
-        # WarRoom 未載入時仍給使用者簡短回覆
-        try:
-            if isinstance(error, commands.CommandOnCooldown):
-                await ctx.send(
-                    f"⏳ 指令冷卻中，請再等 **{error.retry_after:.0f}** 秒。",
-                    delete_after=10,
-                )
-            elif isinstance(error, commands.MaxConcurrencyReached):
-                await ctx.send(
-                    "⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10
-                )
-            else:
-                usage = getattr(ctx.command, "help", None) or "請檢查指令參數。"
-                await ctx.send(f"❌ 參數錯誤。{usage}", delete_after=15)
-        except discord.HTTPException:
-            pass
-        return
-
+    """WarRoom 在場時由其處理；否則在此回覆使用者。"""
     if bot.get_cog("WarRoom") is not None:
         return
-
-    logger.error(
-        f"Command error in {getattr(ctx.command, 'name', '?')}: {error}",
-        exc_info=error,
-    )
-    try:
-        await ctx.send("❌ 指令執行失敗，已記錄。", delete_after=15)
-    except discord.HTTPException:
-        pass
+    await handle_command_error(ctx, error)
 
 
 @bot.event
@@ -434,7 +320,7 @@ if __name__ == "__main__":
     if not TOKEN:
         print("❌ 未設定 DISCORD_TOKEN！請檢查 .env 檔案。")
     else:
-        acquire_singleton_lock()
+        acquire_process_lock()
         print(f"🔒 單例鎖已取得 (PID {os.getpid()} @ {socket.gethostname()})")
         print(
             "⚠️ 若指令仍回兩次：代表另一台機器/雲端也在跑同一個 Token，"

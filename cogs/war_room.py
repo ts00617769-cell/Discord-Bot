@@ -2,7 +2,6 @@ import asyncio
 import datetime
 import logging
 import sqlite3
-import traceback
 
 import discord
 from discord.ext import commands, tasks
@@ -16,37 +15,26 @@ from db.schema import (
     prune_orphaned_player_profiles,
     rebuild_player_profiles,
 )
-from services.error_handler import parse_env_channel_id, resolve_bot_channel
+from services.error_handler import (
+    handle_command_error,
+    parse_env_channel_id,
+    resolve_bot_channel,
+)
 from services.game_event_windows import transfer_calendar_health_notes
+from services.retention_cleanup import (
+    build_retention_plan,
+    outside_keep_batch,
+    prune_secondary_async,
+    thin_range_batches,
+)
 from services.retention_windows import (
-    DEFAULT_MAX_TRANSFER_WINDOWS,
-    DEFAULT_RECENT_DAYS,
-    DEFAULT_TRANSFER_PAD_DAYS,
     ONLINE_CHECKPOINT_EVERY_BATCHES,
     ONLINE_DELETE_BATCH_SIZE,
-    build_bridge_thin_ranges,
-    build_search_keep_ranges,
-    build_transfer_thin_ranges,
-    exp_history_outside_keep_batch_sql,
-    exp_history_transfer_middle_batch_sql,
-    search_retention_cutoff,
-    transfer_alert_retention_cutoff,
 )
-from services.settings_prune import (
-    PRUNE_ALERT_DEDUPE_SQL,
-    PRUNE_DEDUPE_SQL,
-    boss_reminder_prune_bound,
-    overspeed_prune_bound,
-)
-from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
+from services.search_cache import invalidate_player_search_cache
+from services.timeutil import TAIPEI, now_taipei
 
 logger = logging.getLogger(__name__)
-
-
-def _invalidate_player_search_cache() -> None:
-    from cogs.player_search import invalidate_search_cache
-
-    invalidate_search_cache()
 
 
 class WarRoom(commands.Cog):
@@ -89,75 +77,12 @@ class WarRoom(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
-        if isinstance(error, commands.CheckFailure) and str(error) in (
-            "duplicate_invoke",
-            "channel_denied",
-        ):
-            return
-
-        if isinstance(error, commands.CommandOnCooldown):
-            try:
-                await ctx.send(
-                    f"⏳ 指令冷卻中，請再等 **{error.retry_after:.0f}** 秒。",
-                    delete_after=10,
-                )
-            except discord.HTTPException:
-                pass
-            return
-        if isinstance(error, commands.MaxConcurrencyReached):
-            try:
-                await ctx.send(
-                    "⏳ 相同指令尚在執行中，請稍候完成後再試。", delete_after=10
-                )
-            except discord.HTTPException:
-                pass
-            return
-        if isinstance(error, commands.UserInputError):
-            try:
-                usage = getattr(ctx.command, "help", None) or "請檢查指令參數。"
-                await ctx.send(f"❌ 參數錯誤。{usage}", delete_after=15)
-            except discord.HTTPException:
-                pass
-            return
-
-        if isinstance(
+        await handle_command_error(
+            ctx,
             error,
-            (
-                commands.CommandNotFound,
-                commands.NotOwner,
-                commands.CheckFailure,
-            ),
-        ):
-            return
-
-        logger.error(
-            f"Command error in {getattr(ctx.command, 'name', '?')}: {error}\n"
-            f"{''.join(traceback.format_exception(type(error), error, error.__traceback__))}"
+            log_channel_id=self.log_channel_id or None,
+            bot=self.bot,
         )
-
-        try:
-            await ctx.send("❌ 指令執行失敗，已記錄。", delete_after=15)
-        except discord.HTTPException:
-            pass
-
-        if not self.log_channel_id:
-            return
-
-        channel = await resolve_bot_channel(
-            self.bot, self.log_channel_id, label="war room log channel"
-        )
-        if channel:
-            error_msg = "".join(
-                traceback.format_exception(type(error), error, error.__traceback__)
-            )
-            cmd_name = getattr(ctx.command, "qualified_name", "unknown")
-            try:
-                await channel.send(
-                    f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`!{cmd_name}`\n"
-                    f"```python\n{error_msg[:1900]}\n```"
-                )
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send war room error report: {e}")
 
     # 04:15：錯開整點／:10 快照寫入，降低 NAS database is locked
     clean_time = datetime.time(hour=4, minute=15, tzinfo=TAIPEI)
@@ -273,42 +198,20 @@ class WarRoom(commands.Cog):
     async def db_cleanup_task(self):
         """每天凌晨 4:15：尋人導向保留（近 N 天 ∪ 轉移窗）外分批刪除；不過期 VACUUM。"""
         try:
-            retention_cutoff = search_retention_cutoff(
-                recent_days=DEFAULT_RECENT_DAYS,
-                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
-                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
-            )
-            keep_ranges = build_search_keep_ranges(
-                recent_days=DEFAULT_RECENT_DAYS,
-                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
-                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
-            )
-            outside_sql, outside_params = exp_history_outside_keep_batch_sql(
-                keep_ranges, batch_size=ONLINE_DELETE_BATCH_SIZE
+            plan = build_retention_plan()
+            outside_sql, outside_params = outside_keep_batch(
+                plan, batch_size=ONLINE_DELETE_BATCH_SIZE
             )
             deleted_exp = await self._delete_exp_history_in_batches(
                 outside_sql, outside_params, label="保留窗外"
             )
 
             deleted_middle = 0
-            thin_ranges = build_transfer_thin_ranges(
-                max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
-                pad_days=DEFAULT_TRANSFER_PAD_DAYS,
-            )
-            thin_ranges.extend(
-                build_bridge_thin_ranges(
-                    recent_days=DEFAULT_RECENT_DAYS,
-                    max_transfer_windows=DEFAULT_MAX_TRANSFER_WINDOWS,
-                    pad_days=DEFAULT_TRANSFER_PAD_DAYS,
-                )
-            )
-            thin_ranges.sort(key=lambda item: item[0])
-            for i, (start, end) in enumerate(thin_ranges, 1):
-                thin_sql, thin_params = exp_history_transfer_middle_batch_sql(
-                    start, end, batch_size=ONLINE_DELETE_BATCH_SIZE
-                )
+            for thin_sql, thin_params, label in thin_range_batches(
+                plan, batch_size=ONLINE_DELETE_BATCH_SIZE
+            ):
                 deleted_middle += await self._delete_exp_history_in_batches(
-                    thin_sql, thin_params, label=f"轉移窗中間#{i}"
+                    thin_sql, thin_params, label=label
                 )
 
             pruned_profiles = 0
@@ -317,7 +220,6 @@ class WarRoom(commands.Cog):
             profile_touch = deleted_exp + deleted_middle
             if profile_touch > 0:
                 async with self.bot.db_write_lock:
-                    # 輕量：清掉已無歷史的履歷；大刪除量才全量 rebuild
                     pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
                     if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
                         rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
@@ -327,46 +229,13 @@ class WarRoom(commands.Cog):
                         )
 
             async with self.bot.db_write_lock:
-                async with self.bot.db.execute(
-                    """
-                    DELETE FROM transfer_alerts_log
-                    WHERE alert_time < ?
-                    """,
-                    (transfer_alert_retention_cutoff(),),
-                ) as cursor:
-                    deleted_transfer = cursor.rowcount or 0
+                secondary = await prune_secondary_async(self.bot.db, plan)
+            deleted_transfer = secondary.deleted_transfer
+            deleted_settings = secondary.deleted_settings
+            deleted_alert_dedupe = secondary.deleted_alert_dedupe
+            deleted_cmd_dedupe = secondary.deleted_cmd_dedupe
 
-                cutoff_date_only = (
-                    retention_cutoff[:10]
-                    if len(retention_cutoff) >= 10
-                    else today_taipei_str()
-                )
-                async with self.bot.db.execute(
-                    PRUNE_DEDUPE_SQL,
-                    (
-                        overspeed_prune_bound(retention_cutoff),
-                        boss_reminder_prune_bound(cutoff_date_only),
-                    ),
-                ) as cursor:
-                    deleted_settings = cursor.rowcount or 0
-
-                async with self.bot.db.execute(
-                    PRUNE_ALERT_DEDUPE_SQL, (retention_cutoff,)
-                ) as cursor:
-                    deleted_alert_dedupe = cursor.rowcount or 0
-
-                cmd_cutoff = taipei_cutoff_str(2)
-                async with self.bot.db.execute(
-                    "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
-                    (cmd_cutoff,),
-                ) as cursor:
-                    deleted_cmd_dedupe = cursor.rowcount or 0
-
-                await self.bot.db.commit()
-            try:
-                _invalidate_player_search_cache()
-            except ImportError:
-                logger.warning("清庫後無法載入尋人 cache invalidator")
+            invalidate_player_search_cache()
             try:
                 await self.bot.db.execute("PRAGMA optimize")
             except sqlite3.DatabaseError as e:

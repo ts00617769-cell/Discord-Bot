@@ -6,6 +6,12 @@ import discord
 from discord.ext import commands, tasks
 
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
+from services.alert_dedupe import (
+    KIND_BOSS_REMINDER,
+    alert_already_sent,
+    release_alert_claim,
+    try_claim_alert,
+)
 from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import now_naive_taipei, now_taipei, today_taipei_str
 
@@ -29,36 +35,17 @@ class BossSchedule(commands.Cog):
             self.auto_boss_reminder.cancel()
 
     async def _already_reminded(self, key: str) -> bool:
-        async with self.bot.db.execute(
-            "SELECT 1 FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
-            ("boss_reminder", key),
-        ) as cursor:
-            if await cursor.fetchone():
-                return True
-        async with self.bot.db.execute(
-            "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
-        ) as cursor:
-            return await cursor.fetchone() is not None
+        return await alert_already_sent(self.bot.db, KIND_BOSS_REMINDER, key)
 
     async def _try_claim_reminder(self, key: str) -> bool:
         """先寫入 dedupe（INSERT OR IGNORE）；成功取得 claim 才回 True。"""
         now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        cursor = await self.bot.db.execute(
-            """
-            INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)
-            VALUES (?, ?, ?)
-            """,
-            ("boss_reminder", key, now),
+        return await try_claim_alert(
+            self.bot.db, KIND_BOSS_REMINDER, key, created_at=now
         )
-        await self.bot.db.commit()
-        return (cursor.rowcount or 0) == 1
 
     async def _release_reminder_claim(self, key: str) -> None:
-        await self.bot.db.execute(
-            "DELETE FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
-            ("boss_reminder", key),
-        )
-        await self.bot.db.commit()
+        await release_alert_claim(self.bot.db, KIND_BOSS_REMINDER, key)
 
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):

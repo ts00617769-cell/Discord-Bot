@@ -1,7 +1,24 @@
 """組裝 EXP 快照寫入批次（Discord 無關）。"""
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
+
+
+async def fetch_recent_complete_snapshot_times(
+    db: Any, min_servers: int, *, limit: int = 10
+) -> list[tuple]:
+    """回傳完整快照時間列 [(record_time,), ...]，新→舊。"""
+    async with db.execute(
+        """
+        SELECT record_time
+        FROM exp_history
+        GROUP BY record_time
+        HAVING COUNT(DISTINCT server_name) >= ?
+        ORDER BY record_time DESC LIMIT ?
+        """,
+        (min_servers, limit),
+    ) as cursor:
+        return [tuple(r) for r in await cursor.fetchall()]
 
 
 def normalize_guild(raw) -> str:

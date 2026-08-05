@@ -5,13 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import sqlite3
 
-from bot import (
-    invoke_dedupe_id,
-    prune_command_dedupe,
-    release_command_claim_on_failure,
-)
+from bot import invoke_dedupe_id, release_command_claim_on_failure
 from db.schema import apply_migrations
+from services.cmd_dedupe import prune_command_dedupe
 
 
 def test_invoke_dedupe_id_prefers_interaction():
@@ -80,3 +78,26 @@ async def test_prune_command_dedupe_removes_only_expired_rows(tmp_path):
             assert await cursor.fetchall() == [(2,)]
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_command_once_rejects_duplicate():
+    from discord.ext import commands
+
+    from bot import claim_command_once
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    async def _insert(*_a, **_k):
+        raise sqlite3.IntegrityError("UNIQUE")
+
+    db.execute = AsyncMock(side_effect=_insert)
+    ctx = SimpleNamespace(
+        bot=SimpleNamespace(db=db),
+        interaction=None,
+        message=SimpleNamespace(id=12345),
+        command=SimpleNamespace(name="測試"),
+    )
+    with pytest.raises(commands.CheckFailure, match="duplicate_invoke"):
+        await claim_command_once(ctx)

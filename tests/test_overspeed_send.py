@@ -1,12 +1,17 @@
-"""超速警報：送達成功才寫 dedupe。"""
+"""超速警報：送達成功才寫 dedupe；claim-first。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import aiosqlite
 import discord
 import pytest
 
 from cogs.exp_tracker import ExpTracker
+from db.schema import apply_migrations
+from services.alert_dedupe import KIND_OVERSPEED, alert_already_sent
+from services.overspeed_alerts import run_overspeed_patrol
 
 
 def _tracker_for_embeds() -> ExpTracker:
@@ -136,3 +141,101 @@ async def test_send_overspeed_embeds_tracks_success_per_channel():
     assert sent == {1}
     good.send.assert_awaited_once()
     bad.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_overspeed_claim_before_send_and_release_on_fail(tmp_path):
+    db = await aiosqlite.connect(str(tmp_path / "os.db"))
+    try:
+        await apply_migrations(db)
+        bot = MagicMock()
+        settings = SimpleNamespace(
+            alerts_enabled=True,
+            alert_server="萊涅01",
+            alert_guild="狼團",
+            alert_count=30,
+            alert_interval_minutes=10,
+            alert_speed_window_minutes=10,
+            SPEED_LIMIT=2000.0,
+            ALERT_CHANNEL_IDS=[42],
+        )
+        times = [("2026-08-05 12:10:00",), ("2026-08-05 12:00:00",)]
+        import datetime
+
+        current = datetime.datetime(2026, 8, 5, 12, 10, 0)
+
+        with patch(
+            "services.overspeed_alerts.pick_interval_baseline",
+            return_value=("2026-08-05 12:00:00", 10.0),
+        ), patch(
+            "services.overspeed_alerts.collect_overspeed", return_value=[]
+        ), patch(
+            "services.overspeed_alerts.send_embeds_to_channels",
+            new_callable=AsyncMock,
+            return_value=set(),
+        ):
+            await run_overspeed_patrol(
+                bot,
+                settings,
+                read_db=db,
+                write_db=db,
+                times=times,
+                current_time=current,
+            )
+
+        key = (
+            "overspeed:2026-08-05 12:10:00|2026-08-05 12:00:00|"
+            "萊涅01|狼團|30|channel:42"
+        )
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_overspeed_claim_persists_when_send_ok(tmp_path):
+    db = await aiosqlite.connect(str(tmp_path / "os_ok.db"))
+    try:
+        await apply_migrations(db)
+        bot = MagicMock()
+        settings = SimpleNamespace(
+            alerts_enabled=True,
+            alert_server="萊涅01",
+            alert_guild="狼團",
+            alert_count=30,
+            alert_interval_minutes=10,
+            alert_speed_window_minutes=10,
+            SPEED_LIMIT=2000.0,
+            ALERT_CHANNEL_IDS=[42],
+        )
+        times = [("2026-08-05 12:10:00",), ("2026-08-05 12:00:00",)]
+        import datetime
+
+        current = datetime.datetime(2026, 8, 5, 12, 10, 0)
+
+        with patch(
+            "services.overspeed_alerts.pick_interval_baseline",
+            return_value=("2026-08-05 12:00:00", 10.0),
+        ), patch(
+            "services.overspeed_alerts.collect_overspeed", return_value=[]
+        ), patch(
+            "services.overspeed_alerts.send_embeds_to_channels",
+            new_callable=AsyncMock,
+            return_value={42},
+        ):
+            await run_overspeed_patrol(
+                bot,
+                settings,
+                read_db=db,
+                write_db=db,
+                times=times,
+                current_time=current,
+            )
+
+        key = (
+            "overspeed:2026-08-05 12:10:00|2026-08-05 12:00:00|"
+            "萊涅01|狼團|30|channel:42"
+        )
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is True
+    finally:
+        await db.close()

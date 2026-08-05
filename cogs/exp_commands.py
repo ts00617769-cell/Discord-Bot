@@ -14,6 +14,7 @@ from db.connection import read_db
 from game_data import SERVER_MAP
 from services.command_args import parse_alert_toggle, parse_count_server
 from services.error_handler import allowed_channel, min_complete_snapshot_servers
+from services.exp_snapshots import fetch_recent_complete_snapshot_times
 from services.exp_speed import collect_speed_ranking
 from services.ranking_api import get_ranking_client
 from services.text_display import pad_text
@@ -92,23 +93,16 @@ class ExpCommands(commands.Cog):
         try:
             min_servers = min_complete_snapshot_servers()
             if is_global:
-                sql_times = """
-                    SELECT record_time
-                    FROM exp_history
-                    GROUP BY record_time
-                    HAVING COUNT(DISTINCT server_name) >= ?
-                    ORDER BY record_time DESC LIMIT 2
-                """
-                params_times: tuple = (min_servers,)
+                times = await fetch_recent_complete_snapshot_times(
+                    self._db(), min_servers, limit=2
+                )
             else:
                 sql_times = (
                     "SELECT DISTINCT record_time FROM exp_history "
                     "WHERE server_name = ? ORDER BY record_time DESC LIMIT 2"
                 )
-                params_times = (target_server,)
-
-            async with self._db().execute(sql_times, params_times) as cursor:
-                times = await cursor.fetchall()
+                async with self._db().execute(sql_times, (target_server,)) as cursor:
+                    times = await cursor.fetchall()
 
             if len(times) < 2:
                 return await processing_msg.edit(content="⚠️ 樣本不足！請等待至少 10 分鐘。")

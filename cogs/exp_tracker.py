@@ -1,3 +1,6 @@
+"""經驗值快照循環：協調超速／轉服警報。"""
+from __future__ import annotations
+
 import asyncio
 import datetime
 import logging
@@ -10,63 +13,33 @@ from discord.ext import commands, tasks
 from db import ensure_search_indexes
 from db.connection import read_db
 from game_data import SERVER_MAP
-from services.alert_dedupe import mark_overspeed_sent, overspeed_already_sent
 from services.error_handler import (
     min_complete_snapshot_servers,
     min_snapshot_players,
     parse_env_channel_ids,
     parse_env_float,
-    resolve_bot_channel,
 )
 from services.exp_snapshots import (
+    fetch_recent_complete_snapshot_times,
     normalize_guild,
     persist_snapshot_round,
     players_to_insert_batch,
 )
-from services.exp_speed import (
-    collect_overspeed,
-    pick_interval_baseline,
-)
-from services.game_event_windows import (
-    TRANSFER_LOGIN_GRACE_DAYS,
-    is_transfer_active_period,
+from services.overspeed_alerts import (
+    build_overspeed_embeds,
+    run_overspeed_patrol,
 )
 from services.ranking_api import get_ranking_client
-from services.text_display import pad_text
+from services.search_cache import invalidate_player_search_cache
 from services.timeutil import now_naive_taipei
-from services.transfer_alert_flow import (
-    filter_viable_ranked,
-    lookup_alerted_pairs,
-    pair_key_from_row,
-)
-from services.transfer_detect import (
-    CLASS_MARGIN,
-    NAME_MARGIN,
-    POTENTIAL_TRANSFERS_SQL,
-    format_exp_diff,
-    pick_unique_pairs,
-    rank_transfer_candidates,
-)
-from services.transfer_missing import (
-    build_missing_queue_rows,
-    bump_still_missing,
-    fetch_newcomers,
-    fetch_open_missing,
-    mark_missing_resolved,
-    prune_stale_missing,
-    resolve_reappeared,
-    upsert_disappeared,
+from services.transfer_alert_runner import (
+    fetch_potential_transfers,
+    run_transfer_check,
+    send_transfer_alert_message,
 )
 
 logger = logging.getLogger(__name__)
 
-
-def _invalidate_search_cache() -> None:
-    try:
-        from cogs.player_search import invalidate_search_cache
-    except ImportError:
-        return
-    invalidate_search_cache()
 
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
@@ -89,7 +62,6 @@ class ExpTracker(commands.Cog):
         return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     async def cog_load(self):
-        # schema 已在 bot.setup_hook 套用
         await self._load_alert_settings()
         if not self.ALERT_CHANNEL_IDS:
             logger.warning(
@@ -160,21 +132,13 @@ class ExpTracker(commands.Cog):
             ("alert_guild", self.alert_guild),
         ]
         await self.bot.db.executemany(
-            '''
+            """
             INSERT INTO bot_settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            ''',
+            """,
             pairs,
         )
         await self.bot.db.commit()
-
-    async def _setting_exists(self, key: str) -> bool:
-        """相容舊 bot_settings overspeed:*；新寫入走 alert_dedupe。"""
-        return await overspeed_already_sent(read_db(self.bot), key)
-
-    async def _mark_setting(self, key: str, value: str = "1") -> None:
-        now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        await mark_overspeed_sent(self.bot.db, key, created_at=now)
 
     async def _startup_validate_servers(self):
         try:
@@ -246,7 +210,6 @@ class ExpTracker(commands.Cog):
                     if insert_batch:
                         round_batches.append(insert_batch)
 
-                    # 總榜成功且人數達標才算完整服；薄名冊仍寫入但不計入轉服門檻
                     quality_ok = (
                         result.overall_ok and len(result.players) >= min_players
                     )
@@ -275,7 +238,7 @@ class ExpTracker(commands.Cog):
                     getattr(self.bot, "snapshot_db", self.bot.db),
                     round_batches,
                 )
-            _invalidate_search_cache()
+            invalidate_player_search_cache()
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
             if not snapshot_complete:
                 logger.warning(
@@ -297,124 +260,26 @@ class ExpTracker(commands.Cog):
             logger.error(f"🚨 [經驗值雷達] 未預期錯誤：{e}\n{traceback.format_exc()}")
 
     async def check_for_alerts(self, current_time, *, run_transfers: bool = True):
-        min_servers = min_complete_snapshot_servers()
-        sql_times = """
-            SELECT record_time
-            FROM exp_history
-            GROUP BY record_time
-            HAVING COUNT(DISTINCT server_name) >= ?
-            ORDER BY record_time DESC LIMIT 10
-        """
-        async with read_db(self.bot).execute(sql_times, (min_servers,)) as cursor:
-            times = [tuple(r) for r in await cursor.fetchall()]
-
+        times = await fetch_recent_complete_snapshot_times(
+            read_db(self.bot), min_complete_snapshot_servers(), limit=10
+        )
         if len(times) < 2:
             return
         time_now, time_prev_scan = times[0][0], times[1][0]
 
-        fmt = "%Y-%m-%d %H:%M:%S"
-
-        should_alert = (
-            self.alerts_enabled
-            and self.alert_server != "全服"
-            and bool(self.alert_guild)
+        await run_overspeed_patrol(
+            self.bot,
+            self,
+            read_db=read_db(self.bot),
+            write_db=self.bot.db,
+            times=times,
+            current_time=current_time,
         )
-        if should_alert and isinstance(current_time, datetime.datetime):
-            should_alert = (current_time.minute % self.alert_interval_minutes) == 0
-
-        if should_alert:
-            time_prev, minutes_diff = pick_interval_baseline(
-                times, self.alert_speed_window_minutes, fmt=fmt
-            )
-            if time_prev and minutes_diff > 0:
-                sql = '''
-                    SELECT DISTINCT t1.player_name, t1.server_name, t1.level, t1.exp, t2.exp
-                    FROM exp_history t1
-                    JOIN exp_history t2
-                      ON t1.player_name = t2.player_name AND t1.server_name = t2.server_name
-                    WHERE t1.record_time = ? AND t2.record_time = ?
-                      AND t1.server_name = ?
-                      AND lower(t1.guild_name) = lower(?)
-                      AND lower(t2.guild_name) = lower(?)
-                '''
-                params = (
-                    time_now,
-                    time_prev,
-                    self.alert_server,
-                    self.alert_guild,
-                    self.alert_guild,
-                )
-
-                async with read_db(self.bot).execute(sql, params) as cursor:
-                    records = [tuple(r) for r in await cursor.fetchall()]
-
-                alert_list = collect_overspeed(
-                    records, minutes_diff, self.SPEED_LIMIT
-                )[: self.alert_count]
-
-                dedupe_key = (
-                    f"overspeed:{time_now}|{time_prev}|"
-                    f"{self.alert_server}|{self.alert_guild}|{self.alert_count}"
-                )
-                pending_channels: list[int] = []
-                for channel_id in self.ALERT_CHANNEL_IDS:
-                    channel_key = f"{dedupe_key}|channel:{channel_id}"
-                    try:
-                        already_sent = await self._setting_exists(channel_key)
-                    except sqlite3.DatabaseError as e:
-                        # 去重讀取失敗時 fail-open，避免整輪巡檢靜默遺失。
-                        logger.error(
-                            "Overspeed dedupe check failed for channel %s: %s",
-                            channel_id,
-                            e,
-                        )
-                        already_sent = False
-                    if not already_sent:
-                        pending_channels.append(channel_id)
-                if not pending_channels:
-                    logger.info(
-                        f"略過重複超速巡檢 interval={time_prev}→{time_now} "
-                        f"server={self.alert_server} guild={self.alert_guild}"
-                    )
-                else:
-                    embeds = self._build_overspeed_embeds(
-                        alert_list,
-                        record_count=len(records),
-                        time_now=time_now,
-                        minutes_diff=minutes_diff,
-                    )
-                    sent_channels = await self._send_overspeed_embeds(
-                        embeds, channel_ids=pending_channels
-                    )
-                    for channel_id in sent_channels:
-                        try:
-                            await self._mark_setting(
-                                f"{dedupe_key}|channel:{channel_id}"
-                            )
-                        except sqlite3.DatabaseError as e:
-                            logger.error(
-                                "Failed to persist overspeed dedupe for channel %s: %s",
-                                channel_id,
-                                e,
-                            )
-                    failed_channels = set(pending_channels) - sent_channels
-                    if failed_channels:
-                        logger.warning(
-                            "超速巡檢部分頻道送出失敗，未寫入該頻道 dedupe："
-                            f"{self.alert_server}/{self.alert_guild} "
-                            f"interval={time_prev}→{time_now} "
-                            f"channels={sorted(failed_channels)}"
-                        )
 
         if run_transfers:
             await self.check_for_transfers(time_now, time_prev_scan, complete_times=times)
         else:
             logger.info("本輪略過轉服偵測（快照不完整）")
-
-    async def _resolve_alert_channel(self, channel_id: int):
-        return await resolve_bot_channel(
-            self.bot, channel_id, label="overspeed alert channel"
-        )
 
     def _build_overspeed_embeds(
         self,
@@ -424,59 +289,14 @@ class ExpTracker(commands.Cog):
         time_now: str,
         minutes_diff: float,
     ) -> list[discord.Embed]:
-        """每輪都產生訊息；無超速者時送出綠色巡檢結果。"""
-        footer = f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)"
-        if not alert_list:
-            if record_count:
-                description = (
-                    f"本輪已比對 **{record_count}** 名玩家，"
-                    f"沒有人超過 **{self.SPEED_LIMIT:,.0f} 億／小時**。"
-                )
-                color = 0x2ECC71
-            else:
-                description = (
-                    f"本輪找不到「{self.alert_server}／{self.alert_guild}」"
-                    "可比較的玩家資料，請確認旅團名稱與榜單資料。"
-                )
-                color = 0xF1C40F
-            embed = discord.Embed(
-                title=f"✅ 10 分鐘超速巡檢 ({self.alert_server}／{self.alert_guild})",
-                description=description,
-                color=color,
-            )
-            embed.set_footer(text=footer)
-            return [embed]
-
-        embeds: list[discord.Embed] = []
-        chunk_size = 50
-        for i in range(0, len(alert_list), chunk_size):
-            chunk = alert_list[i : i + chunk_size]
-            desc = ""
-            if i == 0:
-                desc += (
-                    f"以下是時速超過 **{self.SPEED_LIMIT:,.0f} 億** "
-                    f"的前 {len(alert_list)} 名玩家：\n"
-                )
-            desc += "```yaml\n"
-            for player in chunk:
-                name_padded = pad_text(player["name"], 14)
-                desc += (
-                    f"[{player['server']}] {name_padded} | "
-                    f"Lv.{player['level']} | 時速: {player['speed']:,.0f}億\n"
-                )
-            desc += "```"
-            embed = discord.Embed(
-                title=(
-                    f"🚨 超速警報 ({self.alert_server}／{self.alert_guild} "
-                    f"≥{self.SPEED_LIMIT:,.0f}億 Top {self.alert_count})"
-                ),
-                description=desc,
-                color=0xFF0000,
-            )
-            if i + chunk_size >= len(alert_list):
-                embed.set_footer(text=footer)
-            embeds.append(embed)
-        return embeds
+        """測試／相容用包裝。"""
+        return build_overspeed_embeds(
+            self,
+            alert_list,
+            record_count=record_count,
+            time_now=time_now,
+            minutes_diff=minutes_diff,
+        )
 
     async def _send_overspeed_embeds(
         self,
@@ -484,29 +304,17 @@ class ExpTracker(commands.Cog):
         *,
         channel_ids: list[int] | None = None,
     ) -> set[int]:
-        """每個頻道完整送出全部 embeds 才列為成功。"""
-        successful: set[int] = set()
+        from services.discord_send import send_embeds_to_channels
+
         targets = channel_ids if channel_ids is not None else self.ALERT_CHANNEL_IDS
-        for channel_id in targets:
-            channel = await self._resolve_alert_channel(channel_id)
-            if channel is None:
-                continue
-            try:
-                for embed in embeds:
-                    await channel.send(embed=embed)
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send alert to {channel_id}: {e}")
-            else:
-                successful.add(channel_id)
-        return successful
+        return await send_embeds_to_channels(
+            self.bot, targets, embeds, label="overspeed alert channel"
+        )
 
     async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
-        """轉服候選：同名跨服最優先；異名僅允許同職+同討伐+等級接近+較小經驗差。"""
-        async with read_db(self.bot).execute(
-            POTENTIAL_TRANSFERS_SQL,
-            (time_prev, time_prev, name_margin, class_margin, time_now, time_prev),
-        ) as cursor:
-            return await cursor.fetchall()
+        return await fetch_potential_transfers(
+            read_db(self.bot), time_now, time_prev, name_margin, class_margin
+        )
 
     async def _send_transfer_alert(
         self, time_now, new_name, new_server, old_name, old_server,
@@ -515,184 +323,32 @@ class ExpTracker(commands.Cog):
         old_guild: str = "",
         new_guild: str = "",
     ) -> int:
-        """發送轉服警報；回傳成功送達的頻道數。"""
-        if not self.TRANSFER_ALERT_CHANNEL_IDS:
-            return 0
-        diff_str = format_exp_diff(exp_diff)
-        old_g = old_guild or "—"
-        new_g = new_guild or "—"
-        embed = discord.Embed(
-            title="【波拉西亞戰記】轉移/旅團變動警報",
-            description=(
-                f"時間：{time_now}\n{'-' * 30}\n"
-                f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
-                f"**{new_name}** ({new_server})\n"
-                f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
-                f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}\n"
-                f"[旅團]: {old_g} ➔ {new_g}"
-            ),
-            color=0xf1c40f,
+        return await send_transfer_alert_message(
+            self.bot,
+            self.TRANSFER_ALERT_CHANNEL_IDS,
+            time_now=time_now,
+            new_name=new_name,
+            new_server=new_server,
+            old_name=old_name,
+            old_server=old_server,
+            new_lvl=new_lvl,
+            new_cls=new_cls,
+            new_sub_grade=new_sub_grade,
+            status_str=status_str,
+            exp_diff=exp_diff,
+            old_guild=old_guild,
+            new_guild=new_guild,
         )
-        success = 0
-        for channel_id in self.TRANSFER_ALERT_CHANNEL_IDS:
-            channel = await resolve_bot_channel(
-                self.bot, channel_id, label="transfer alert channel"
-            )
-            if channel is None:
-                continue
-            try:
-                await channel.send(embed=embed)
-                success += 1
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send transfer alert to {channel_id}: {e}")
-        return success
 
     async def check_for_transfers(self, time_now, time_prev, complete_times=None):
-        try:
-            in_active = is_transfer_active_period(str(time_now))
-            write_db = self.bot.db
-            db = read_db(self.bot)
-
-            # 轉移活躍期：維護消失佇列（連續缺席／同服回歸）
-            if in_active:
-                try:
-                    await resolve_reappeared(write_db, time_now=str(time_now))
-                    await upsert_disappeared(
-                        write_db,
-                        time_now=str(time_now),
-                        time_prev=str(time_prev),
-                        created_at=str(time_now),
-                    )
-                    await bump_still_missing(write_db, time_now=str(time_now))
-                except sqlite3.DatabaseError as e:
-                    logger.error(f"transfer_missing upsert failed: {e}")
-
-            transfer_records = list(
-                await self._get_potential_transfers(
-                    time_now, time_prev, NAME_MARGIN, CLASS_MARGIN
-                )
-            )
-
-            if in_active:
-                try:
-                    newcomers = await fetch_newcomers(
-                        db, time_now=str(time_now), time_prev=str(time_prev)
-                    )
-                    open_missing = await fetch_open_missing(db)
-                    queue_rows = build_missing_queue_rows(
-                        newcomers, open_missing, appear_time=str(time_now)
-                    )
-                    if queue_rows:
-                        transfer_records.extend(queue_rows)
-                except sqlite3.DatabaseError as e:
-                    logger.error(f"transfer_missing match failed: {e}")
-
-            if not transfer_records:
-                return
-
-            miss_times = [time_now]
-            if complete_times and len(complete_times) >= 2:
-                miss_times = [complete_times[0][0], complete_times[1][0]]
-
-            ranked = rank_transfer_candidates(
-                transfer_records,
-                appear_time=str(time_now),
-                in_active_period=in_active,
-            )
-            if not ranked:
-                return
-
-            candidate_keys = [pair_key_from_row(row) for row in ranked]
-            already_alerted = await lookup_alerted_pairs(db, candidate_keys)
-            viable = await filter_viable_ranked(
-                db, ranked, already_alerted, miss_times
-            )
-
-            for pair in pick_unique_pairs(
-                viable, already_alerted, in_active_period=in_active
-            ):
-                pair_key = pair["pair_key"]
-                # 先 claim log，避免 Discord 送出成功但 commit 失敗造成重發
-                try:
-                    cursor = await write_db.execute(
-                        '''
-                        INSERT OR IGNORE INTO transfer_alerts_log
-                        (old_name, old_server, new_name, new_server, alert_time)
-                        VALUES (?, ?, ?, ?, ?)
-                        ''',
-                        (*pair_key, time_now),
-                    )
-                    await write_db.commit()
-                    if (cursor.rowcount or 0) != 1:
-                        already_alerted.add(pair_key)
-                        continue
-                except sqlite3.DatabaseError as e:
-                    logger.error(f"transfer alert claim failed: {e}")
-                    continue
-
-                sent = await self._send_transfer_alert(
-                    time_now,
-                    pair["new_name"],
-                    pair["new_server"],
-                    pair["old_name"],
-                    pair["old_server"],
-                    pair["new_lvl"],
-                    pair["new_cls"],
-                    pair["new_sub_grade"],
-                    pair["status"],
-                    pair["exp_diff"],
-                    old_guild=pair.get("old_guild") or "",
-                    new_guild=pair.get("new_guild") or "",
-                )
-                if sent > 0:
-                    try:
-                        await mark_missing_resolved(
-                            write_db,
-                            pair["old_name"],
-                            pair["old_server"],
-                            resolved_at=str(time_now),
-                        )
-                        await write_db.commit()
-                    except sqlite3.DatabaseError as e:
-                        logger.error(
-                            "轉服警報已送出但 mark_missing_resolved 失敗: %s", e
-                        )
-                    already_alerted.add(pair_key)
-                else:
-                    try:
-                        await write_db.execute(
-                            """
-                            DELETE FROM transfer_alerts_log
-                            WHERE old_name=? AND old_server=?
-                              AND new_name=? AND new_server=?
-                            """,
-                            pair_key,
-                        )
-                        await write_db.commit()
-                    except sqlite3.DatabaseError as e:
-                        logger.error("回滾轉服警報 claim 失敗: %s", e)
-                    logger.warning(
-                        f"轉服警報送出失敗，已釋放 claim："
-                        f"{pair['old_name']}@{pair['old_server']} -> "
-                        f"{pair['new_name']}@{pair['new_server']}"
-                    )
-
-            # 清理過舊佇列（窗結束 + grace + 7 天）
-            try:
-                cutoff_dt = datetime.datetime.strptime(
-                    str(time_now), "%Y-%m-%d %H:%M:%S"
-                ) - datetime.timedelta(days=TRANSFER_LOGIN_GRACE_DAYS + 7)
-                await prune_stale_missing(
-                    write_db, before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
-                )
-            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
-                logger.warning(f"prune transfer_missing skipped: {e}")
-        except sqlite3.DatabaseError as e:
-            logger.error(f"DB error in transfer check: {e}\n{traceback.format_exc()}")
-        except (ValueError, TypeError, KeyError) as e:
-            logger.error(f"Data error in transfer check: {e}\n{traceback.format_exc()}")
-        except discord.HTTPException as e:
-            logger.error(f"Discord error in transfer check: {e}")
+        await run_transfer_check(
+            write_db=self.bot.db,
+            read_db=read_db(self.bot),
+            time_now=time_now,
+            time_prev=time_prev,
+            complete_times=complete_times,
+            send_alert=self._send_transfer_alert,
+        )
 
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):
@@ -702,11 +358,12 @@ class ExpTracker(commands.Cog):
             minute=(now.minute // 10) * 10, second=30, microsecond=0
         ) + datetime.timedelta(minutes=10)
         if now.minute % 10 == 0 and now.second < 30:
-             next_run = now.replace(second=30, microsecond=0)
+            next_run = now.replace(second=30, microsecond=0)
         seconds_to_wait = (next_run - now).total_seconds()
         if seconds_to_wait > 0:
             logger.info(f"等待 {seconds_to_wait:.1f} 秒以對齊官方每 10 分鐘更新時間...")
             await asyncio.sleep(seconds_to_wait)
+
 
 async def setup(bot):
     await bot.add_cog(ExpTracker(bot))

@@ -115,3 +115,40 @@ async def test_finalize_reveal_retries_then_clears_memory():
     assert cog.clear_active_status.await_count == 3
     assert sleep.await_count == 2
     assert cog.active_poll["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_check_active_quiz_resume_restores_poll(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "resume.db")
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO active_quiz_status (id, is_active, quiz_id, channel_id, date_str)
+            VALUES (1, 1, ?, 99, '2026-08-05')
+            ON CONFLICT(id) DO UPDATE SET
+              is_active=excluded.is_active,
+              quiz_id=excluded.quiz_id,
+              channel_id=excluded.channel_id,
+              date_str=excluded.date_str
+            """,
+            (QUESTION["title"],),
+        )
+        await db.execute(
+            "INSERT INTO quiz_votes (user_id, user_name, choice) VALUES (1, 'Alice', 'A')"
+        )
+        await db.commit()
+
+        bot = MagicMock()
+        bot.db = db
+        bot.add_view = MagicMock()
+        cog = _cog(bot)
+        await cog.check_active_quiz_resume()
+
+        assert cog.active_poll["is_active"] is True
+        assert cog.active_poll["channel_id"] == 99
+        assert cog.active_poll["data"]["title"] == QUESTION["title"]
+        assert list(cog.active_poll["votes"].values())[0]["choice"] == "A"
+        bot.add_view.assert_called_once()
+    finally:
+        await db.close()

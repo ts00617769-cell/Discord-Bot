@@ -7,23 +7,24 @@ from pathlib import Path
 
 import aiosqlite
 
+from db.paths import DEFAULT_DB_NAME, resolve_db_path
+
 logger = logging.getLogger(__name__)
 
-# 預設放專案根目錄；可用 DB_PATH 改到更快的磁碟
-DEFAULT_DB_NAME = "prasia_data.db"
+__all__ = [
+    "DEFAULT_DB_NAME",
+    "DatabaseIntegrityError",
+    "configure_connection",
+    "connect_db",
+    "connect_db_ro",
+    "integrity_quick_check",
+    "read_db",
+    "resolve_db_path",
+]
 
 
 class DatabaseIntegrityError(RuntimeError):
     """PRAGMA quick_check 失敗。"""
-
-
-def resolve_db_path(base_dir: str | Path | None = None) -> Path:
-    """解析資料庫路徑：環境變數 DB_PATH 優先。"""
-    env = (os.getenv("DB_PATH") or "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    root = Path(base_dir) if base_dir else Path(__file__).resolve().parent.parent
-    return (root / DEFAULT_DB_NAME).resolve()
 
 
 async def configure_connection(db: aiosqlite.Connection) -> None:

@@ -33,18 +33,24 @@ CHECKPOINT_EVERY_BATCHES = 10
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from db.paths import resolve_db_path  # noqa: E402
 from db.schema import (  # noqa: E402
     build_search_indexes_sync,
     list_missing_search_indexes,
     rebuild_player_profiles_sync,
 )
+from db.singleton_lock import is_process_lock_held  # noqa: E402
+from services.retention_cleanup import (  # noqa: E402
+    build_retention_plan,
+    prune_secondary_sync,
+)
 from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
-    build_bridge_thin_ranges,
     build_search_keep_ranges,
     build_transfer_thin_ranges,
+    build_bridge_thin_ranges,
     exp_history_outside_keep_batch_sql,
     exp_history_outside_keep_sql,
     exp_history_transfer_middle_batch_sql,
@@ -68,13 +74,8 @@ else:
     load_dotenv(ROOT / ".env")
 
 
-def resolve_db_path(base_dir: Path | None = None) -> Path:
-    """與 db.connection.resolve_db_path 相同，避免為清理腳本拉入 aiosqlite。"""
-    env = (os.getenv("DB_PATH") or "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    root = base_dir if base_dir is not None else ROOT
-    return (root / "prasia_data.db").resolve()
+def _bot_appears_running() -> bool:
+    return is_process_lock_held(LOCK_PATH)
 
 
 def _fmt_bytes(n: int) -> str:
@@ -91,90 +92,6 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
-
-
-def _pid_cmdline(pid: int) -> str:
-    """讀取 Linux /proc 指令列；失敗回空字串。"""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-
-
-def _pid_looks_like_bot(pid: int) -> bool:
-    """PID 存活且指令列像本專案 bot（避免 Docker 容器 PID 撞上 host 無關行程）。"""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-            )
-            if not handle:
-                return False
-            ctypes.windll.kernel32.CloseHandle(handle)
-            # Windows 難可靠讀 cmdline；有行程就算可疑，交由 --force 覆寫
-            return True
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    cmd = _pid_cmdline(pid).lower()
-    if not cmd:
-        return False
-    markers = ("bot.py", "dc_bot", "prasia", "discord")
-    return any(m in cmd for m in markers)
-
-
-def _bot_appears_running() -> bool:
-    """是否真有 bot 佔用 .bot.lock。
-
-    優先試 OS 檔案鎖（與 bot.py 相同）：容器已停時 flock 會釋放，
-    即使殘留 PID 文字也不應擋清理。PID 檢查僅作備援，且須像本 bot。
-    """
-    if not LOCK_PATH.exists():
-        return False
-
-    try:
-        with open(LOCK_PATH, "a+", encoding="utf-8") as fp:
-            if sys.platform == "win32":
-                import msvcrt
-
-                fp.seek(0)
-                try:
-                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
-                except OSError:
-                    return True
-                try:
-                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-                return False
-
-            import fcntl
-
-            try:
-                fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                return True
-            try:
-                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-            # 鎖得下來＝沒人佔用；殘留 PID 視為過期
-            return False
-    except OSError:
-        pass
-
-    # flock 不可用時才看 PID
-    try:
-        raw = LOCK_PATH.read_text(encoding="utf-8").strip()
-        if not raw.isdigit():
-            return False
-        return _pid_looks_like_bot(int(raw))
-    except (OSError, ValueError):
-        return False
 
 
 def _count(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int:
@@ -744,26 +661,22 @@ def main() -> int:
                     _log(f"  本窗中間合計已刪 {n:,} 筆")
             assert settings_cutoff is not None
             assert transfer_cutoff is not None
-            if has_transfer:
-                deleted_transfer = conn.execute(
-                    """
-                    DELETE FROM transfer_alerts_log
-                    WHERE alert_time < ?
-                    """,
-                    (transfer_cutoff,),
-                ).rowcount
-            if has_settings:
-                deleted_settings = conn.execute(
-                    PRUNE_DEDUPE_SQL,
-                    (
-                        overspeed_prune_bound(settings_cutoff),
-                        boss_reminder_prune_bound(settings_cutoff[:10]),
-                    ),
-                ).rowcount
-            if has_alert_dedupe:
-                deleted_alert_dedupe = conn.execute(
-                    PRUNE_ALERT_DEDUPE_SQL, (settings_cutoff,)
-                ).rowcount
+            plan = build_retention_plan(
+                recent_days=args.recent_days,
+                pad_days=args.transfer_pad_days,
+                max_transfer_windows=args.max_transfer_windows,
+            )
+            # dry-run 計數路徑仍用上方 cutoff；實際刪除走共用 prune
+            secondary = prune_secondary_sync(
+                conn,
+                plan,
+                has_transfer=has_transfer,
+                has_settings=has_settings,
+                has_alert_dedupe=has_alert_dedupe,
+            )
+            deleted_transfer = secondary.deleted_transfer
+            deleted_settings = secondary.deleted_settings
+            deleted_alert_dedupe = secondary.deleted_alert_dedupe
         else:
             cutoff = taipei_cutoff_str(args.days)
             if has_exp:
