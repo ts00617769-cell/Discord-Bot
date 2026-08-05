@@ -255,8 +255,9 @@ def transfer_calendar_health_notes(
     when: Optional[str] = None,
     *,
     grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
+    warn_within_days: int = 14,
 ) -> list[str]:
-    """健康摘要用：無官方後續窗時提示最近的預估日期。"""
+    """健康摘要用：無後續窗／即將用盡時提示維護者更新日曆。"""
     dt: datetime.datetime | None
     if when is None:
         from services.timeutil import now_naive_taipei
@@ -267,14 +268,15 @@ def transfer_calendar_health_notes(
     if dt is None:
         return []
     grace = datetime.timedelta(days=int(grace_days))
-    future_or_active: list[str] = []
+    remaining: list[tuple[datetime.datetime, str]] = []
     for start_s, end_s, label in REALM_TRANSFER_WINDOWS:
         start, end = _parse(start_s), _parse(end_s)
         if start is None or end is None:
             continue
-        if dt <= (end + grace):
-            future_or_active.append(label)
-    if not future_or_active:
+        effective_end = end + grace
+        if dt <= effective_end:
+            remaining.append((effective_end, label))
+    if not remaining:
         projected = []
         for start_s, _end_s, label in PROJECTED_REALM_TRANSFER_WINDOWS:
             start = _parse(start_s)
@@ -288,5 +290,15 @@ def transfer_calendar_health_notes(
         return [
             "⚠️ 領域轉移日曆已無後續場次；請至官網確認後更新 "
             f"`game_event_windows.REALM_TRANSFER_WINDOWS`。{projection_note}"
+        ]
+    remaining.sort(key=lambda x: x[0])
+    last_end, last_label = remaining[-1]
+    days_left = (last_end - dt).total_seconds() / 86400.0
+    if days_left <= float(warn_within_days):
+        return [
+            "⚠️ 領域轉移日曆即將用盡：最後有效場次 "
+            f"**{last_label}**（含寬限約至 {last_end.strftime('%Y-%m-%d')}，"
+            f"剩餘約 {days_left:.0f} 天）。請至官網確認後更新 "
+            "`game_event_windows.REALM_TRANSFER_WINDOWS`。"
         ]
     return []

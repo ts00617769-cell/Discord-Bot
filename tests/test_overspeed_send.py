@@ -37,12 +37,24 @@ def test_build_overspeed_embeds_reports_clear_round():
         record_count=12,
         time_now="2026-08-04 12:10:00",
         minutes_diff=10,
+        include_clear=True,
     )
     assert len(embeds) == 1
     assert "10 分鐘超速巡檢" in embeds[0].title
     assert "監控週期: 10min" in embeds[0].footer.text
     assert "12" in embeds[0].description
     assert "沒有人超過" in embeds[0].description
+
+
+def test_build_overspeed_embeds_skips_clear_by_default(monkeypatch):
+    monkeypatch.delenv("EXP_ALERT_SEND_CLEAR", raising=False)
+    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+        [],
+        record_count=12,
+        time_now="2026-08-04 12:10:00",
+        minutes_diff=10,
+    )
+    assert embeds == []
 
 
 def test_build_overspeed_embeds_warns_when_guild_has_no_records():
@@ -140,11 +152,12 @@ async def test_send_overspeed_embeds_tracks_success_per_channel():
 
     assert sent == {1}
     good.send.assert_awaited_once()
-    bad.send.assert_awaited_once()
+    assert bad.send.await_count == 4  # 1 try + 3 retries on 5xx
 
 
 @pytest.mark.asyncio
-async def test_overspeed_claim_before_send_and_release_on_fail(tmp_path):
+async def test_overspeed_claim_before_send_and_release_on_fail(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXP_ALERT_SEND_CLEAR", "1")
     db = await aiosqlite.connect(str(tmp_path / "os.db"))
     try:
         await apply_migrations(db)
@@ -193,7 +206,8 @@ async def test_overspeed_claim_before_send_and_release_on_fail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_overspeed_claim_persists_when_send_ok(tmp_path):
+async def test_overspeed_claim_persists_when_send_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXP_ALERT_SEND_CLEAR", "1")
     db = await aiosqlite.connect(str(tmp_path / "os_ok.db"))
     try:
         await apply_migrations(db)

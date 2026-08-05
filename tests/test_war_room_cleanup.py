@@ -14,10 +14,13 @@ from services.retention_cleanup import build_retention_plan, prune_secondary_asy
 from services.search_cache import invalidate_player_search_cache
 
 
-def test_invalidate_player_search_cache_calls_player_search():
-    with patch("cogs.player_search.invalidate_search_cache") as mock_inv:
-        invalidate_player_search_cache()
-        mock_inv.assert_called_once()
+def test_invalidate_player_search_cache_clears_entries():
+    from services import search_cache
+
+    search_cache.set_cached_search("k", {"kind": "text", "content": "x"})
+    assert search_cache.get_cached_search("k") is not None
+    search_cache.invalidate_player_search_cache()
+    assert search_cache.get_cached_search("k") is None
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ import pytest
 from cogs.boss_schedule import BossSchedule
 from db.schema import apply_migrations
 from game_data import GAP_BOSS_SCHEDULE
+from services.boss_reminder import run_boss_reminder
 
 
 @pytest.mark.asyncio
@@ -85,7 +86,7 @@ async def test_boss_reminder_claims_before_send():
     channel = MagicMock()
     order: list[str] = []
 
-    async def claim(key: str) -> bool:
+    async def claim(*_a, **_k) -> bool:
         order.append("claim")
         return True
 
@@ -93,26 +94,26 @@ async def test_boss_reminder_claims_before_send():
         order.append("send")
 
     channel.send = AsyncMock(side_effect=send)
-    cog = BossSchedule(bot)
 
     weekday_with_boss = next(iter(GAP_BOSS_SCHEDULE.keys()))
     hour = GAP_BOSS_SCHEDULE[weekday_with_boss][0]
 
-    with patch.object(
-        BossSchedule,
-        "REMINDER_CHANNEL_ID",
-        new_callable=PropertyMock,
-        return_value=1,
-    ), patch(
-        "cogs.boss_schedule.now_taipei"
+    with patch(
+        "services.boss_reminder.now_taipei"
     ) as mock_now, patch(
-        "cogs.boss_schedule.resolve_bot_channel",
-        new_callable=AsyncMock,
-        return_value=channel,
-    ), patch.object(cog, "_try_claim_reminder", side_effect=claim), patch.object(
-        cog, "_already_reminded", new_callable=AsyncMock, return_value=False
+        "services.boss_reminder.today_taipei_str", return_value="2026-08-05"
     ), patch(
-        "cogs.boss_schedule.today_taipei_str", return_value="2026-08-05"
+        "services.boss_reminder.alert_already_sent",
+        new_callable=AsyncMock,
+        return_value=False,
+    ), patch(
+        "services.boss_reminder.try_claim_alert",
+        new_callable=AsyncMock,
+        side_effect=claim,
+    ), patch(
+        "services.boss_reminder.send_to_channels",
+        new_callable=AsyncMock,
+        side_effect=lambda *_a, **_k: (order.append("send") or {1}),
     ):
         import datetime
 
@@ -122,35 +123,38 @@ async def test_boss_reminder_claims_before_send():
         delta = (weekday_with_boss - base.weekday()) % 7
         target = base + datetime.timedelta(days=delta)
         mock_now.return_value = target - datetime.timedelta(minutes=10)
-        await cog.auto_boss_reminder()
+        ok = await run_boss_reminder(bot, write_db=bot.db, channel_id=1)
 
+    assert ok is True
     assert order == ["claim", "send"]
-    assert channel.send.await_args.kwargs.get("content") == "@everyone"
 
 
 @pytest.mark.asyncio
 async def test_boss_reminder_releases_claim_when_send_fails():
     bot = MagicMock()
-    channel = MagicMock()
-    response = MagicMock(status=500)
-    channel.send = AsyncMock(side_effect=discord.HTTPException(response, "fail"))
-    cog = BossSchedule(bot)
+    bot.db = MagicMock()
     weekday = next(iter(GAP_BOSS_SCHEDULE))
     hour = GAP_BOSS_SCHEDULE[weekday][0]
+    release = AsyncMock()
 
-    with patch.object(
-        BossSchedule, "REMINDER_CHANNEL_ID", new_callable=PropertyMock, return_value=1
-    ), patch("cogs.boss_schedule.now_taipei") as mock_now, patch(
-        "cogs.boss_schedule.resolve_bot_channel",
+    with patch("services.boss_reminder.now_taipei") as mock_now, patch(
+        "services.boss_reminder.today_taipei_str", return_value="2026-08-05"
+    ), patch(
+        "services.boss_reminder.alert_already_sent",
         new_callable=AsyncMock,
-        return_value=channel,
-    ), patch.object(
-        cog, "_already_reminded", new_callable=AsyncMock, return_value=False
-    ), patch.object(
-        cog, "_try_claim_reminder", new_callable=AsyncMock, return_value=True
-    ), patch.object(
-        cog, "_release_reminder_claim", new_callable=AsyncMock
-    ) as release:
+        return_value=False,
+    ), patch(
+        "services.boss_reminder.try_claim_alert",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "services.boss_reminder.send_to_channels",
+        new_callable=AsyncMock,
+        return_value=set(),
+    ), patch(
+        "services.boss_reminder.release_alert_claim",
+        release,
+    ):
         import datetime
 
         from services.timeutil import TAIPEI
@@ -158,6 +162,26 @@ async def test_boss_reminder_releases_claim_when_send_fails():
         base = datetime.datetime(2026, 8, 3, hour, 0, tzinfo=TAIPEI)
         target = base + datetime.timedelta(days=(weekday - base.weekday()) % 7)
         mock_now.return_value = target - datetime.timedelta(minutes=10)
-        await cog.auto_boss_reminder()
+        ok = await run_boss_reminder(bot, write_db=bot.db, channel_id=1)
 
+    assert ok is False
     release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cog_auto_boss_reminder_delegates_to_service():
+    bot = MagicMock()
+    cog = BossSchedule(bot)
+    with patch.object(
+        BossSchedule,
+        "REMINDER_CHANNEL_ID",
+        new_callable=PropertyMock,
+        return_value=99,
+    ), patch(
+        "cogs.boss_schedule.run_boss_reminder",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as runner:
+        await cog.auto_boss_reminder()
+    runner.assert_awaited_once()
+    assert runner.await_args.kwargs["channel_id"] == 99

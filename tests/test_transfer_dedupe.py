@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 
@@ -168,9 +168,14 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             "old_guild": "",
             "new_guild": "",
         }
-        cog._send_transfer_alert = AsyncMock(return_value=0)
+        cog._send_transfer_alert = AsyncMock(return_value=set())
 
-        with patch(
+        with patch.object(
+            ExpTracker,
+            "TRANSFER_ALERT_CHANNEL_IDS",
+            new_callable=PropertyMock,
+            return_value=[7],
+        ), patch(
             "services.transfer_alert_runner.is_transfer_active_period", return_value=False
         ), patch(
             "services.transfer_alert_runner.rank_transfer_candidates", return_value=[row]
@@ -203,5 +208,10 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             """
         ) as cursor:
             assert await cursor.fetchone() is None
+        from services.alert_dedupe import KIND_TRANSFER, alert_already_sent
+        from services.alert_dedupe import transfer_channel_dedupe_key
+
+        key = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 7)
+        assert await alert_already_sent(db, KIND_TRANSFER, key, check_legacy_settings=False) is False
     finally:
         await db.close()

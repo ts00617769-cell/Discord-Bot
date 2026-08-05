@@ -1,4 +1,4 @@
-"""轉服警報編排（Discord 送出由呼叫端注入）。"""
+"""轉服警報編排（Discord 送出由呼叫端注入；per-channel claim）。"""
 from __future__ import annotations
 
 import datetime
@@ -10,6 +10,13 @@ from typing import Any
 
 import discord
 
+from services.alert_dedupe import (
+    KIND_TRANSFER,
+    alert_already_sent,
+    release_alert_claim,
+    transfer_channel_dedupe_key,
+    try_claim_alert,
+)
 from services.game_event_windows import (
     TRANSFER_LOGIN_GRACE_DAYS,
     is_transfer_active_period,
@@ -37,10 +44,12 @@ from services.transfer_missing import (
     resolve_reappeared,
     upsert_disappeared,
 )
+from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
 
-SendTransferAlert = Callable[..., Awaitable[int]]
+# 回傳成功送達的頻道 ID 集合
+SendTransferAlert = Callable[..., Awaitable[set[int]]]
 
 
 async def fetch_potential_transfers(
@@ -69,12 +78,12 @@ async def send_transfer_alert_message(
     exp_diff,
     old_guild: str = "",
     new_guild: str = "",
-) -> int:
-    """發送轉服警報；回傳成功送達的頻道數。"""
+) -> set[int]:
+    """發送轉服警報；回傳成功送達的頻道 ID 集合。"""
     from services.discord_send import send_to_channels
 
     if not channel_ids:
-        return 0
+        return set()
     diff_str = format_exp_diff(exp_diff)
     old_g = old_guild or "—"
     new_g = new_guild or "—"
@@ -94,10 +103,35 @@ async def send_transfer_alert_message(
     async def _send(channel) -> None:
         await channel.send(embed=embed)
 
-    sent = await send_to_channels(
+    return await send_to_channels(
         bot, channel_ids, send_fn=_send, label="transfer alert channel"
     )
-    return len(sent)
+
+
+async def _pair_channels_fully_claimed(
+    db, pair_key: tuple[str, str, str, str], channel_ids: Sequence[int]
+) -> bool:
+    if not channel_ids:
+        return False
+    for channel_id in channel_ids:
+        key = transfer_channel_dedupe_key(pair_key, channel_id)
+        if not await alert_already_sent(
+            db, KIND_TRANSFER, key, check_legacy_settings=False
+        ):
+            return False
+    return True
+
+
+async def _mark_pair_alerted(write_db, pair_key, time_now) -> None:
+    await write_db.execute(
+        """
+        INSERT OR IGNORE INTO transfer_alerts_log
+        (old_name, old_server, new_name, new_server, alert_time)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (*pair_key, time_now),
+    )
+    await write_db.commit()
 
 
 async def run_transfer_check(
@@ -106,22 +140,33 @@ async def run_transfer_check(
     read_db: Any,
     time_now,
     time_prev,
-    complete_times=None,
+    channel_ids: Sequence[int],
     send_alert: SendTransferAlert,
+    complete_times=None,
+    write_lock: Any | None = None,
 ) -> None:
+    if not channel_ids:
+        return
     try:
         in_active = is_transfer_active_period(str(time_now))
 
+        async def _upsert_missing() -> None:
+            await resolve_reappeared(write_db, time_now=str(time_now))
+            await upsert_disappeared(
+                write_db,
+                time_now=str(time_now),
+                time_prev=str(time_prev),
+                created_at=str(time_now),
+            )
+            await bump_still_missing(write_db, time_now=str(time_now))
+
         if in_active:
             try:
-                await resolve_reappeared(write_db, time_now=str(time_now))
-                await upsert_disappeared(
-                    write_db,
-                    time_now=str(time_now),
-                    time_prev=str(time_prev),
-                    created_at=str(time_now),
-                )
-                await bump_still_missing(write_db, time_now=str(time_now))
+                if write_lock is not None:
+                    async with write_lock:
+                        await _upsert_missing()
+                else:
+                    await _upsert_missing()
             except sqlite3.DatabaseError as e:
                 logger.error(f"transfer_missing upsert failed: {e}")
 
@@ -164,25 +209,67 @@ async def run_transfer_check(
             read_db, ranked, already_alerted, miss_times
         )
 
+        created_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
+
         for pair in pick_unique_pairs(
             viable, already_alerted, in_active_period=in_active
         ):
             pair_key = pair["pair_key"]
+            if await _pair_channels_fully_claimed(read_db, pair_key, channel_ids):
+                try:
+                    if write_lock is not None:
+                        async with write_lock:
+                            await _mark_pair_alerted(write_db, pair_key, time_now)
+                    else:
+                        await _mark_pair_alerted(write_db, pair_key, time_now)
+                except sqlite3.DatabaseError as e:
+                    logger.error("transfer pair finalize failed: %s", e)
+                already_alerted.add(pair_key)
+                continue
+
+            claimed_channels: list[int] = []
+
+            async def _claim_channels() -> list[int]:
+                claimed: list[int] = []
+                for channel_id in channel_ids:
+                    channel_key = transfer_channel_dedupe_key(pair_key, channel_id)
+                    try:
+                        if await alert_already_sent(
+                            read_db,
+                            KIND_TRANSFER,
+                            channel_key,
+                            check_legacy_settings=False,
+                        ):
+                            continue
+                        if not await try_claim_alert(
+                            write_db,
+                            KIND_TRANSFER,
+                            channel_key,
+                            created_at=created_at,
+                        ):
+                            continue
+                    except sqlite3.DatabaseError as e:
+                        logger.error(
+                            "transfer alert claim failed for channel %s: %s",
+                            channel_id,
+                            e,
+                        )
+                        continue
+                    claimed.append(channel_id)
+                return claimed
+
             try:
-                cursor = await write_db.execute(
-                    """
-                    INSERT OR IGNORE INTO transfer_alerts_log
-                    (old_name, old_server, new_name, new_server, alert_time)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (*pair_key, time_now),
-                )
-                await write_db.commit()
-                if (cursor.rowcount or 0) != 1:
-                    already_alerted.add(pair_key)
-                    continue
+                if write_lock is not None:
+                    async with write_lock:
+                        claimed_channels = await _claim_channels()
+                else:
+                    claimed_channels = await _claim_channels()
             except sqlite3.DatabaseError as e:
                 logger.error(f"transfer alert claim failed: {e}")
+                continue
+
+            if not claimed_channels:
+                already_alerted.add(pair_key)
                 continue
 
             sent = await send_alert(
@@ -198,47 +285,79 @@ async def run_transfer_check(
                 pair["exp_diff"],
                 old_guild=pair.get("old_guild") or "",
                 new_guild=pair.get("new_guild") or "",
+                channel_ids=claimed_channels,
             )
-            if sent > 0:
+            sent_ids = set(sent) if sent else set()
+            failed = set(claimed_channels) - sent_ids
+
+            async def _release_failed() -> None:
+                for channel_id in failed:
+                    channel_key = transfer_channel_dedupe_key(pair_key, channel_id)
+                    try:
+                        await release_alert_claim(
+                            write_db, KIND_TRANSFER, channel_key
+                        )
+                    except sqlite3.DatabaseError as e:
+                        logger.error(
+                            "回滾轉服警報 channel claim 失敗 (%s): %s",
+                            channel_id,
+                            e,
+                        )
+
+            if failed:
+                if write_lock is not None:
+                    async with write_lock:
+                        await _release_failed()
+                else:
+                    await _release_failed()
+                logger.warning(
+                    f"轉服警報部分頻道失敗，已釋放 claim："
+                    f"{pair['old_name']}@{pair['old_server']} -> "
+                    f"{pair['new_name']}@{pair['new_server']} "
+                    f"channels={sorted(failed)}"
+                )
+
+            if sent_ids:
                 try:
-                    await mark_missing_resolved(
-                        write_db,
-                        pair["old_name"],
-                        pair["old_server"],
-                        resolved_at=str(time_now),
-                    )
-                    await write_db.commit()
+                    async def _after_success() -> None:
+                        await mark_missing_resolved(
+                            write_db,
+                            pair["old_name"],
+                            pair["old_server"],
+                            resolved_at=str(time_now),
+                        )
+                        await write_db.commit()
+                        if await _pair_channels_fully_claimed(
+                            write_db, pair_key, channel_ids
+                        ):
+                            await _mark_pair_alerted(write_db, pair_key, time_now)
+
+                    if write_lock is not None:
+                        async with write_lock:
+                            await _after_success()
+                    else:
+                        await _after_success()
                 except sqlite3.DatabaseError as e:
                     logger.error(
-                        "轉服警報已送出但 mark_missing_resolved 失敗: %s", e
+                        "轉服警報已送出但後續寫入失敗: %s", e
                     )
                 already_alerted.add(pair_key)
-            else:
-                try:
-                    await write_db.execute(
-                        """
-                        DELETE FROM transfer_alerts_log
-                        WHERE old_name=? AND old_server=?
-                          AND new_name=? AND new_server=?
-                        """,
-                        pair_key,
-                    )
-                    await write_db.commit()
-                except sqlite3.DatabaseError as e:
-                    logger.error("回滾轉服警報 claim 失敗: %s", e)
-                logger.warning(
-                    f"轉服警報送出失敗，已釋放 claim："
-                    f"{pair['old_name']}@{pair['old_server']} -> "
-                    f"{pair['new_name']}@{pair['new_server']}"
-                )
 
         try:
             cutoff_dt = datetime.datetime.strptime(
                 str(time_now), "%Y-%m-%d %H:%M:%S"
             ) - datetime.timedelta(days=TRANSFER_LOGIN_GRACE_DAYS + 7)
-            await prune_stale_missing(
-                write_db, before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
-            )
+
+            async def _prune() -> None:
+                await prune_stale_missing(
+                    write_db, before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+                )
+
+            if write_lock is not None:
+                async with write_lock:
+                    await _prune()
+            else:
+                await _prune()
         except (ValueError, TypeError, sqlite3.DatabaseError) as e:
             logger.warning(f"prune transfer_missing skipped: {e}")
     except sqlite3.DatabaseError as e:

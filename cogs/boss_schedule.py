@@ -1,6 +1,5 @@
 import datetime
 import logging
-import sqlite3
 
 import discord
 from discord.ext import commands, tasks
@@ -12,8 +11,9 @@ from services.alert_dedupe import (
     release_alert_claim,
     try_claim_alert,
 )
-from services.error_handler import parse_env_channel_id, resolve_bot_channel
-from services.timeutil import now_naive_taipei, now_taipei, today_taipei_str
+from services.boss_reminder import run_boss_reminder
+from services.error_handler import parse_env_channel_id
+from services.timeutil import now_naive_taipei, now_taipei
 
 logger = logging.getLogger(__name__)
 
@@ -35,72 +35,28 @@ class BossSchedule(commands.Cog):
             self.auto_boss_reminder.cancel()
 
     async def _already_reminded(self, key: str) -> bool:
+        """測試／相容用包裝。"""
         return await alert_already_sent(self.bot.db, KIND_BOSS_REMINDER, key)
 
     async def _try_claim_reminder(self, key: str) -> bool:
-        """先寫入 dedupe（INSERT OR IGNORE）；成功取得 claim 才回 True。"""
+        """測試／相容用包裝。"""
         now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
         return await try_claim_alert(
             self.bot.db, KIND_BOSS_REMINDER, key, created_at=now
         )
 
     async def _release_reminder_claim(self, key: str) -> None:
+        """測試／相容用包裝。"""
         await release_alert_claim(self.bot.db, KIND_BOSS_REMINDER, key)
 
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):
-        if not self.REMINDER_CHANNEL_ID:
-            return
-
-        now = now_taipei()
-        ten_mins_later = now + datetime.timedelta(minutes=10)
-        target_hour = ten_mins_later.hour
-        target_minute = ten_mins_later.minute
-        weekday = ten_mins_later.weekday()
-
-        if target_minute != 0 or target_hour not in GAP_BOSS_SCHEDULE.get(weekday, []):
-            return
-
-        # 同一提醒窗只發一次（重啟也不會重複 @everyone）
-        dedupe_key = f"boss_reminder:{today_taipei_str()}:{target_hour:02d}"
-        try:
-            if await self._already_reminded(dedupe_key):
-                return
-            if not await self._try_claim_reminder(dedupe_key):
-                return
-        except sqlite3.DatabaseError as e:
-            logger.error(f"Boss reminder dedupe check failed: {e}")
-            return
-
-        channel = await resolve_bot_channel(
+        await run_boss_reminder(
             self.bot,
-            self.REMINDER_CHANNEL_ID,
-            label="boss reminder channel",
+            write_db=self.bot.db,
+            channel_id=self.REMINDER_CHANNEL_ID,
+            write_lock=getattr(self.bot, "db_write_lock", None),
         )
-        if not channel:
-            logger.warning(f"Boss reminder channel {self.REMINDER_CHANNEL_ID} not found")
-            try:
-                await self._release_reminder_claim(dedupe_key)
-            except sqlite3.DatabaseError:
-                logger.critical("Boss reminder 頻道不存在且無法釋放 claim", exc_info=True)
-            return
-        try:
-            time_str = "點、".join(map(str, GAP_BOSS_SCHEDULE[weekday])) + "點"
-            embed = discord.Embed(
-                title="🕒 時空縫隙首領召喚提醒",
-                description=(
-                    f"**10 分鐘後** 將開始召喚首領！\n\n"
-                    f"今天召喚時段\n✅ **{time_str}**"
-                ),
-                color=discord.Color.red(),
-            )
-            await channel.send(content="@everyone", embed=embed)
-        except discord.HTTPException as e:
-            logger.error(f"Failed to send boss reminder: {e}")
-            try:
-                await self._release_reminder_claim(dedupe_key)
-            except sqlite3.DatabaseError:
-                logger.critical("Boss reminder 發送失敗且無法釋放 claim", exc_info=True)
 
     @auto_boss_reminder.before_loop
     async def before_auto_boss_reminder(self):

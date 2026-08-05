@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import sqlite3
-import time
 import traceback
 
 import discord
@@ -31,16 +30,14 @@ from services.player_search_engine import (
     parse_track_target,
     run_track_search,
 )
+from services.search_cache import (
+    get_cached_search,
+    invalidate_search_cache,
+    set_cached_search,
+)
 from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
-
-_SEARCH_RESULT_TTL_SEC = 60.0
-_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
-
-
-def invalidate_search_cache() -> None:
-    _SEARCH_CACHE.clear()
 
 
 class PlayerSearch(commands.Cog):
@@ -101,9 +98,8 @@ class PlayerSearch(commands.Cog):
         try:
             async with ctx.typing():
                 cache_key = f"{name.casefold()}|{server or ''}"
-                cached = _SEARCH_CACHE.get(cache_key)
-                if cached and (time.monotonic() - cached[0]) < _SEARCH_RESULT_TTL_SEC:
-                    payload = cached[1]
+                payload = get_cached_search(cache_key)
+                if payload:
                     if payload.get("kind") == "embeds":
                         await self._deliver_embeds(ctx, processing_msg, payload["embeds"])
                         return
@@ -149,9 +145,8 @@ class PlayerSearch(commands.Cog):
                         footer="僅供參考：可疑候選，請交叉比對等級／討伐／轉移時程",
                         show_confidence=True,
                     )
-                    _SEARCH_CACHE[cache_key] = (
-                        time.monotonic(),
-                        {"kind": "embeds", "embeds": embeds},
+                    set_cached_search(
+                        cache_key, {"kind": "embeds", "embeds": embeds}
                     )
                     await self._deliver_embeds(ctx, processing_msg, embeds)
                     return
@@ -162,9 +157,8 @@ class PlayerSearch(commands.Cog):
                         f"⚠️ 目標最後紀錄為 {last_exp/1000000000000:.2f} 兆。\n"
                         f"雙引擎未找到符合條件的轉服/改名軌跡。{result.tip}"
                     )
-                    _SEARCH_CACHE[cache_key] = (
-                        time.monotonic(),
-                        {"kind": "text", "content": content},
+                    set_cached_search(
+                        cache_key, {"kind": "text", "content": content}
                     )
                     return await processing_msg.edit(content=content)
 
@@ -176,9 +170,8 @@ class PlayerSearch(commands.Cog):
                     color=0xff0000,
                     footer="V6：denorm stats・tiered margin・covering indexes",
                 )
-                _SEARCH_CACHE[cache_key] = (
-                    time.monotonic(),
-                    {"kind": "embeds", "embeds": embeds},
+                set_cached_search(
+                    cache_key, {"kind": "embeds", "embeds": embeds}
                 )
                 await self._deliver_embeds(ctx, processing_msg, embeds)
 

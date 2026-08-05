@@ -3,6 +3,17 @@ from __future__ import annotations
 
 KIND_OVERSPEED = "overspeed"
 KIND_BOSS_REMINDER = "boss_reminder"
+KIND_TRANSFER = "transfer"
+
+
+def transfer_channel_dedupe_key(
+    pair_key: tuple[str, str, str, str], channel_id: int
+) -> str:
+    old_name, old_server, new_name, new_server = pair_key
+    return (
+        f"transfer:{old_name}|{old_server}|{new_name}|{new_server}"
+        f"|channel:{channel_id}"
+    )
 
 CLAIM_SQL = """
 INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)

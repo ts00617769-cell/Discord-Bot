@@ -290,7 +290,7 @@ def test_transfer_calendar_health_notes_estimated():
 
     notes = transfer_calendar_health_notes("2026-08-10 12:00:00")
     assert notes
-    assert any("預估" in n for n in notes)
+    assert any("預估" in n or "已無後續" in n for n in notes)
 
 
 def test_transfer_calendar_health_notes_exhausted():
@@ -299,3 +299,14 @@ def test_transfer_calendar_health_notes_exhausted():
     notes = transfer_calendar_health_notes("2027-01-15 12:00:00")
     assert notes
     assert any("已無後續" in n for n in notes)
+
+
+def test_transfer_calendar_health_notes_warns_before_expiry():
+    from services.game_event_windows import transfer_calendar_health_notes
+
+    # 第28次結束 2026-08-02 + grace 3 日 ≈ 08-05；在 07-25 應觸發即將用盡
+    notes = transfer_calendar_health_notes(
+        "2026-07-25 12:00:00", warn_within_days=14
+    )
+    assert notes
+    assert any("即將用盡" in n for n in notes)

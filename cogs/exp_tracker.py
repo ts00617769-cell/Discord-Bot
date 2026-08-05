@@ -266,6 +266,7 @@ class ExpTracker(commands.Cog):
         if len(times) < 2:
             return
         time_now, time_prev_scan = times[0][0], times[1][0]
+        write_lock = getattr(self.bot, "db_write_lock", None)
 
         await run_overspeed_patrol(
             self.bot,
@@ -274,10 +275,13 @@ class ExpTracker(commands.Cog):
             write_db=self.bot.db,
             times=times,
             current_time=current_time,
+            write_lock=write_lock,
         )
 
         if run_transfers:
-            await self.check_for_transfers(time_now, time_prev_scan, complete_times=times)
+            await self.check_for_transfers(
+                time_now, time_prev_scan, complete_times=times
+            )
         else:
             logger.info("本輪略過轉服偵測（快照不完整）")
 
@@ -288,6 +292,7 @@ class ExpTracker(commands.Cog):
         record_count: int,
         time_now: str,
         minutes_diff: float,
+        include_clear: bool | None = None,
     ) -> list[discord.Embed]:
         """測試／相容用包裝。"""
         return build_overspeed_embeds(
@@ -296,6 +301,7 @@ class ExpTracker(commands.Cog):
             record_count=record_count,
             time_now=time_now,
             minutes_diff=minutes_diff,
+            include_clear=include_clear,
         )
 
     async def _send_overspeed_embeds(
@@ -322,10 +328,16 @@ class ExpTracker(commands.Cog):
         *,
         old_guild: str = "",
         new_guild: str = "",
-    ) -> int:
+        channel_ids: list[int] | None = None,
+    ) -> set[int]:
+        targets = (
+            channel_ids
+            if channel_ids is not None
+            else self.TRANSFER_ALERT_CHANNEL_IDS
+        )
         return await send_transfer_alert_message(
             self.bot,
-            self.TRANSFER_ALERT_CHANNEL_IDS,
+            targets,
             time_now=time_now,
             new_name=new_name,
             new_server=new_server,
@@ -347,7 +359,9 @@ class ExpTracker(commands.Cog):
             time_now=time_now,
             time_prev=time_prev,
             complete_times=complete_times,
+            channel_ids=self.TRANSFER_ALERT_CHANNEL_IDS,
             send_alert=self._send_transfer_alert,
+            write_lock=getattr(self.bot, "db_write_lock", None),
         )
 
     @auto_fetch_exp.before_loop

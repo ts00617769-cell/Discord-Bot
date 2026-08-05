@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import sqlite3
 
-from bot import invoke_dedupe_id, release_command_claim_on_failure
+from bot import claim_command_once, release_command_claim_on_failure
 from db.schema import apply_migrations
-from services.cmd_dedupe import prune_command_dedupe
+from services.cmd_dedupe import invoke_dedupe_id, prune_command_dedupe
 
 
 def test_invoke_dedupe_id_prefers_interaction():
@@ -83,8 +83,6 @@ async def test_prune_command_dedupe_removes_only_expired_rows(tmp_path):
 @pytest.mark.asyncio
 async def test_claim_command_once_rejects_duplicate():
     from discord.ext import commands
-
-    from bot import claim_command_once
 
     db = MagicMock()
     db.commit = AsyncMock()

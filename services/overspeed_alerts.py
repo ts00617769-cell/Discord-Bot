@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from typing import Any, Protocol
 
@@ -32,6 +33,12 @@ class OverspeedSettings(Protocol):
     ALERT_CHANNEL_IDS: list[int]
 
 
+def send_clear_patrol_enabled() -> bool:
+    """EXP_ALERT_SEND_CLEAR=1 時才發送「無人超速」綠訊（預設關閉）。"""
+    raw = (os.getenv("EXP_ALERT_SEND_CLEAR", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def build_overspeed_embeds(
     settings: OverspeedSettings,
     alert_list: list[dict],
@@ -39,29 +46,45 @@ def build_overspeed_embeds(
     record_count: int,
     time_now: str,
     minutes_diff: float,
+    include_clear: bool | None = None,
 ) -> list[discord.Embed]:
-    """每輪都產生訊息；無超速者時送出綠色巡檢結果。"""
+    """產生超速／巡檢 embeds。
+
+    無超速者時：預設不送綠訊（可用 EXP_ALERT_SEND_CLEAR=1 開啟）；
+    旅團無資料時仍送黃訊提醒設定問題。
+    """
     footer = f"掃描時間: {time_now} (監控週期: {int(minutes_diff)}min)"
     if not alert_list:
-        if record_count:
-            description = (
-                f"本輪已比對 **{record_count}** 名玩家，"
-                f"沒有人超過 **{settings.SPEED_LIMIT:,.0f} 億／小時**。"
-            )
-            color = 0x2ECC71
-        else:
+        if not record_count:
             description = (
                 f"本輪找不到「{settings.alert_server}／{settings.alert_guild}」"
                 "可比較的玩家資料，請確認旅團名稱與榜單資料。"
             )
-            color = 0xF1C40F
+            embed = discord.Embed(
+                title=(
+                    f"✅ 10 分鐘超速巡檢 "
+                    f"({settings.alert_server}／{settings.alert_guild})"
+                ),
+                description=description,
+                color=0xF1C40F,
+            )
+            embed.set_footer(text=footer)
+            return [embed]
+        if include_clear is None:
+            include_clear = send_clear_patrol_enabled()
+        if not include_clear:
+            return []
+        description = (
+            f"本輪已比對 **{record_count}** 名玩家，"
+            f"沒有人超過 **{settings.SPEED_LIMIT:,.0f} 億／小時**。"
+        )
         embed = discord.Embed(
             title=(
                 f"✅ 10 分鐘超速巡檢 "
                 f"({settings.alert_server}／{settings.alert_guild})"
             ),
             description=description,
-            color=color,
+            color=0x2ECC71,
         )
         embed.set_footer(text=footer)
         return [embed]
@@ -107,6 +130,7 @@ async def run_overspeed_patrol(
     times: list[tuple],
     current_time,
     fmt: str = "%Y-%m-%d %H:%M:%S",
+    write_lock: Any | None = None,
 ) -> None:
     """對啟用中的旅團超速監控執行 claim-first 送出。"""
     import datetime
@@ -152,29 +176,57 @@ async def run_overspeed_patrol(
         records, minutes_diff, settings.SPEED_LIMIT
     )[: settings.alert_count]
 
+    embeds = build_overspeed_embeds(
+        settings,
+        alert_list,
+        record_count=len(records),
+        time_now=time_now,
+        minutes_diff=minutes_diff,
+    )
+    if not embeds:
+        logger.info(
+            "超速巡檢無違規且未啟用綠訊，略過送出 "
+            f"server={settings.alert_server} guild={settings.alert_guild}"
+        )
+        return
+
     dedupe_key = (
         f"overspeed:{time_now}|{time_prev}|"
         f"{settings.alert_server}|{settings.alert_guild}|{settings.alert_count}"
     )
     claimed_channels: list[int] = []
     created_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-    for channel_id in settings.ALERT_CHANNEL_IDS:
-        channel_key = f"{dedupe_key}|channel:{channel_id}"
-        try:
-            if await alert_already_sent(read_db, KIND_OVERSPEED, channel_key):
+
+    async def _claim_channels() -> list[int]:
+        claimed: list[int] = []
+        for channel_id in settings.ALERT_CHANNEL_IDS:
+            channel_key = f"{dedupe_key}|channel:{channel_id}"
+            try:
+                if await alert_already_sent(read_db, KIND_OVERSPEED, channel_key):
+                    continue
+                if not await try_claim_alert(
+                    write_db, KIND_OVERSPEED, channel_key, created_at=created_at
+                ):
+                    continue
+            except sqlite3.DatabaseError as e:
+                logger.error(
+                    "Overspeed dedupe claim failed for channel %s: %s",
+                    channel_id,
+                    e,
+                )
                 continue
-            if not await try_claim_alert(
-                write_db, KIND_OVERSPEED, channel_key, created_at=created_at
-            ):
-                continue
-        except sqlite3.DatabaseError as e:
-            logger.error(
-                "Overspeed dedupe claim failed for channel %s: %s",
-                channel_id,
-                e,
-            )
-            continue
-        claimed_channels.append(channel_id)
+            claimed.append(channel_id)
+        return claimed
+
+    try:
+        if write_lock is not None:
+            async with write_lock:
+                claimed_channels = await _claim_channels()
+        else:
+            claimed_channels = await _claim_channels()
+    except sqlite3.DatabaseError as e:
+        logger.error("Overspeed claim phase failed: %s", e)
+        return
 
     if not claimed_channels:
         logger.info(
@@ -183,13 +235,6 @@ async def run_overspeed_patrol(
         )
         return
 
-    embeds = build_overspeed_embeds(
-        settings,
-        alert_list,
-        record_count=len(records),
-        time_now=time_now,
-        minutes_diff=minutes_diff,
-    )
     sent_channels = await send_embeds_to_channels(
         bot,
         claimed_channels,
@@ -197,17 +242,25 @@ async def run_overspeed_patrol(
         label="overspeed alert channel",
     )
     failed_channels = set(claimed_channels) - sent_channels
-    for channel_id in failed_channels:
-        channel_key = f"{dedupe_key}|channel:{channel_id}"
-        try:
-            await release_alert_claim(write_db, KIND_OVERSPEED, channel_key)
-        except sqlite3.DatabaseError as e:
-            logger.error(
-                "Failed to release overspeed claim for channel %s: %s",
-                channel_id,
-                e,
-            )
+
+    async def _release_failed() -> None:
+        for channel_id in failed_channels:
+            channel_key = f"{dedupe_key}|channel:{channel_id}"
+            try:
+                await release_alert_claim(write_db, KIND_OVERSPEED, channel_key)
+            except sqlite3.DatabaseError as e:
+                logger.error(
+                    "Failed to release overspeed claim for channel %s: %s",
+                    channel_id,
+                    e,
+                )
+
     if failed_channels:
+        if write_lock is not None:
+            async with write_lock:
+                await _release_failed()
+        else:
+            await _release_failed()
         logger.warning(
             "超速巡檢部分頻道送出失敗，已釋放該頻道 claim："
             f"{settings.alert_server}/{settings.alert_guild} "

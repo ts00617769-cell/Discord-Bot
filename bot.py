@@ -27,10 +27,14 @@ from db.schema import (
     ensure_startup_db_readiness,
 )
 from db.singleton_lock import acquire_process_lock
-from services.cmd_dedupe import prune_command_dedupe
+from services.cmd_dedupe import (
+    invoke_dedupe_id,
+    prune_command_dedupe,
+    release_command_claim,
+    try_claim_command,
+)
 from services.error_handler import handle_command_error
 from services.ranking_api import get_ranking_client
-from services.timeutil import now_naive_taipei
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -218,15 +222,6 @@ bot = PrasiaBot()
 _app_commands_synced = False
 
 
-def invoke_dedupe_id(ctx: commands.Context) -> int | None:
-    """prefix 用 message snowflake，slash/hybrid 用 interaction snowflake。"""
-    interaction_id = getattr(ctx.interaction, "id", None)
-    if interaction_id is not None:
-        return int(interaction_id)
-    message_id = getattr(ctx.message, "id", None)
-    return int(message_id) if message_id is not None else None
-
-
 @bot.before_invoke
 async def claim_command_once(ctx: commands.Context):
     """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
@@ -238,21 +233,14 @@ async def claim_command_once(ctx: commands.Context):
         logger.warning("指令無 message/interaction ID，無法執行去重")
         return
     host = socket.gethostname()
-    try:
-        claimed_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        await ctx.bot.db.execute(
-            "INSERT INTO cmd_dedupe (message_id, claimed_at, pid, host) VALUES (?, ?, ?, ?)",
-            (invoke_id, claimed_at, os.getpid(), host),
-        )
-        await ctx.bot.db.commit()
-        ctx._cmd_dedupe_claimed = True  # type: ignore[attr-defined]
-        ctx._cmd_dedupe_id = invoke_id  # type: ignore[attr-defined]
-    except sqlite3.IntegrityError:
+    if not await try_claim_command(ctx.bot.db, invoke_id, host=host):
         logger.warning(
             f"⚠️ 略過重複指令: invoke={invoke_id} cmd={getattr(ctx.command, 'name', '?')} "
             f"pid={os.getpid()} host={host}"
         )
         raise commands.CheckFailure("duplicate_invoke") from None
+    ctx._cmd_dedupe_claimed = True  # type: ignore[attr-defined]
+    ctx._cmd_dedupe_id = invoke_id  # type: ignore[attr-defined]
 
 
 @bot.after_invoke
@@ -266,10 +254,7 @@ async def release_command_claim_on_failure(ctx: commands.Context):
     if invoke_id is None or not hasattr(ctx.bot, "db"):
         return
     try:
-        await ctx.bot.db.execute(
-            "DELETE FROM cmd_dedupe WHERE message_id = ?", (invoke_id,)
-        )
-        await ctx.bot.db.commit()
+        await release_command_claim(ctx.bot.db, invoke_id)
     except sqlite3.DatabaseError as e:
         logger.warning("釋放 cmd_dedupe claim 失敗: %s", e)
 

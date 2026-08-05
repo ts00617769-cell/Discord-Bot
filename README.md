@@ -63,6 +63,7 @@ ruff check .
 | `WAR_ROOM_CHANNEL_ID` | 戰情室日誌／錯誤／健康摘要 |
 | `QUIZ_POST_TIME` / `QUIZ_REVEAL_TIME` | 盲投發布／開獎時間（台北，預設 `12:00` / `18:00`） |
 | `EXP_ALERT_THRESHOLD` | 超速門檻（經驗／小時，預設 `200000000000`＝2000 億） |
+| `EXP_ALERT_SEND_CLEAR` | 設 `1` 時無超速者也送綠訊巡檢（預設關閉） |
 | `SNAPSHOT_MIN_SERVERS` | 完整快照最少「品質達標」服數（預設＝`SERVER_MAP` 全服） |
 | `SNAPSHOT_MIN_PLAYERS` | 單服算完整所需最少玩家人數（預設 `30`） |
 | `DB_PATH` | SQLite 路徑（預設專案根 `prasia_data.db`） |
