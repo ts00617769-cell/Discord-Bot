@@ -66,7 +66,10 @@ ruff check .
 | `SNAPSHOT_MIN_SERVERS` | 完整快照最少「品質達標」服數（預設＝`SERVER_MAP` 全服） |
 | `SNAPSHOT_MIN_PLAYERS` | 單服算完整所需最少玩家人數（預設 `30`） |
 | `DB_PATH` | SQLite 路徑（預設專案根 `prasia_data.db`） |
+| `SKIP_DB_QUICK_CHECK` | 設 `1` 略過啟動 `PRAGMA quick_check`（大庫／NAS 可暫用） |
 | `RANKING_CACHE_TTL` | Ranking 成功快取秒數（預設 `45`；`0`＝關閉） |
+
+跨主機共用同一 `DB_PATH` 時，啟動會以 `bot_instance_lock` heartbeat 互斥，避免雙開重複警報。
 
 開服／合服後請更新 [`game_data.py`](game_data.py) 的 `SERVER_MAP`，再用擁有者指令 `!伺服器檢查` 探活。
 

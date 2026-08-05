@@ -13,7 +13,6 @@ from services.retention_windows import (
     merge_ranges,
     search_retention_cutoff,
     select_recent_transfer_windows,
-    should_persist_exp_history,
 )
 
 
@@ -190,14 +189,6 @@ def test_thin_ranges_include_pad():
     )
     # keep 是連續 envelope；thin 仍個別依窗+pad
     assert keep == [("2026-06-03 12:00:00", "2026-07-21 04:00:00")]
-
-
-def test_should_persist_exp_history_every_round():
-    """即時警報需要每個 10 分鐘輪次都有歷史快照。"""
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 0, 0)) is True
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 30, 0)) is True
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 10, 0)) is True
-    assert should_persist_exp_history(datetime(2026, 7, 20, 12, 20, 0)) is True
 
 
 def test_transfer_middle_sql_params_match_window():

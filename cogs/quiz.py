@@ -140,7 +140,9 @@ class SecretQuizButton(discord.ui.Button):
             return
 
         poll["votes"][user_id] = {"name": user_name, "choice": self.choice_key}
-        reveal_label = REVEAL_TIME.strftime("%H:%M")
+        cog = _get_quiz_cog(interaction)
+        reveal = cog.reveal_time if cog is not None else REVEAL_TIME
+        reveal_label = reveal.strftime("%H:%M")
         await interaction.response.send_message(
             f"✅ 投票成功！你選擇了「{self.label}」。結果將於 {reveal_label} 公布。",
             ephemeral=True,
@@ -166,8 +168,7 @@ class QuizSystem(commands.Cog):
         self.quiz_data = []
         self.active_poll = _empty_poll()
         self.load_quiz_data()
-        self.post_time = POST_TIME
-        self.reveal_time = REVEAL_TIME
+        self.post_time, self.reveal_time = _parse_quiz_schedule()
         logger.info(f"Quiz times configured - Post: {self.post_time}, Reveal: {self.reveal_time}")
 
     def load_quiz_data(self):
@@ -187,13 +188,20 @@ class QuizSystem(commands.Cog):
             self.quiz_data = []
 
     async def cog_load(self):
+        self.post_time, self.reveal_time = _parse_quiz_schedule()
+        self.auto_post_quiz.change_interval(time=self.post_time)
+        self.auto_reveal_quiz.change_interval(time=self.reveal_time)
         await self.check_active_quiz_resume()
-        self.auto_post_quiz.start()
-        self.auto_reveal_quiz.start()
+        if not self.auto_post_quiz.is_running():
+            self.auto_post_quiz.start()
+        if not self.auto_reveal_quiz.is_running():
+            self.auto_reveal_quiz.start()
 
     def cog_unload(self):
-        self.auto_post_quiz.cancel()
-        self.auto_reveal_quiz.cancel()
+        if self.auto_post_quiz.is_running():
+            self.auto_post_quiz.cancel()
+        if self.auto_reveal_quiz.is_running():
+            self.auto_reveal_quiz.cancel()
 
     async def check_active_quiz_resume(self):
         async with self.bot.db.execute(
@@ -258,6 +266,29 @@ class QuizSystem(commands.Cog):
         )
         await self.bot.db.commit()
 
+    async def persist_posted_quiz(self, channel_id, date_str, question) -> None:
+        """同一交易寫入 active + history，避免題目被標記卻無 active 列。"""
+        today_str = today_taipei_str()
+        await self.bot.db.execute("BEGIN")
+        try:
+            await self.bot.db.execute("DELETE FROM quiz_votes")
+            await self.bot.db.execute(
+                """
+                INSERT OR REPLACE INTO active_quiz_status
+                (id, is_active, quiz_id, channel_id, date_str)
+                VALUES (1, 1, ?, ?, ?)
+                """,
+                (question["title"], str(channel_id), date_str),
+            )
+            await self.bot.db.execute(
+                "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)",
+                (question["title"], today_str),
+            )
+            await self.bot.db.commit()
+        except Exception:
+            await self.bot.db.rollback()
+            raise
+
     async def clear_active_status(self):
         await self.bot.db.execute("UPDATE active_quiz_status SET is_active = 0 WHERE id = 1")
         await self.bot.db.execute("DELETE FROM quiz_votes")
@@ -277,8 +308,8 @@ class QuizSystem(commands.Cog):
 
     async def _finalize_reveal(self) -> None:
         """結束盲投（無論是否成功送到頻道）。"""
-        self._reset_poll()
         await self.clear_active_status()
+        self._reset_poll()
 
     def _build_reveal_embed(self, title: str, question: dict) -> discord.Embed:
         embed = discord.Embed(
@@ -331,11 +362,10 @@ class QuizSystem(commands.Cog):
                 color=0x3498DB,
             )
             embed.set_footer(text=f"請點擊下方按鈕進行盲投，結果將於 {reveal_label} 準時公開！")
-            # 先成功送出再標記 active，避免發送失敗後整天無法重試
+            # 先成功送出再持久化；active + history 同一交易
             await channel.send(embed=embed, view=SecretQuizView(question))
+            await self.persist_posted_quiz(channel.id, current_date, question)
             self._start_poll(channel.id, current_date, question)
-            await self.mark_quiz_used(question)
-            await self.save_active_status(channel.id, current_date, question)
         except AttributeError as e:
             logger.error(f"Quiz data structure error: {e}")
         except (discord.HTTPException, sqlite3.DatabaseError, OSError) as e:
@@ -427,9 +457,8 @@ class QuizSystem(commands.Cog):
             await ctx.send("❌ 測驗訊息發送失敗，請稍後再試。")
             return
 
+        await self.persist_posted_quiz(ctx.channel.id, current_date, question)
         self._start_poll(ctx.channel.id, current_date, question)
-        await self.mark_quiz_used(question)
-        await self.save_active_status(ctx.channel.id, current_date, question)
 
     @commands.command(name="測試開獎")
     @commands.is_owner()

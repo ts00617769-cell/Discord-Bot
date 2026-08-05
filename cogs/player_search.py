@@ -35,7 +35,7 @@ from services.timeutil import now_naive_taipei
 
 logger = logging.getLogger(__name__)
 
-_SEARCH_RESULT_TTL_SEC = 180.0
+_SEARCH_RESULT_TTL_SEC = 60.0
 _SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 
 

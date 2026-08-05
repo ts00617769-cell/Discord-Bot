@@ -1,8 +1,12 @@
 """共享 SQLite bot 實例 lease。"""
 from __future__ import annotations
 
+import sqlite3
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
+from bot import PrasiaBot
 from db.instance_lock import (
     refresh_instance_lock,
     release_instance_lock,
@@ -48,3 +52,23 @@ async def test_instance_lock_allows_stale_takeover(tmp_path):
         ) is True
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_closes_after_consecutive_db_errors():
+    bot = PrasiaBot.__new__(PrasiaBot)
+    bot.instance_db = object()
+    bot.instance_holder_id = "host:1"
+    bot._heartbeat_fail_count = 0
+    bot.close = AsyncMock()
+
+    with patch(
+        "bot.refresh_instance_lock",
+        new_callable=AsyncMock,
+        side_effect=sqlite3.DatabaseError("database is locked"),
+    ):
+        for _ in range(PrasiaBot.HEARTBEAT_FAIL_LIMIT):
+            await PrasiaBot.instance_heartbeat.coro(bot)
+
+    assert bot._heartbeat_fail_count >= PrasiaBot.HEARTBEAT_FAIL_LIMIT
+    bot.close.assert_awaited()

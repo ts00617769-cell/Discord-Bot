@@ -825,8 +825,12 @@ async def ensure_startup_db_readiness(
             break
     total, filled = await denorm_coverage_stats(db)
     if total and filled < total:
-        raise StartupReadinessError(
-            f"player_profile denorm 尚未完成: {filled:,}/{total:,}"
+        # denorm 落後不擋啟動（大庫可離線 --for-search）；缺索引仍為硬錯誤
+        logger.warning(
+            "player_profile denorm 尚未完成: %s/%s；"
+            "尋人可能較慢，建議離線執行 `python cleanup_db.py --for-search`",
+            f"{filled:,}",
+            f"{total:,}",
         )
 
 

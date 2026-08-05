@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from db.connection import read_db
 from game_data import SERVER_MAP
 from services.command_args import parse_alert_toggle, parse_count_server
 from services.error_handler import allowed_channel, min_complete_snapshot_servers
@@ -29,6 +30,8 @@ class ExpCommands(commands.Cog):
     def _tracker(self):
         return self.bot.get_cog("ExpTracker")
 
+    def _db(self):
+        return read_db(self.bot)
     @commands.command(
         name="警報",
         help="開關指定伺服器、旅團的測速警報 (用法: !警報 開 50 萊涅01 旅團名稱)",
@@ -104,7 +107,7 @@ class ExpCommands(commands.Cog):
                 )
                 params_times = (target_server,)
 
-            async with self.bot.db.execute(sql_times, params_times) as cursor:
+            async with self._db().execute(sql_times, params_times) as cursor:
                 times = await cursor.fetchall()
 
             if len(times) < 2:
@@ -130,7 +133,7 @@ class ExpCommands(commands.Cog):
                 sql += " AND t1.server_name = ?"
                 params.append(target_server)
 
-            async with self.bot.db.execute(sql, tuple(params)) as cursor:
+            async with self._db().execute(sql, tuple(params)) as cursor:
                 speed_records = await cursor.fetchall()
 
             top_list = collect_speed_ranking(speed_records, minutes_diff)[:count]

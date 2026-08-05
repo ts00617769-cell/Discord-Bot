@@ -103,17 +103,10 @@ def acquire_singleton_lock():
                 print("   請先結束舊程序，否則指令會回覆兩次。")
                 sys.exit(1)
     except OSError as e:
-        logger.warning(f"檔案鎖失敗，改用 PID 檢查: {e}")
-        _lock_fp.seek(0)
-        raw = (_lock_fp.read() or "").strip()
-        try:
-            old_pid = int(raw) if raw else 0
-        except ValueError:
-            old_pid = 0
-        if old_pid and old_pid != os.getpid() and _pid_is_running(old_pid):
-            print(f"❌ 偵測到機器人已在執行中 (PID {old_pid})。")
-            print(f"   Windows 可執行: taskkill /PID {old_pid} /F")
-            sys.exit(1)
+        # 無法取得獨占鎖時直接拒絕啟動，避免僅靠 PID 檢查造成雙開
+        print(f"❌ 無法取得本機單例鎖，拒絕啟動: {e}")
+        print("   請確認 .bot.lock 可寫入，並結束其他 python 實例後重試。")
+        sys.exit(1)
 
     _lock_fp.seek(0)
     _lock_fp.truncate()
@@ -151,6 +144,9 @@ class PrasiaBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.instance_holder_id = make_holder_id()
+        self._heartbeat_fail_count = 0
+
+    HEARTBEAT_FAIL_LIMIT = 3
 
     @tasks.loop(seconds=30)
     async def instance_heartbeat(self):
@@ -160,8 +156,21 @@ class PrasiaBot(commands.Bot):
             ):
                 logger.critical("共享 DB 實例鎖已失效，立即關閉避免重複執行")
                 await self.close()
+                return
+            self._heartbeat_fail_count = 0
         except sqlite3.DatabaseError as e:
-            logger.error("更新共享 DB 實例 heartbeat 失敗: %s", e)
+            self._heartbeat_fail_count += 1
+            logger.error(
+                "更新共享 DB 實例 heartbeat 失敗 (%s/%s): %s",
+                self._heartbeat_fail_count,
+                self.HEARTBEAT_FAIL_LIMIT,
+                e,
+            )
+            if self._heartbeat_fail_count >= self.HEARTBEAT_FAIL_LIMIT:
+                logger.critical(
+                    "共享 DB heartbeat 連續失敗，立即關閉避免 split-brain"
+                )
+                await self.close()
 
     async def setup_hook(self):
         try:
@@ -213,6 +222,10 @@ class PrasiaBot(commands.Bot):
                 logger.error(
                     "❌ ALLOWED_COMMAND_CHANNELS 未設定：機密指令已改為 fail-closed，"
                     "全部機密指令將無法使用。請在 .env 填入戰情室頻道 ID。"
+                )
+            if not os.getenv("EXP_ALERT_CHANNEL_ID", "").strip():
+                logger.warning(
+                    "⚠️ EXP_ALERT_CHANNEL_ID 未設定：超速警報將不會發送。"
                 )
             if not os.getenv("TRANSFER_ALERT_CHANNEL_ID", "").strip():
                 logger.warning(
@@ -299,6 +312,7 @@ def invoke_dedupe_id(ctx: commands.Context) -> int | None:
 @bot.before_invoke
 async def claim_command_once(ctx: commands.Context):
     """同一則 Discord 訊息只允許一個實例執行指令，避免雙重回覆。"""
+    ctx._cmd_dedupe_claimed = False  # type: ignore[attr-defined]
     if not hasattr(ctx.bot, "db"):
         return
     invoke_id = invoke_dedupe_id(ctx)
@@ -313,12 +327,33 @@ async def claim_command_once(ctx: commands.Context):
             (invoke_id, claimed_at, os.getpid(), host),
         )
         await ctx.bot.db.commit()
+        ctx._cmd_dedupe_claimed = True  # type: ignore[attr-defined]
+        ctx._cmd_dedupe_id = invoke_id  # type: ignore[attr-defined]
     except sqlite3.IntegrityError:
         logger.warning(
             f"⚠️ 略過重複指令: invoke={invoke_id} cmd={getattr(ctx.command, 'name', '?')} "
             f"pid={os.getpid()} host={host}"
         )
         raise commands.CheckFailure("duplicate_invoke") from None
+
+
+@bot.after_invoke
+async def release_command_claim_on_failure(ctx: commands.Context):
+    """指令失敗時釋放 claim，允許同則訊息重試（暫態錯誤）。"""
+    if not getattr(ctx, "_cmd_dedupe_claimed", False):
+        return
+    if not getattr(ctx, "command_failed", False):
+        return
+    invoke_id = getattr(ctx, "_cmd_dedupe_id", None)
+    if invoke_id is None or not hasattr(ctx.bot, "db"):
+        return
+    try:
+        await ctx.bot.db.execute(
+            "DELETE FROM cmd_dedupe WHERE message_id = ?", (invoke_id,)
+        )
+        await ctx.bot.db.commit()
+    except sqlite3.DatabaseError as e:
+        logger.warning("釋放 cmd_dedupe claim 失敗: %s", e)
 
 
 @bot.event

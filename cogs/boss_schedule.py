@@ -21,10 +21,12 @@ class BossSchedule(commands.Cog):
         return parse_env_channel_id("BOSS_REMINDER_CHANNEL_ID", 0)
 
     async def cog_load(self):
-        self.auto_boss_reminder.start()
+        if not self.auto_boss_reminder.is_running():
+            self.auto_boss_reminder.start()
 
     def cog_unload(self):
-        self.auto_boss_reminder.cancel()
+        if self.auto_boss_reminder.is_running():
+            self.auto_boss_reminder.cancel()
 
     async def _already_reminded(self, key: str) -> bool:
         async with self.bot.db.execute(
@@ -38,17 +40,18 @@ class BossSchedule(commands.Cog):
         ) as cursor:
             return await cursor.fetchone() is not None
 
-    async def _mark_reminded(self, key: str) -> None:
+    async def _try_claim_reminder(self, key: str) -> bool:
+        """先寫入 dedupe（INSERT OR IGNORE）；成功取得 claim 才回 True。"""
         now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        await self.bot.db.execute(
+        cursor = await self.bot.db.execute(
             """
-            INSERT INTO alert_dedupe (kind, dedupe_key, created_at)
+            INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)
             VALUES (?, ?, ?)
-            ON CONFLICT(kind, dedupe_key) DO UPDATE SET created_at=excluded.created_at
             """,
             ("boss_reminder", key, now),
         )
         await self.bot.db.commit()
+        return (cursor.rowcount or 0) == 1
 
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):
@@ -68,6 +71,8 @@ class BossSchedule(commands.Cog):
         dedupe_key = f"boss_reminder:{today_taipei_str()}:{target_hour:02d}"
         try:
             if await self._already_reminded(dedupe_key):
+                return
+            if not await self._try_claim_reminder(dedupe_key):
                 return
         except sqlite3.DatabaseError as e:
             logger.error(f"Boss reminder dedupe check failed: {e}")
@@ -92,9 +97,6 @@ class BossSchedule(commands.Cog):
                 color=discord.Color.red(),
             )
             await channel.send(content="@everyone", embed=embed)
-            await self._mark_reminded(dedupe_key)
-        except sqlite3.DatabaseError as e:
-            logger.error(f"Failed to persist boss reminder dedupe: {e}")
         except discord.HTTPException as e:
             logger.error(f"Failed to send boss reminder: {e}")
 

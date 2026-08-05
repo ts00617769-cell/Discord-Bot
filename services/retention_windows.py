@@ -9,13 +9,11 @@ from services.timeutil import FMT_SQL, now_naive_taipei
 
 DEFAULT_RECENT_DAYS = 3
 # 轉移窗結束後再留 N 天：對齊 TRANSFER_LOGIN_GRACE_DAYS（延遲登入）
-# NAS：維持單次轉移窗 + 稀疏寫入／窗內瘦身，避免 exp_history 肥大
+# NAS：維持單次轉移窗 + 每日／離線清理稀疏化，避免 exp_history 肥大
 DEFAULT_TRANSFER_PAD_DAYS = 3
 DEFAULT_MAX_TRANSFER_WINDOWS = 1
 # 轉服警報 log 與 history 脫鉤，可留較久
 DEFAULT_TRANSFER_ALERT_DAYS = 180
-# 非轉移活躍期：exp_history 寫入間隔（分鐘）；活躍期仍每輪寫入
-HISTORY_SPARSE_INTERVAL_MINUTES = 30
 # 線上／離線分批 DELETE（NAS 記憶體較緊時偏小）
 ONLINE_DELETE_BATCH_SIZE = 20_000
 ONLINE_CHECKPOINT_EVERY_BATCHES = 10
@@ -262,22 +260,6 @@ def build_transfer_thin_ranges(
     # 依開始時間排序，方便 dry-run／測試穩定輸出
     ranges.sort(key=lambda x: x[0])
     return ranges
-
-
-def should_persist_exp_history(
-    when: datetime.datetime,
-    *,
-    sparse_interval_minutes: int = HISTORY_SPARSE_INTERVAL_MINUTES,
-) -> bool:
-    """是否寫入本輪 exp_history；即時警報需要每個 10 分鐘快照。
-
-    舊資料由每日清理的轉移／橋接端點稀疏化控制容量。
-    """
-    if when.tzinfo is not None:
-        when = when.replace(tzinfo=None)
-    if sparse_interval_minutes < 1:
-        raise ValueError("sparse_interval_minutes must be >= 1")
-    return True
 
 
 def exp_history_transfer_middle_sql(

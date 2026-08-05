@@ -38,7 +38,7 @@ from services.settings_prune import (
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
-from services.timeutil import TAIPEI, now_taipei, today_taipei_str
+from services.timeutil import TAIPEI, now_taipei, taipei_cutoff_str, today_taipei_str
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,8 @@ class WarRoom(commands.Cog):
             except discord.HTTPException as e:
                 logger.error(f"Failed to send war room error report: {e}")
 
-    clean_time = datetime.time(hour=4, minute=0, tzinfo=TAIPEI)
+    # 04:15：錯開整點／:10 快照寫入，降低 NAS database is locked
+    clean_time = datetime.time(hour=4, minute=15, tzinfo=TAIPEI)
     health_time = datetime.time(hour=9, minute=0, tzinfo=TAIPEI)
 
     async def _gather_health_stats(self) -> dict:
@@ -167,14 +168,29 @@ class WarRoom(commands.Cog):
             "denorm_total": 0,
             "denorm_filled": 0,
         }
-        async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
-            row = await cursor.fetchone()
-            stats["exp_rows"] = row[0] if row else 0
+        # 優先用 sqlite_stat1 估計，避免大庫全表 COUNT 卡住週報
         async with db.execute(
-            "SELECT COUNT(*) FROM transfer_alerts_log"
+            "SELECT SUM(stat) FROM sqlite_stat1 WHERE tbl = 'exp_history'"
         ) as cursor:
             row = await cursor.fetchone()
-            stats["transfer_rows"] = row[0] if row else 0
+        if row and row[0] is not None:
+            stats["exp_rows"] = int(row[0])
+        else:
+            async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+                row = await cursor.fetchone()
+                stats["exp_rows"] = row[0] if row else 0
+        async with db.execute(
+            "SELECT SUM(stat) FROM sqlite_stat1 WHERE tbl = 'transfer_alerts_log'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row and row[0] is not None:
+            stats["transfer_rows"] = int(row[0])
+        else:
+            async with db.execute(
+                "SELECT COUNT(*) FROM transfer_alerts_log"
+            ) as cursor:
+                row = await cursor.fetchone()
+                stats["transfer_rows"] = row[0] if row else 0
         async with db.execute(
             """
             SELECT record_time, COUNT(DISTINCT server_name)
@@ -245,7 +261,7 @@ class WarRoom(commands.Cog):
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
-        """每天凌晨 4 點：尋人導向保留（近 N 天 ∪ 轉移窗）外分批刪除；不過期 VACUUM。"""
+        """每天凌晨 4:15：尋人導向保留（近 N 天 ∪ 轉移窗）外分批刪除；不過期 VACUUM。"""
         try:
             retention_cutoff = search_retention_cutoff(
                 recent_days=DEFAULT_RECENT_DAYS,
@@ -325,7 +341,20 @@ class WarRoom(commands.Cog):
             ) as cursor:
                 deleted_alert_dedupe = cursor.rowcount or 0
 
+            cmd_cutoff = taipei_cutoff_str(2)
+            async with self.bot.db.execute(
+                "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
+                (cmd_cutoff,),
+            ) as cursor:
+                deleted_cmd_dedupe = cursor.rowcount or 0
+
             await self.bot.db.commit()
+            try:
+                from cogs.player_search import invalidate_search_cache
+
+                invalidate_search_cache()
+            except ImportError:
+                pass
             try:
                 await self.bot.db.execute("PRAGMA optimize")
             except sqlite3.DatabaseError as e:
@@ -340,6 +369,7 @@ class WarRoom(commands.Cog):
                 or deleted_transfer > 0
                 or deleted_settings > 0
                 or deleted_alert_dedupe > 0
+                or deleted_cmd_dedupe > 0
                 or rebuilt_profiles > 0
                 or pruned_profiles > 0
                 or backfilled > 0
@@ -366,7 +396,8 @@ class WarRoom(commands.Cog):
                     f"`exp_history` {deleted_exp + deleted_middle} 筆{middle_note}、"
                     f"`transfer_alerts_log` {deleted_transfer} 筆、"
                     f"`bot_settings` 去重 key {deleted_settings} 筆、"
-                    f"`alert_dedupe` {deleted_alert_dedupe} 筆"
+                    f"`alert_dedupe` {deleted_alert_dedupe} 筆、"
+                    f"`cmd_dedupe` {deleted_cmd_dedupe} 筆"
                     f"{profile_note}。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}"
                 )

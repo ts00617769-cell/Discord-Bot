@@ -105,6 +105,46 @@ async def test_startup_readiness_builds_indexes_and_finishes_denorm(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_startup_readiness_warns_not_raises_on_incomplete_denorm(
+    tmp_path, caplog
+):
+    """denorm 落後不應擋啟動（缺索引仍為硬錯誤）。"""
+    import logging
+    from unittest.mock import AsyncMock, patch
+
+    db = await aiosqlite.connect(str(tmp_path / "soft.db"))
+    try:
+        await apply_migrations(db)
+        with (
+            patch(
+                "db.schema.list_missing_search_indexes_async",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "db.schema.prune_orphaned_player_profiles",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                "db.schema.denorm_coverage_stats",
+                new_callable=AsyncMock,
+                return_value=(100, 10),
+            ),
+            patch(
+                "db.schema.backfill_player_profile_denorm",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            await ensure_startup_db_readiness(db, denorm_max_batches=2)
+        assert any("denorm 尚未完成" in r.message for r in caplog.records)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_rebuild_player_profiles_fills_stats(tmp_path):
     db_path = tmp_path / "prof.db"
     db = await aiosqlite.connect(str(db_path))

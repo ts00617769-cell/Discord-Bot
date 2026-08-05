@@ -32,7 +32,6 @@ from services.game_event_windows import (
     is_transfer_active_period,
 )
 from services.ranking_api import get_ranking_client
-from services.retention_windows import should_persist_exp_history
 from services.text_display import pad_text
 from services.timeutil import now_naive_taipei
 from services.transfer_alert_flow import (
@@ -62,6 +61,13 @@ from services.transfer_missing import (
 logger = logging.getLogger(__name__)
 
 
+def _invalidate_search_cache() -> None:
+    try:
+        from cogs.player_search import invalidate_search_cache
+    except ImportError:
+        return
+    invalidate_search_cache()
+
 class ExpTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -85,16 +91,22 @@ class ExpTracker(commands.Cog):
     async def cog_load(self):
         # schema 已在 bot.setup_hook 套用；!reload 時不必再 migrate
         await self._load_alert_settings()
+        if not self.ALERT_CHANNEL_IDS:
+            logger.warning(
+                "⚠️ EXP_ALERT_CHANNEL_ID 未設定或無效：超速警報不會發送。"
+            )
         if not self.TRANSFER_ALERT_CHANNEL_IDS:
             logger.warning(
                 "⚠️ TRANSFER_ALERT_CHANNEL_ID 未設定或無效：轉服警報不會發送。"
             )
         self._index_task = asyncio.create_task(self._ensure_search_indexes())
-        self.auto_fetch_exp.start()
+        if not self.auto_fetch_exp.is_running():
+            self.auto_fetch_exp.start()
         self._validate_task = asyncio.create_task(self._startup_validate_servers())
 
     def cog_unload(self):
-        self.auto_fetch_exp.cancel()
+        if self.auto_fetch_exp.is_running():
+            self.auto_fetch_exp.cancel()
         for attr in ("_index_task", "_validate_task"):
             task = getattr(self, attr, None)
             if task and not task.done():
@@ -216,7 +228,6 @@ class ExpTracker(commands.Cog):
             servers_thin = []
             round_batches: list[list[tuple]] = []
             min_players = min_snapshot_players()
-            persist_history = should_persist_exp_history(now_time)
 
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
@@ -262,8 +273,8 @@ class ExpTracker(commands.Cog):
             await persist_snapshot_round(
                 getattr(self.bot, "snapshot_db", self.bot.db),
                 round_batches,
-                persist_history=persist_history,
             )
+            _invalidate_search_cache()
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()
             if not snapshot_complete:
                 logger.warning(
@@ -572,6 +583,25 @@ class ExpTracker(commands.Cog):
             for pair in pick_unique_pairs(
                 viable, already_alerted, in_active_period=in_active
             ):
+                pair_key = pair["pair_key"]
+                # 先 claim log，避免 Discord 送出成功但 commit 失敗造成重發
+                try:
+                    cursor = await write_db.execute(
+                        '''
+                        INSERT OR IGNORE INTO transfer_alerts_log
+                        (old_name, old_server, new_name, new_server, alert_time)
+                        VALUES (?, ?, ?, ?, ?)
+                        ''',
+                        (*pair_key, time_now),
+                    )
+                    await write_db.commit()
+                    if (cursor.rowcount or 0) != 1:
+                        already_alerted.add(pair_key)
+                        continue
+                except sqlite3.DatabaseError as e:
+                    logger.error(f"transfer alert claim failed: {e}")
+                    continue
+
                 sent = await self._send_transfer_alert(
                     time_now,
                     pair["new_name"],
@@ -587,25 +617,34 @@ class ExpTracker(commands.Cog):
                     new_guild=pair.get("new_guild") or "",
                 )
                 if sent > 0:
-                    await write_db.execute(
-                        '''
-                        INSERT INTO transfer_alerts_log
-                        (old_name, old_server, new_name, new_server, alert_time)
-                        VALUES (?, ?, ?, ?, ?)
-                        ''',
-                        (*pair["pair_key"], time_now),
-                    )
-                    await mark_missing_resolved(
-                        write_db,
-                        pair["old_name"],
-                        pair["old_server"],
-                        resolved_at=str(time_now),
-                    )
-                    await write_db.commit()
-                    already_alerted.add(pair["pair_key"])
+                    try:
+                        await mark_missing_resolved(
+                            write_db,
+                            pair["old_name"],
+                            pair["old_server"],
+                            resolved_at=str(time_now),
+                        )
+                        await write_db.commit()
+                    except sqlite3.DatabaseError as e:
+                        logger.error(
+                            "轉服警報已送出但 mark_missing_resolved 失敗: %s", e
+                        )
+                    already_alerted.add(pair_key)
                 else:
+                    try:
+                        await write_db.execute(
+                            """
+                            DELETE FROM transfer_alerts_log
+                            WHERE old_name=? AND old_server=?
+                              AND new_name=? AND new_server=?
+                            """,
+                            pair_key,
+                        )
+                        await write_db.commit()
+                    except sqlite3.DatabaseError as e:
+                        logger.error("回滾轉服警報 claim 失敗: %s", e)
                     logger.warning(
-                        f"轉服警報送出失敗，未寫入 dedupe："
+                        f"轉服警報送出失敗，已釋放 claim："
                         f"{pair['old_name']}@{pair['old_server']} -> "
                         f"{pair['new_name']}@{pair['new_server']}"
                     )
