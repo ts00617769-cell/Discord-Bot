@@ -285,12 +285,11 @@ def test_default_retention_is_three_days_and_pad_three():
     assert DEFAULT_TRANSFER_PAD_DAYS == 3
 
 
-def test_transfer_calendar_health_notes_estimated():
+def test_transfer_calendar_health_notes_has_remaining():
     from services.game_event_windows import transfer_calendar_health_notes
 
-    notes = transfer_calendar_health_notes("2026-08-10 12:00:00")
-    assert notes
-    assert any("預估" in n or "已無後續" in n for n in notes)
+    # #29～#33 已進正式日曆；08-10 仍在 #29 有效期內，不應警告
+    assert transfer_calendar_health_notes("2026-08-10 12:00:00") == []
 
 
 def test_transfer_calendar_health_notes_exhausted():
@@ -304,9 +303,10 @@ def test_transfer_calendar_health_notes_exhausted():
 def test_transfer_calendar_health_notes_warns_before_expiry():
     from services.game_event_windows import transfer_calendar_health_notes
 
-    # 第28次結束 2026-08-02 + grace 3 日 ≈ 08-05；在 07-25 應觸發即將用盡
+    # 第33次結束 2026-12-20 + grace 3 日 ≈ 12-23；在 12-12 應觸發即將用盡
     notes = transfer_calendar_health_notes(
-        "2026-07-25 12:00:00", warn_within_days=14
+        "2026-12-12 12:00:00", warn_within_days=14
     )
     assert notes
     assert any("即將用盡" in n for n in notes)
+    assert any("第33次" in n for n in notes)
