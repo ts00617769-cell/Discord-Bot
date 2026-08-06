@@ -32,6 +32,7 @@ CHECKPOINT_EVERY_BATCHES = 10
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from db.instance_lock import get_live_instance_holder  # noqa: E402
 from db.paths import resolve_db_path  # noqa: E402
 from db.schema import (  # noqa: E402
     build_search_indexes_sync,
@@ -75,6 +76,48 @@ else:
 
 def _bot_appears_running() -> bool:
     return is_process_lock_held(LOCK_PATH)
+
+
+def _refuse_if_bot_running(conn: sqlite3.Connection, *, force: bool) -> int | None:
+    """本機檔案鎖或跨機 instance heartbeat 仍活著時拒絕（除非 --force）。
+
+    回傳非 0 表示應結束程式；None 表示可繼續。
+    """
+    local_held = _bot_appears_running()
+    remote = get_live_instance_holder(conn)
+    if not local_held and remote is None:
+        return None
+    if force:
+        if local_held:
+            print(
+                f"警告：--force 略過本機 {LOCK_PATH.name}；"
+                "若 bot 仍在跑可能損壞資料庫。",
+                flush=True,
+            )
+        if remote is not None:
+            holder, heartbeat = remote
+            print(
+                f"警告：--force 略過跨機 instance lock "
+                f"（holder={holder}, heartbeat={heartbeat}）。",
+                flush=True,
+            )
+        return None
+    if local_held:
+        print(
+            f"錯誤：偵測到 bot 仍佔用 {LOCK_PATH.name}（檔案鎖）。\n"
+            "請先在 Docker 停止 prasia-bot-final，或確認已停後加 --force。\n"
+            "（若容器已停仍出現此訊息，多半是舊版誤判殘留 PID；請 git pull 後重試。）",
+            file=sys.stderr,
+        )
+        return 1
+    holder, heartbeat = remote  # type: ignore[misc]
+    print(
+        "錯誤：偵測到共享資料庫上仍有活躍 bot 實例 "
+        f"（holder={holder}, heartbeat={heartbeat}）。\n"
+        "請先停止遠端 bot，或確認 heartbeat 過期後再跑；緊急時加 --force。",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _fmt_bytes(n: int) -> str:
@@ -304,15 +347,6 @@ def main() -> int:
         print(f"錯誤：找不到資料庫 {db_path}", file=sys.stderr)
         return 1
 
-    if _bot_appears_running() and not args.force:
-        print(
-            f"錯誤：偵測到 bot 仍佔用 {LOCK_PATH.name}（檔案鎖）。\n"
-            "請先在 Docker 停止 prasia-bot-final，或確認已停後加 --force。\n"
-            "（若容器已停仍出現此訊息，多半是舊版誤判殘留 PID；請 git pull 後重試。）",
-            file=sys.stderr,
-        )
-        return 1
-
     before = _file_size(db_path)
     wal = Path(str(db_path) + "-wal")
     shm = Path(str(db_path) + "-shm")
@@ -327,6 +361,10 @@ def main() -> int:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
+
+        refuse = _refuse_if_bot_running(conn, force=bool(args.force))
+        if refuse is not None:
+            return refuse
         # 約 64MB page cache，降低大 DELETE 被 OOM 的機率
         conn.execute("PRAGMA cache_size=-65536")
         lock_err = _ensure_exclusive_access(conn)

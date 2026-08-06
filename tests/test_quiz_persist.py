@@ -99,6 +99,55 @@ async def test_auto_post_rolls_back_claim_when_discord_send_fails():
 
 
 @pytest.mark.asyncio
+async def test_auto_reveal_keeps_poll_when_send_fails():
+    bot = MagicMock()
+    cog = _cog(bot)
+    cog._start_poll(123, "2026-08-05", QUESTION)
+    cog.active_poll["votes"] = {"1": {"name": "Alice", "choice": "A"}}
+    channel = MagicMock(id=123)
+    finalize = AsyncMock()
+    cog._finalize_reveal = finalize
+
+    with patch(
+        "cogs.quiz.resolve_bot_channel",
+        new_callable=AsyncMock,
+        return_value=channel,
+    ), patch(
+        "cogs.quiz.send_to_channel",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        await QuizSystem.auto_reveal_quiz.coro(cog)
+
+    finalize.assert_not_awaited()
+    assert cog.active_poll["is_active"] is True
+    assert cog.active_poll["votes"]["1"]["choice"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_auto_reveal_finalizes_when_send_ok():
+    bot = MagicMock()
+    cog = _cog(bot)
+    cog._start_poll(123, "2026-08-05", QUESTION)
+    channel = MagicMock(id=123)
+    finalize = AsyncMock()
+    cog._finalize_reveal = finalize
+
+    with patch(
+        "cogs.quiz.resolve_bot_channel",
+        new_callable=AsyncMock,
+        return_value=channel,
+    ), patch(
+        "cogs.quiz.send_to_channel",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        await QuizSystem.auto_reveal_quiz.coro(cog)
+
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_finalize_reveal_retries_then_clears_memory():
     cog = _cog(MagicMock())
     cog._start_poll(123, "2026-08-05", QUESTION)

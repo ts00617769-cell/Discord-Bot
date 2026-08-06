@@ -24,8 +24,8 @@ def invoke_dedupe_id(ctx: Any) -> int | None:
     return int(message_id) if message_id is not None else None
 
 
-BUSY_RETRY_ATTEMPTS = 3
-BUSY_RETRY_BASE_DELAY = 0.2
+BUSY_RETRY_ATTEMPTS = 6
+BUSY_RETRY_BASE_DELAY = 0.25
 
 
 def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
@@ -44,8 +44,8 @@ async def try_claim_command(
 ) -> bool:
     """INSERT cmd_dedupe；成功取得 claim 回 True，重複回 False。
 
-    DB 忙碌時短重試；仍失敗則放行（fail-open）並記錄——去重是防雙重回覆的
-    盡力機制，實例鎖才是真正的互斥保證，不該因暫時鎖表讓使用者指令整個失敗。
+    DB 忙碌時指數退避重試；仍失敗則放行（fail-open）並記錄——去重是防雙重
+    回覆的盡力機制，實例鎖才是真正的互斥保證，不該因暫時鎖表讓使用者指令失敗。
     """
     claimed_at = claimed_at or now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
     pid = os.getpid() if pid is None else pid
@@ -68,7 +68,10 @@ async def try_claim_command(
         except sqlite3.OperationalError as e:
             if not _is_busy_error(e) or attempt == BUSY_RETRY_ATTEMPTS - 1:
                 logger.warning(
-                    "cmd_dedupe claim 失敗（放行執行）invoke=%s: %s", invoke_id, e
+                    "cmd_dedupe claim 失敗（放行執行）invoke=%s after %s tries: %s",
+                    invoke_id,
+                    attempt + 1,
+                    e,
                 )
                 return True
             await asyncio.sleep(BUSY_RETRY_BASE_DELAY * (2**attempt))

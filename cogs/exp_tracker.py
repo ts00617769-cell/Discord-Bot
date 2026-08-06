@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 from db import ensure_search_indexes
 from db.connection import read_db
 from game_data import SERVER_MAP
+from services.db_lock import run_locked
 from services.error_handler import (
     min_complete_snapshot_servers,
     min_snapshot_players,
@@ -131,14 +132,18 @@ class ExpTracker(commands.Cog):
             ("alert_server", self.alert_server),
             ("alert_guild", self.alert_guild),
         ]
-        await self.bot.db.executemany(
-            """
-            INSERT INTO bot_settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            pairs,
-        )
-        await self.bot.db.commit()
+
+        async def _persist() -> None:
+            await self.bot.db.executemany(
+                """
+                INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                pairs,
+            )
+            await self.bot.db.commit()
+
+        await run_locked(getattr(self.bot, "db_write_lock", None), _persist)
 
     async def _startup_validate_servers(self):
         try:
@@ -174,7 +179,11 @@ class ExpTracker(commands.Cog):
                 await asyncio.sleep(1)
             if self.bot.is_closed():
                 return
-            await ensure_search_indexes(self.bot.db)
+            await run_locked(
+                getattr(self.bot, "db_write_lock", None),
+                ensure_search_indexes,
+                self.bot.db,
+            )
         except asyncio.CancelledError:
             return
         except sqlite3.DatabaseError as e:

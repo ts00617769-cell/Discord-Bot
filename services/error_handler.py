@@ -246,19 +246,17 @@ async def handle_command_error(
     if not log_channel_id or bot is None:
         return True
 
-    channel = await resolve_bot_channel(
-        bot, log_channel_id, label="war room log channel"
+    from services.discord_send import send_text_to_channels
+
+    error_msg = "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
     )
-    if channel:
-        error_msg = "".join(
-            traceback.format_exception(type(error), error, error.__traceback__)
-        )
-        cmd_name = getattr(ctx.command, "qualified_name", "unknown")
-        try:
-            await channel.send(
-                f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`!{cmd_name}`\n"
-                f"```python\n{error_msg[:1900]}\n```"
-            )
-        except discord.HTTPException as e:
-            logger.error(f"Failed to send war room error report: {e}")
+    cmd_name = getattr(ctx.command, "qualified_name", "unknown")
+    await send_text_to_channels(
+        bot,
+        [log_channel_id],
+        f"🔴 **【系統報錯】**\n出錯頻道：<#{ctx.channel.id}>\n出錯指令：`!{cmd_name}`\n"
+        f"```python\n{error_msg[:1900]}\n```",
+        label="war room log channel",
+    )
     return True

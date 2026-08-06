@@ -16,6 +16,7 @@ from db.schema import (
 )
 from game_data import SERVER_MAP
 from services import player_matching as match
+from services.db_lock import run_locked
 from services.error_handler import (
     allowed_channel,
     parse_env_channel_ids,
@@ -424,7 +425,11 @@ class PlayerSearch(commands.Cog):
         try:
             if mode in ("全量", "full", "全部"):
                 await ctx.send("⏳ 全量重建中（使用 bot 寫入連線，可能較久）…")
-                n = await rebuild_player_profiles(self.bot.db)
+                n = await run_locked(
+                    getattr(self.bot, "db_write_lock", None),
+                    rebuild_player_profiles,
+                    self.bot.db,
+                )
                 invalidate_search_cache()
                 self._refresh_store()
                 if hasattr(self.store, "invalidate_denorm_cache"):
@@ -432,7 +437,12 @@ class PlayerSearch(commands.Cog):
                 await ctx.send(f"✅ 全量重建完成，共 {n:,} 筆 player_profile。")
             else:
                 total, filled = await denorm_coverage_stats(read_db(self.bot))
-                n = await backfill_player_profile_denorm(self.bot.db, batch_limit=2000)
+                n = await run_locked(
+                    getattr(self.bot, "db_write_lock", None),
+                    backfill_player_profile_denorm,
+                    self.bot.db,
+                    batch_limit=2000,
+                )
                 invalidate_search_cache()
                 if hasattr(self.store, "invalidate_denorm_cache"):
                     self.store.invalidate_denorm_cache()

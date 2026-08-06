@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import os
 import socket
+import sqlite3
 
 from services.timeutil import FMT_SQL, now_naive_taipei
 
@@ -82,3 +83,40 @@ async def release_instance_lock(db, holder_id: str) -> None:
         (LOCK_NAME, holder_id),
     )
     await db.commit()
+
+
+def get_live_instance_holder(
+    conn,
+    *,
+    ttl_seconds: int = 120,
+) -> tuple[str, str] | None:
+    """同步查詢：若有未過期的 bot_instance_lock，回傳 (holder_id, heartbeat_at)。
+
+    供 cleanup_db 等離線工具阻擋「他機 bot 仍在寫同一 DB」的互撞。
+    """
+    try:
+        row = conn.execute(
+            """
+            SELECT holder_id, heartbeat_at
+            FROM bot_instance_lock
+            WHERE lock_name = ?
+            """,
+            (LOCK_NAME,),
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    if not row:
+        return None
+    holder_id, heartbeat_at = row[0], row[1]
+    if not holder_id or not heartbeat_at:
+        return None
+    try:
+        hb = datetime.datetime.strptime(str(heartbeat_at), FMT_SQL)
+    except ValueError:
+        return (str(holder_id), str(heartbeat_at))
+    now = now_naive_taipei()
+    if hb.tzinfo is not None:
+        hb = hb.replace(tzinfo=None)
+    if (now - hb).total_seconds() > ttl_seconds:
+        return None
+    return (str(holder_id), str(heartbeat_at))

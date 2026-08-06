@@ -13,6 +13,7 @@ from typing import cast
 import discord
 from discord.ext import commands, tasks
 
+from services.db_lock import run_locked
 from services.discord_send import send_to_channel
 from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import TAIPEI, now_taipei, today_taipei_str
@@ -112,11 +113,18 @@ class SecretQuizButton(discord.ui.Button):
         try:
             bot = cast(commands.Bot, interaction.client)
             db = bot.db  # type: ignore[attr-defined]
-            cursor = await db.execute(
-                "INSERT INTO quiz_votes (user_id, user_name, choice) VALUES (?, ?, ?)",
-                (user_id, user_name, self.choice_key),
-            )
-            await db.commit()
+            write_lock = getattr(bot, "db_write_lock", None)
+
+            async def _persist_vote():
+                cursor = await db.execute(
+                    "INSERT INTO quiz_votes (user_id, user_name, choice) "
+                    "VALUES (?, ?, ?)",
+                    (user_id, user_name, self.choice_key),
+                )
+                await db.commit()
+                return cursor
+
+            cursor = await run_locked(write_lock, _persist_vote)
             if cursor.rowcount == 0:
                 await interaction.response.send_message(
                     "⚠️ 你已經投過票囉！請耐心等待晚上開獎。", ephemeral=True
@@ -238,8 +246,12 @@ class QuizSystem(commands.Cog):
         available = [q for q in self.quiz_data if q["title"] not in used_ids]
 
         if not available:
-            await self.bot.db.execute("DELETE FROM quiz_history")
-            await self.bot.db.commit()
+
+            async def _reset_history() -> None:
+                await self.bot.db.execute("DELETE FROM quiz_history")
+                await self.bot.db.commit()
+
+            await run_locked(getattr(self.bot, "db_write_lock", None), _reset_history)
             available = self.quiz_data
 
         if not available:
@@ -251,59 +263,73 @@ class QuizSystem(commands.Cog):
     async def claim_quiz_post(self, channel_id, date_str, question) -> bool:
         """發布前以單一交易 claim 今日測驗；同日已有 active 時回 False。"""
         today_str = today_taipei_str()
-        await self.bot.db.execute("BEGIN IMMEDIATE")
-        try:
-            async with self.bot.db.execute(
-                "SELECT is_active, date_str FROM active_quiz_status WHERE id = 1"
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row and row[0] == 1 and row[1] == date_str:
+
+        async def _claim() -> bool:
+            await self.bot.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.bot.db.execute(
+                    "SELECT is_active, date_str FROM active_quiz_status WHERE id = 1"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row and row[0] == 1 and row[1] == date_str:
+                    await self.bot.db.rollback()
+                    return False
+                await self.bot.db.execute("DELETE FROM quiz_votes")
+                await self.bot.db.execute(
+                    """
+                    INSERT OR REPLACE INTO active_quiz_status
+                    (id, is_active, quiz_id, channel_id, date_str)
+                    VALUES (1, 1, ?, ?, ?)
+                    """,
+                    (question["title"], str(channel_id), date_str),
+                )
+                await self.bot.db.execute(
+                    "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) "
+                    "VALUES (?, ?)",
+                    (question["title"], today_str),
+                )
+                await self.bot.db.commit()
+                return True
+            except Exception:
                 await self.bot.db.rollback()
-                return False
-            await self.bot.db.execute("DELETE FROM quiz_votes")
-            await self.bot.db.execute(
-                """
-                INSERT OR REPLACE INTO active_quiz_status
-                (id, is_active, quiz_id, channel_id, date_str)
-                VALUES (1, 1, ?, ?, ?)
-                """,
-                (question["title"], str(channel_id), date_str),
-            )
-            await self.bot.db.execute(
-                "INSERT OR REPLACE INTO quiz_history (quiz_id, used_date) VALUES (?, ?)",
-                (question["title"], today_str),
-            )
-            await self.bot.db.commit()
-            return True
-        except Exception:
-            await self.bot.db.rollback()
-            raise
+                raise
+
+        return await run_locked(getattr(self.bot, "db_write_lock", None), _claim)
 
     async def rollback_quiz_post(self, date_str: str, question: dict) -> None:
         """Discord 發送失敗時，只撤銷本次 claim 與 history。"""
-        await self.bot.db.execute("BEGIN IMMEDIATE")
-        try:
-            await self.bot.db.execute(
-                """
-                UPDATE active_quiz_status SET is_active = 0
-                WHERE id = 1 AND date_str = ? AND quiz_id = ?
-                """,
-                (date_str, question["title"]),
-            )
-            await self.bot.db.execute("DELETE FROM quiz_votes")
-            await self.bot.db.execute(
-                "DELETE FROM quiz_history WHERE quiz_id = ? AND used_date = ?",
-                (question["title"], today_taipei_str()),
-            )
-            await self.bot.db.commit()
-        except Exception:
-            await self.bot.db.rollback()
-            raise
+
+        async def _rollback() -> None:
+            await self.bot.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.bot.db.execute(
+                    """
+                    UPDATE active_quiz_status SET is_active = 0
+                    WHERE id = 1 AND date_str = ? AND quiz_id = ?
+                    """,
+                    (date_str, question["title"]),
+                )
+                await self.bot.db.execute("DELETE FROM quiz_votes")
+                await self.bot.db.execute(
+                    "DELETE FROM quiz_history WHERE quiz_id = ? AND used_date = ?",
+                    (question["title"], today_taipei_str()),
+                )
+                await self.bot.db.commit()
+            except Exception:
+                await self.bot.db.rollback()
+                raise
+
+        await run_locked(getattr(self.bot, "db_write_lock", None), _rollback)
 
     async def clear_active_status(self):
-        await self.bot.db.execute("UPDATE active_quiz_status SET is_active = 0 WHERE id = 1")
-        await self.bot.db.execute("DELETE FROM quiz_votes")
-        await self.bot.db.commit()
+        async def _clear() -> None:
+            await self.bot.db.execute(
+                "UPDATE active_quiz_status SET is_active = 0 WHERE id = 1"
+            )
+            await self.bot.db.execute("DELETE FROM quiz_votes")
+            await self.bot.db.commit()
+
+        await run_locked(getattr(self.bot, "db_write_lock", None), _clear)
 
     def _start_poll(self, channel_id, current_date, question):
         self.active_poll = {
@@ -442,11 +468,18 @@ class QuizSystem(commands.Cog):
             async def _send(target) -> None:
                 await target.send(embed=embed)
 
-            await send_to_channel(
+            # send_to_channel 已含暫態重試；仍失敗則保留投票，可用 !測試開獎補送
+            if await send_to_channel(
                 channel, send_fn=_send, label="quiz reveal channel"
-            )
-            # 無論是否送達，結束本日盲投，避免整天卡住
-            await self._finalize_reveal()
+            ):
+                await self._finalize_reveal()
+            else:
+                logger.critical(
+                    "每日測驗開獎送出失敗，已保留投票狀態待補送 "
+                    "(channel=%s date=%s)",
+                    self.active_poll.get("channel_id"),
+                    self.active_poll.get("date"),
+                )
         except KeyError as e:
             logger.error(f"Missing required field in active poll data: {e}")
             await self._finalize_reveal()
@@ -523,6 +556,8 @@ class QuizSystem(commands.Cog):
             await ctx.send(embed=embed)
         except discord.HTTPException as e:
             logger.error(f"force_reveal send failed: {e}")
+            await ctx.send("❌ 開獎訊息發送失敗，投票狀態已保留，請稍後再試。")
+            return
         await self._finalize_reveal()
 
 
