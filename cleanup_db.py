@@ -40,6 +40,7 @@ from db.schema import (  # noqa: E402
     rebuild_player_profiles_sync,
 )
 from db.singleton_lock import is_process_lock_held  # noqa: E402
+from services.cmd_dedupe import prune_command_dedupe_sync  # noqa: E402
 from services.retention_cleanup import (  # noqa: E402
     build_retention_plan,
     prune_secondary_sync,
@@ -376,6 +377,7 @@ def main() -> int:
         has_settings = _table_exists(conn, "bot_settings")
         has_alert_dedupe = _table_exists(conn, "alert_dedupe")
         has_transfer_missing = _table_exists(conn, "transfer_missing")
+        has_cmd_dedupe = _table_exists(conn, "cmd_dedupe")
 
         if indexes_only:
             if args.dry_run:
@@ -648,6 +650,7 @@ def main() -> int:
         deleted_settings = 0
         deleted_alert_dedupe = 0
         deleted_transfer_missing = 0
+        deleted_cmd_dedupe = 0
         if args.wipe_history:
             if has_exp:
                 _log("正在清空 exp_history…")
@@ -717,11 +720,13 @@ def main() -> int:
                 has_settings=has_settings,
                 has_alert_dedupe=has_alert_dedupe,
                 has_transfer_missing=has_transfer_missing,
+                prune_cmd_dedupe=has_cmd_dedupe,
             )
             deleted_transfer = secondary.deleted_transfer
             deleted_settings = secondary.deleted_settings
             deleted_alert_dedupe = secondary.deleted_alert_dedupe
             deleted_transfer_missing = secondary.deleted_transfer_missing
+            deleted_cmd_dedupe = secondary.deleted_cmd_dedupe
         else:
             cutoff = taipei_cutoff_str(args.days)
             if has_exp:
@@ -760,6 +765,8 @@ def main() -> int:
                 deleted_transfer_missing = prune_stale_missing_sync(
                     conn, before=cutoff
                 )
+            if has_cmd_dedupe:
+                deleted_cmd_dedupe = prune_command_dedupe_sync(conn, days=2)
 
         conn.commit()
         middle_note = (
@@ -770,7 +777,8 @@ def main() -> int:
             f"transfer_alerts_log {deleted_transfer:,}、"
             f"bot_settings 去重 {deleted_settings:,}、"
             f"alert_dedupe {deleted_alert_dedupe:,}、"
-            f"transfer_missing {deleted_transfer_missing:,}"
+            f"transfer_missing {deleted_transfer_missing:,}、"
+            f"cmd_dedupe {deleted_cmd_dedupe:,}"
         )
 
         if (
@@ -780,6 +788,7 @@ def main() -> int:
             and deleted_settings == 0
             and deleted_alert_dedupe == 0
             and deleted_transfer_missing == 0
+            and deleted_cmd_dedupe == 0
             and args.no_vacuum
         ):
             _log("沒有可刪資料，略過。")

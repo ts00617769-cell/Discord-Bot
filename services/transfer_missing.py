@@ -81,6 +81,7 @@ async def upsert_disappeared(
     time_now: str,
     time_prev: str,
     created_at: str,
+    commit: bool = True,
 ) -> int:
     """把上一完整快照有、本輪缺席、且 last_seen 落在轉移窗的玩家寫入佇列。
 
@@ -124,12 +125,12 @@ async def upsert_disappeared(
             ),
         )
         written += 1
-    if written:
+    if written and commit:
         await db.commit()
     return written
 
 
-async def bump_still_missing(db, *, time_now: str) -> int:
+async def bump_still_missing(db, *, time_now: str, commit: bool = True) -> int:
     """未解決且本輪仍缺席 → miss_count + 1（含剛 upsert 的新列）。"""
     cursor = await db.execute(
         """
@@ -146,12 +147,12 @@ async def bump_still_missing(db, *, time_now: str) -> int:
         (time_now,),
     )
     n = cursor.rowcount or 0
-    if n:
+    if n and commit:
         await db.commit()
     return int(n)
 
 
-async def resolve_reappeared(db, *, time_now: str) -> int:
+async def resolve_reappeared(db, *, time_now: str, commit: bool = True) -> int:
     """若舊服身分又出現在榜上，標記 resolved。"""
     sql = """
         UPDATE transfer_missing
@@ -166,7 +167,7 @@ async def resolve_reappeared(db, *, time_now: str) -> int:
     """
     cursor = await db.execute(sql, (time_now, time_now))
     n = cursor.rowcount or 0
-    if n:
+    if n and commit:
         await db.commit()
     return int(n)
 

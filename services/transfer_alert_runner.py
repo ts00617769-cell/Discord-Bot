@@ -196,14 +196,29 @@ async def _finalize_pair(
 
 
 async def _refresh_missing_queue(write_db, time_now, time_prev) -> None:
-    await resolve_reappeared(write_db, time_now=str(time_now))
-    await upsert_disappeared(
-        write_db,
-        time_now=str(time_now),
-        time_prev=str(time_prev),
-        created_at=str(time_now),
-    )
-    await bump_still_missing(write_db, time_now=str(time_now))
+    """單交易刷新消失佇列，避免中間當機留下半更新狀態。"""
+    await write_db.execute("BEGIN IMMEDIATE")
+    try:
+        await resolve_reappeared(
+            write_db, time_now=str(time_now), commit=False
+        )
+        await upsert_disappeared(
+            write_db,
+            time_now=str(time_now),
+            time_prev=str(time_prev),
+            created_at=str(time_now),
+            commit=False,
+        )
+        await bump_still_missing(
+            write_db, time_now=str(time_now), commit=False
+        )
+        await write_db.commit()
+    except Exception:
+        try:
+            await write_db.rollback()
+        except sqlite3.DatabaseError:
+            pass
+        raise
 
 
 async def _prune_missing_for_time(

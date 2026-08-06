@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 class Entertainment(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # 同星座併發 !星座 只爬一次外網
+        self._horoscope_fetch_locks: dict[str, asyncio.Lock] = {}
+
+    def _horoscope_lock(self, sign: str) -> asyncio.Lock:
+        lock = self._horoscope_fetch_locks.get(sign)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._horoscope_fetch_locks[sign] = lock
+        return lock
 
     @commands.command(name="鍊成", help="模擬四合一鍊成。")
     async def alchemy(self, ctx, rarity: str):
@@ -155,84 +164,22 @@ class Entertainment(commands.Cog):
             fortune_text = cached_result[0]
             footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
         else:
-            await run_locked(
-                getattr(self.bot, "db_write_lock", None),
-                self._purge_stale_horoscope_cache,
-                today_str,
-            )
-            loading_msg = None
-            try:
-                loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
-                url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
-                async with self.bot.session.get(url, timeout=10) as response:
-                    response.raise_for_status()
-                    html_bytes = await response.read()
-                    html = html_bytes.decode("utf-8", errors="ignore")
-
-                soup = BeautifulSoup(html, "html.parser")
-                today_content = (
-                    soup.find("div", class_="TODAY_CONTENT")
-                    or soup.find("div", id="TODAY_CONTENT")
-                    or soup.select_one(".TODAY_CONTENT, #dailyStar, .daily_content, .fortune")
-                )
-
-                if not today_content:
-                    for tag in soup.find_all(["div", "section", "article"]):
-                        txt = tag.get_text(" ", strip=True)
-                        if "整體運勢" in txt and len(txt) > 40:
-                            today_content = tag
-                            break
-
-                if today_content:
-                    raw_text = today_content.get_text("\n", strip=True)
-                    fortune_text = (
-                        raw_text.replace("整體運勢", "**整體運勢**")
-                        .replace("愛情運勢", "\n\n**愛情運勢**")
-                        .replace("事業運勢", "\n\n**事業運勢**")
-                        .replace("財運運勢", "\n\n**財運運勢**")
-                    )
-                    footer_text = "※ 資料來源：科技紫微網即時連線"
-
-                    await run_locked(
-                        getattr(self.bot, "db_write_lock", None),
-                        self._store_horoscope_cache,
-                        today_str,
-                        sign,
-                        fortune_text,
-                    )
+            async with self._horoscope_lock(sign):
+                async with self.bot.db.execute(
+                    "SELECT content FROM horoscope_cache WHERE date = ? AND sign = ?",
+                    (today_str, sign),
+                ) as cursor:
+                    cached_again = await cursor.fetchone()
+                if cached_again:
+                    fortune_text = cached_again[0]
+                    footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
                 else:
-                    fortune_text = (
-                        "⚠️ 目前無法取得今日運勢（外部網站版面可能已改版）。\n"
-                        "請稍後再試。"
+                    fetched = await self._fetch_and_store_horoscope(
+                        ctx, sign, sign_id, today_str
                     )
-                    footer_text = "※ 抓取失敗（已降級提示）"
-                    logger.warning(f"Horoscope parse miss for {sign}; url={url}")
-
-                if loading_msg:
-                    await loading_msg.delete()
-
-            except asyncio.TimeoutError as e:
-                logger.error(f"爬蟲逾時: {e}")
-                msg = "❌ 目前無法取得今日運勢（連線逾時），請稍後再試。"
-                if loading_msg:
-                    try:
-                        await loading_msg.edit(content=msg)
-                    except discord.HTTPException:
-                        await ctx.send(msg)
-                else:
-                    await ctx.send(msg)
-                return
-            except (aiohttp.ClientError, OSError, ValueError) as e:
-                logger.error(f"爬蟲報錯: {e}")
-                msg = "❌ 目前無法取得今日運勢（網路異常），請稍後再試。"
-                if loading_msg:
-                    try:
-                        await loading_msg.edit(content=msg)
-                    except discord.HTTPException:
-                        await ctx.send(msg)
-                else:
-                    await ctx.send(msg)
-                return
+                    if fetched is None:
+                        return
+                    fortune_text, footer_text = fetched
 
         embed = discord.Embed(
             title=f"🌌 今日真實運勢 - {sign}",
@@ -241,6 +188,98 @@ class Entertainment(commands.Cog):
         )
         embed.set_footer(text=footer_text)
         await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
+
+    async def _fetch_and_store_horoscope(
+        self, ctx, sign: str, sign_id: int, today_str: str
+    ) -> tuple[str, str] | None:
+        """爬外網並寫入快取；失敗時已回覆使用者，回傳 None。"""
+        await run_locked(
+            getattr(self.bot, "db_write_lock", None),
+            self._purge_stale_horoscope_cache,
+            today_str,
+        )
+        loading_msg = None
+        try:
+            loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")
+            url = f"https://astro.click108.com.tw/daily_{sign_id}.php?iAstro={sign_id}"
+            async with self.bot.session.get(url, timeout=10) as response:
+                response.raise_for_status()
+                html_bytes = await response.read()
+                html = html_bytes.decode("utf-8", errors="ignore")
+
+            soup = BeautifulSoup(html, "html.parser")
+            today_content = (
+                soup.find("div", class_="TODAY_CONTENT")
+                or soup.find("div", id="TODAY_CONTENT")
+                or soup.select_one(
+                    ".TODAY_CONTENT, #dailyStar, .daily_content, .fortune"
+                )
+            )
+
+            if not today_content:
+                for tag in soup.find_all(["div", "section", "article"]):
+                    txt = tag.get_text(" ", strip=True)
+                    if "整體運勢" in txt and len(txt) > 40:
+                        today_content = tag
+                        break
+
+            if today_content:
+                raw_text = today_content.get_text("\n", strip=True)
+                fortune_text = (
+                    raw_text.replace("整體運勢", "**整體運勢**")
+                    .replace("愛情運勢", "\n\n**愛情運勢**")
+                    .replace("事業運勢", "\n\n**事業運勢**")
+                    .replace("財運運勢", "\n\n**財運運勢**")
+                )
+                await run_locked(
+                    getattr(self.bot, "db_write_lock", None),
+                    self._store_horoscope_cache,
+                    today_str,
+                    sign,
+                    fortune_text,
+                )
+                if loading_msg:
+                    try:
+                        await loading_msg.delete()
+                    except discord.HTTPException:
+                        pass
+                return fortune_text, "※ 資料來源：科技紫微網即時連線"
+
+            fortune_text = (
+                "⚠️ 目前無法取得今日運勢（外部網站版面可能已改版）。\n"
+                "請稍後再試。"
+            )
+            footer_text = "※ 抓取失敗（已降級提示）"
+            logger.warning(f"Horoscope parse miss for {sign}; url={url}")
+            if loading_msg:
+                try:
+                    await loading_msg.delete()
+                except discord.HTTPException:
+                    pass
+            return fortune_text, footer_text
+
+        except asyncio.TimeoutError as e:
+            logger.error(f"爬蟲逾時: {e}")
+            msg = "❌ 目前無法取得今日運勢（連線逾時），請稍後再試。"
+            if loading_msg:
+                try:
+                    await loading_msg.edit(content=msg)
+                except discord.HTTPException:
+                    await ctx.send(msg)
+            else:
+                await ctx.send(msg)
+            return None
+        except (aiohttp.ClientError, OSError, ValueError) as e:
+            logger.error(f"爬蟲報錯: {e}")
+            msg = "❌ 目前無法取得今日運勢（網路異常），請稍後再試。"
+            if loading_msg:
+                try:
+                    await loading_msg.edit(content=msg)
+                except discord.HTTPException:
+                    await ctx.send(msg)
+            else:
+                await ctx.send(msg)
+            return None
 
     async def _purge_stale_horoscope_cache(self, today_str: str) -> None:
         await self.bot.db.execute(

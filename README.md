@@ -127,7 +127,7 @@ ruff check .
 | 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行；即使未設轉服警報頻道，仍會定期清理過期的 `transfer_missing` 佇列 |
 | Boss 提醒 | 召喚前 10 分鐘內 `@everyone`；錯過（重啟／延遲）會在剩餘分鐘內補送，DB 去重確保只送一次 |
 | 每日盲投 | 依 `QUIZ_POST_TIME`／`QUIZ_REVEAL_TIME` 發布與開獎 |
-| DB 清理 | 每日台北時間 **04:15** 執行；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`／`transfer_missing`；大量刪除後建議離線 VACUUM |
+| DB 清理 | 每日台北時間 **04:15** 執行；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`／`transfer_missing`／`cmd_dedupe`；大量刪除後建議離線 VACUUM |
 | 健康摘要 | 每週日 09:00（台北）發到 `WAR_ROOM_CHANNEL_ID`（若有設） |
 
 快照「品質達標」條件：該服**總榜成功**，且合併玩家人數 ≥ `SNAPSHOT_MIN_PLAYERS`。部分職業榜失敗仍會寫入可用資料，但該服不計入完整快照門檻，以降低假轉服。

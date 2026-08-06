@@ -359,7 +359,7 @@ class QuizSystem(commands.Cog):
         self.active_poll = _empty_poll()
 
     async def _finalize_reveal(self) -> None:
-        """重試持久化結束狀態；最終仍失敗時至少關閉記憶體投票。"""
+        """重試持久化結束狀態；成功才清記憶體，失敗則保持與 DB 一致。"""
         last_error: sqlite3.DatabaseError | None = None
         for attempt in range(3):
             try:
@@ -374,8 +374,14 @@ class QuizSystem(commands.Cog):
                     pass
                 if attempt < 2:
                     await asyncio.sleep(2**attempt)
-        self._reset_poll()
-        logger.critical("Quiz finalize 連續失敗，已停止記憶體投票", exc_info=last_error)
+        # 不清空記憶體：DB 仍可能 is_active=1，保留後可用 !測試開獎 再試
+        logger.critical(
+            "Quiz finalize 連續失敗，已保留記憶體投票狀態待補清 "
+            "(date=%s channel=%s)",
+            self.active_poll.get("date"),
+            self.active_poll.get("channel_id"),
+            exc_info=last_error,
+        )
         assert last_error is not None
         raise last_error
 

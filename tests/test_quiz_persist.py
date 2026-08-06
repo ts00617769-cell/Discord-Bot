@@ -169,6 +169,25 @@ async def test_finalize_reveal_retries_then_clears_memory():
 
 
 @pytest.mark.asyncio
+async def test_finalize_reveal_keeps_memory_when_db_exhausted():
+    cog = _cog(MagicMock())
+    cog._start_poll(123, "2026-08-05", QUESTION)
+    cog.active_poll["votes"] = {"1": {"name": "Alice", "choice": "A"}}
+    cog.clear_active_status = AsyncMock(
+        side_effect=sqlite3.DatabaseError("busy")
+    )
+    cog.bot.db.rollback = AsyncMock()
+
+    with patch("cogs.quiz.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(sqlite3.DatabaseError):
+            await cog._finalize_reveal()
+
+    assert cog.clear_active_status.await_count == 3
+    assert cog.active_poll["is_active"] is True
+    assert cog.active_poll["votes"]["1"]["choice"] == "A"
+
+
+@pytest.mark.asyncio
 async def test_check_active_quiz_resume_clears_orphan_missing_title(tmp_path):
     db = await aiosqlite.connect(tmp_path / "orphan.db")
     try:

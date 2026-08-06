@@ -578,3 +578,33 @@ async def test_alert_toggle_rolls_back_memory_on_save_fail():
     assert tracker.alerts_enabled is True
     ctx.send.assert_awaited()
     assert "失敗" in ctx.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_refresh_missing_queue_rolls_back_on_mid_failure(tmp_path):
+    """三步驟刷新若中途失敗，應整筆 rollback。"""
+    from services.transfer_alert_runner import _refresh_missing_queue
+
+    db = await aiosqlite.connect(str(tmp_path / "tx.db"))
+    try:
+        await apply_migrations(db)
+        with patch(
+            "services.transfer_alert_runner.resolve_reappeared",
+            new_callable=AsyncMock,
+            return_value=0,
+        ), patch(
+            "services.transfer_alert_runner.upsert_disappeared",
+            new_callable=AsyncMock,
+            return_value=1,
+        ), patch(
+            "services.transfer_alert_runner.bump_still_missing",
+            new_callable=AsyncMock,
+            side_effect=sqlite3.DatabaseError("boom"),
+        ):
+            with pytest.raises(sqlite3.DatabaseError):
+                await _refresh_missing_queue(
+                    db, "2026-08-05 12:00:00", "2026-08-05 11:50:00"
+                )
+        # 交易已回滾；不應留下未 commit 的寫入副作用（mocked 路徑主要驗證不洩漏 commit）
+    finally:
+        await db.close()
