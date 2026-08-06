@@ -73,6 +73,7 @@ async def test_war_room_cleanup_uses_retention_plan():
         deleted_settings=0,
         deleted_alert_dedupe=0,
         deleted_cmd_dedupe=0,
+        deleted_transfer_missing=0,
     )
     with patch(
         "cogs.war_room.build_retention_plan", return_value=plan

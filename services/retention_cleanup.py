@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from services.cmd_dedupe import prune_command_dedupe_sync
+from services.game_event_windows import TRANSFER_LOGIN_GRACE_DAYS
 from services.retention_windows import (
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
@@ -25,6 +26,10 @@ from services.settings_prune import (
     overspeed_prune_bound,
 )
 from services.timeutil import taipei_cutoff_str, today_taipei_str
+from services.transfer_missing import (
+    PRUNE_TRANSFER_MISSING_SQL,
+    prune_stale_missing_sync,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,12 @@ class SecondaryPruneStats:
     deleted_settings: int = 0
     deleted_alert_dedupe: int = 0
     deleted_cmd_dedupe: int = 0
+    deleted_transfer_missing: int = 0
+
+
+def _transfer_missing_cutoff() -> str:
+    """與 run_transfer_check 相同：grace + 7 天。"""
+    return taipei_cutoff_str(TRANSFER_LOGIN_GRACE_DAYS + 7)
 
 
 def build_retention_plan(
@@ -151,6 +162,12 @@ async def prune_secondary_async(
         ) as cursor:
             stats.deleted_cmd_dedupe = cursor.rowcount or 0
 
+    missing_cutoff = _transfer_missing_cutoff()
+    async with db.execute(
+        PRUNE_TRANSFER_MISSING_SQL, (missing_cutoff, missing_cutoff)
+    ) as cursor:
+        stats.deleted_transfer_missing = cursor.rowcount or 0
+
     await db.commit()
     return stats
 
@@ -162,6 +179,7 @@ def prune_secondary_sync(
     has_transfer: bool = True,
     has_settings: bool = True,
     has_alert_dedupe: bool = True,
+    has_transfer_missing: bool = True,
     prune_cmd_dedupe: bool = False,
     cmd_dedupe_days: int = 2,
 ) -> SecondaryPruneStats:
@@ -190,6 +208,10 @@ def prune_secondary_sync(
         stats.deleted_alert_dedupe += conn.execute(
             PRUNE_TRANSFER_DEDUPE_SQL, (plan.transfer_cutoff,)
         ).rowcount
+    if has_transfer_missing:
+        stats.deleted_transfer_missing = prune_stale_missing_sync(
+            conn, before=_transfer_missing_cutoff()
+        )
     if prune_cmd_dedupe:
         stats.deleted_cmd_dedupe = prune_command_dedupe_sync(
             conn, days=cmd_dedupe_days

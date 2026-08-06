@@ -124,10 +124,10 @@ ruff check .
 |------|------|
 | 經驗快照 | 約每 **10 分鐘** 抓各服排名寫入 `exp_history` |
 | 超速巡檢 | 需指定伺服器與旅團後執行 `!警報 開`；每 10 分鐘一輪，完整區間去重避免重發；綠訊需 `EXP_ALERT_SEND_CLEAR=1`，旅團查無資料的黃訊每小時最多一次 |
-| 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行 |
+| 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行；即使未設轉服警報頻道，仍會定期清理過期的 `transfer_missing` 佇列 |
 | Boss 提醒 | 召喚前 10 分鐘內 `@everyone`；錯過（重啟／延遲）會在剩餘分鐘內補送，DB 去重確保只送一次 |
 | 每日盲投 | 依 `QUIZ_POST_TIME`／`QUIZ_REVEAL_TIME` 發布與開獎 |
-| DB 清理 | 每日台北時間 **04:15** 執行；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`；大量刪除後建議離線 VACUUM |
+| DB 清理 | 每日台北時間 **04:15** 執行；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`／`transfer_missing`；大量刪除後建議離線 VACUUM |
 | 健康摘要 | 每週日 09:00（台北）發到 `WAR_ROOM_CHANNEL_ID`（若有設） |
 
 快照「品質達標」條件：該服**總榜成功**，且合併玩家人數 ≥ `SNAPSHOT_MIN_PLAYERS`。部分職業榜失敗仍會寫入可用資料，但該服不計入完整快照門檻，以降低假轉服。
@@ -161,12 +161,14 @@ python cleanup_db.py --days 30 --dry-run
 python cleanup_db.py --for-search --dry-run   # 尋人導向：近3天 ∪ 最近1次轉移窗～結束後再+3天；窗+pad 同角同服只留首尾
 python cleanup_db.py --for-search             # 實際刪除、VACUUM，並建立尋人索引 + player_profile（NAS 大庫必做）
 python cleanup_db.py --build-indexes          # 僅離線建索引（大庫啟動時會略過）
-python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
+python cleanup_db.py --wipe-history   # 清空歷史表含 transfer_missing（慎用）
 ```
 
 > `exp_history` 超過約 5 萬筆時，bot 啟動**不會**自動建索引（避免鎖庫）。清庫後務必跑 `--for-search` 或 `--build-indexes`，否則 `!尋人` 仍會全表掃描而很慢。
 >
 > NAS 部署：最近 3 天每 10 分鐘保留一輪，確保警報即時；上次官方轉移窗至最近 3 天之間會連續保留，但每日清理成同角同服首尾，避免時間斷層與容量暴增。尋人逾時時請**停 bot** 後跑 `--for-search`（含 VACUUM）。
+>
+> `--wipe-history` 會一併清空 `transfer_missing`（消失佇列），避免舊列在下一轉移窗誤報。
 >
 > 跨主機防雙開依賴所有實例使用同一個 `DB_PATH`；若兩台各用自己的 DB，任何 SQLite 鎖都無法互相看見。
 >

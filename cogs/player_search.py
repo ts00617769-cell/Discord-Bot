@@ -17,6 +17,7 @@ from db.schema import (
 from game_data import SERVER_MAP
 from services import player_matching as match
 from services.db_lock import run_locked
+from services.discord_send import send_embeds_to_channels
 from services.error_handler import (
     allowed_channel,
     parse_env_channel_ids,
@@ -405,15 +406,18 @@ class PlayerSearch(commands.Cog):
             color=0xf1c40f,
         )
 
-        success_count = 0
+        success = await send_embeds_to_channels(
+            self.bot,
+            [c.id for c in channels],
+            [embed],
+            label="transfer test channel",
+        )
+        success_count = len(success)
         for channel in channels:
-            try:
-                await channel.send(embed=embed)
-                success_count += 1
-            except discord.Forbidden:
-                await ctx.send(f"❌ 機器人沒有權限在頻道 `{channel.id}` 發送訊息。")
-            except discord.HTTPException as e:
-                await ctx.send(f"❌ 在頻道 `{channel.id}` 發送警報時發生錯誤：{e}")
+            if channel.id not in success:
+                await ctx.send(
+                    f"❌ 頻道 `{channel.id}` 發送測試警報失敗（已重試）。"
+                )
 
         if success_count > 0:
             await ctx.send(f"✅ 測試轉移警報已成功發送到 {success_count} 個頻道！")

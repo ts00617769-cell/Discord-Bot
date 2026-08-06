@@ -229,10 +229,12 @@ class WarRoom(commands.Cog):
             deleted_settings = secondary.deleted_settings
             deleted_alert_dedupe = secondary.deleted_alert_dedupe
             deleted_cmd_dedupe = secondary.deleted_cmd_dedupe
+            deleted_transfer_missing = secondary.deleted_transfer_missing
 
             invalidate_player_search_cache()
             try:
-                await self.bot.db.execute("PRAGMA optimize")
+                async with self.bot.db_write_lock:
+                    await self.bot.db.execute("PRAGMA optimize")
             except sqlite3.DatabaseError as e:
                 logger.warning(f"PRAGMA optimize 略過: {e}")
 
@@ -243,6 +245,7 @@ class WarRoom(commands.Cog):
                 or deleted_settings > 0
                 or deleted_alert_dedupe > 0
                 or deleted_cmd_dedupe > 0
+                or deleted_transfer_missing > 0
                 or rebuilt_profiles > 0
                 or pruned_profiles > 0
                 or backfilled > 0
@@ -259,6 +262,11 @@ class WarRoom(commands.Cog):
                     profile_note = (
                         f"、履歷 prune {pruned_profiles}／backfill {backfilled}"
                     )
+                missing_note = (
+                    f"、`transfer_missing` {deleted_transfer_missing} 筆"
+                    if deleted_transfer_missing
+                    else ""
+                )
                 middle_note = (
                     f"（窗外 {deleted_exp}、轉移窗中間 {deleted_middle}）"
                     if deleted_middle
@@ -273,7 +281,7 @@ class WarRoom(commands.Cog):
                     f"`bot_settings` 去重 key {deleted_settings} 筆、"
                     f"`alert_dedupe` {deleted_alert_dedupe} 筆、"
                     f"`cmd_dedupe` {deleted_cmd_dedupe} 筆"
-                    f"{profile_note}。"
+                    f"{missing_note}{profile_note}。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}",
                     label="war room log channel",
                 )

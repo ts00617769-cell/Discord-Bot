@@ -55,15 +55,37 @@ class ExpCommands(commands.Cog):
             )
 
         if state == "關":
+            prev_enabled = tracker.alerts_enabled
             tracker.alerts_enabled = False
-            await tracker._save_alert_settings()
+            try:
+                await tracker._save_alert_settings()
+            except sqlite3.DatabaseError as e:
+                tracker.alerts_enabled = prev_enabled
+                logger.error(f"關閉警報寫入失敗，已還原記憶體狀態: {e}")
+                return await ctx.send("❌ 關閉警報失敗（資料庫忙碌），請稍後再試。")
             return await ctx.send("🔕 **【自動超速警報】已關閉！**（設定已持久化）")
 
+        prev = (
+            tracker.alerts_enabled,
+            tracker.alert_count,
+            tracker.alert_server,
+            tracker.alert_guild,
+        )
         tracker.alerts_enabled = True
         tracker.alert_count = cs.count
         tracker.alert_server = cs.server
         tracker.alert_guild = cs.rest[0] if cs.rest else ""
-        await tracker._save_alert_settings()
+        try:
+            await tracker._save_alert_settings()
+        except sqlite3.DatabaseError as e:
+            (
+                tracker.alerts_enabled,
+                tracker.alert_count,
+                tracker.alert_server,
+                tracker.alert_guild,
+            ) = prev
+            logger.error(f"開啟警報寫入失敗，已還原記憶體狀態: {e}")
+            return await ctx.send("❌ 開啟警報失敗（資料庫忙碌），請稍後再試。")
         return await ctx.send(
             f"🚨 **【自動測速警報】已開啟！** "
             f"(設定: {tracker.alert_server}、旅團：{tracker.alert_guild}、"

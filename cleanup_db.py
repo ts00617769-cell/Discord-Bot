@@ -375,6 +375,7 @@ def main() -> int:
         has_transfer = _table_exists(conn, "transfer_alerts_log")
         has_settings = _table_exists(conn, "bot_settings")
         has_alert_dedupe = _table_exists(conn, "alert_dedupe")
+        has_transfer_missing = _table_exists(conn, "transfer_missing")
 
         if indexes_only:
             if args.dry_run:
@@ -646,6 +647,7 @@ def main() -> int:
         deleted_transfer = 0
         deleted_settings = 0
         deleted_alert_dedupe = 0
+        deleted_transfer_missing = 0
         if args.wipe_history:
             if has_exp:
                 _log("正在清空 exp_history…")
@@ -661,6 +663,10 @@ def main() -> int:
                 ).rowcount
             if has_alert_dedupe:
                 deleted_alert_dedupe = conn.execute("DELETE FROM alert_dedupe").rowcount
+            if has_transfer_missing:
+                deleted_transfer_missing = conn.execute(
+                    "DELETE FROM transfer_missing"
+                ).rowcount
         elif args.for_search:
             if has_exp and keep_ranges:
                 _log(
@@ -710,10 +716,12 @@ def main() -> int:
                 has_transfer=has_transfer,
                 has_settings=has_settings,
                 has_alert_dedupe=has_alert_dedupe,
+                has_transfer_missing=has_transfer_missing,
             )
             deleted_transfer = secondary.deleted_transfer
             deleted_settings = secondary.deleted_settings
             deleted_alert_dedupe = secondary.deleted_alert_dedupe
+            deleted_transfer_missing = secondary.deleted_transfer_missing
         else:
             cutoff = taipei_cutoff_str(args.days)
             if has_exp:
@@ -746,6 +754,12 @@ def main() -> int:
                 deleted_alert_dedupe = conn.execute(
                     PRUNE_ALERT_DEDUPE_SQL, (cutoff,)
                 ).rowcount
+            if has_transfer_missing:
+                from services.transfer_missing import prune_stale_missing_sync
+
+                deleted_transfer_missing = prune_stale_missing_sync(
+                    conn, before=cutoff
+                )
 
         conn.commit()
         middle_note = (
@@ -755,7 +769,8 @@ def main() -> int:
             f"已刪除：exp_history {deleted_exp + deleted_middle:,}{middle_note}、"
             f"transfer_alerts_log {deleted_transfer:,}、"
             f"bot_settings 去重 {deleted_settings:,}、"
-            f"alert_dedupe {deleted_alert_dedupe:,}"
+            f"alert_dedupe {deleted_alert_dedupe:,}、"
+            f"transfer_missing {deleted_transfer_missing:,}"
         )
 
         if (
@@ -764,6 +779,7 @@ def main() -> int:
             and deleted_transfer == 0
             and deleted_settings == 0
             and deleted_alert_dedupe == 0
+            and deleted_transfer_missing == 0
             and args.no_vacuum
         ):
             _log("沒有可刪資料，略過。")

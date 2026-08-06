@@ -16,6 +16,12 @@ from services.transfer_detect import (
 # 連續缺席幾輪完整快照才進佇列
 MIN_MISS_ROUNDS = 2
 
+PRUNE_TRANSFER_MISSING_SQL = """
+DELETE FROM transfer_missing
+WHERE (resolved_at IS NOT NULL AND resolved_at < ?)
+   OR (resolved_at IS NULL AND last_seen < ?)
+"""
+
 
 UPSERT_MISSING_SQL = """
     INSERT INTO transfer_missing (
@@ -339,15 +345,13 @@ async def prune_stale_missing(
     before: str,
 ) -> int:
     """刪除已解決或過舊的佇列列。"""
-    cursor = await db.execute(
-        """
-        DELETE FROM transfer_missing
-        WHERE (resolved_at IS NOT NULL AND resolved_at < ?)
-           OR (resolved_at IS NULL AND last_seen < ?)
-        """,
-        (before, before),
-    )
+    cursor = await db.execute(PRUNE_TRANSFER_MISSING_SQL, (before, before))
     n = cursor.rowcount or 0
     if n:
         await db.commit()
     return int(n)
+
+
+def prune_stale_missing_sync(conn, *, before: str) -> int:
+    """同步版：供 cleanup_db／retention 離線路徑。"""
+    return int(conn.execute(PRUNE_TRANSFER_MISSING_SQL, (before, before)).rowcount or 0)

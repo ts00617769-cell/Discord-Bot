@@ -206,6 +206,20 @@ async def _refresh_missing_queue(write_db, time_now, time_prev) -> None:
     await bump_still_missing(write_db, time_now=str(time_now))
 
 
+async def _prune_missing_for_time(
+    write_db: Any, time_now, write_lock: Any | None
+) -> None:
+    cutoff_dt = datetime.datetime.strptime(
+        str(time_now), "%Y-%m-%d %H:%M:%S"
+    ) - datetime.timedelta(days=TRANSFER_LOGIN_GRACE_DAYS + 7)
+    await run_locked(
+        write_lock,
+        prune_stale_missing,
+        write_db,
+        before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 async def run_transfer_check(
     *,
     write_db: Any,
@@ -218,6 +232,11 @@ async def run_transfer_check(
     write_lock: Any | None = None,
 ) -> None:
     if not channel_ids:
+        # 未設警報頻道仍要清過期佇列，避免表無限成長
+        try:
+            await _prune_missing_for_time(write_db, time_now, write_lock)
+        except (ValueError, TypeError, sqlite3.DatabaseError) as e:
+            logger.warning(f"prune transfer_missing skipped: {e}")
         return
     try:
         in_active = is_transfer_active_period(str(time_now))
@@ -249,6 +268,10 @@ async def run_transfer_check(
                 logger.error(f"transfer_missing match failed: {e}")
 
         if not transfer_records:
+            try:
+                await _prune_missing_for_time(write_db, time_now, write_lock)
+            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
+                logger.warning(f"prune transfer_missing skipped: {e}")
             return
 
         miss_times = [time_now]
@@ -261,6 +284,10 @@ async def run_transfer_check(
             in_active_period=in_active,
         )
         if not ranked:
+            try:
+                await _prune_missing_for_time(write_db, time_now, write_lock)
+            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
+                logger.warning(f"prune transfer_missing skipped: {e}")
             return
 
         candidate_keys = [pair_key_from_row(row) for row in ranked]
@@ -350,15 +377,7 @@ async def run_transfer_check(
                 already_alerted.add(pair_key)
 
         try:
-            cutoff_dt = datetime.datetime.strptime(
-                str(time_now), "%Y-%m-%d %H:%M:%S"
-            ) - datetime.timedelta(days=TRANSFER_LOGIN_GRACE_DAYS + 7)
-            await run_locked(
-                write_lock,
-                prune_stale_missing,
-                write_db,
-                before=cutoff_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            )
+            await _prune_missing_for_time(write_db, time_now, write_lock)
         except (ValueError, TypeError, sqlite3.DatabaseError) as e:
             logger.warning(f"prune transfer_missing skipped: {e}")
     except sqlite3.DatabaseError as e:

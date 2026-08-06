@@ -151,16 +151,15 @@ class Entertainment(commands.Cog):
         ) as cursor:
             cached_result = await cursor.fetchone()
 
-        await run_locked(
-            getattr(self.bot, "db_write_lock", None),
-            self._purge_stale_horoscope_cache,
-            today_str,
-        )
-
         if cached_result:
             fortune_text = cached_result[0]
             footer_text = "※ 資料來源：科技紫微網 (⚡ 讀取自資料庫快取)"
         else:
+            await run_locked(
+                getattr(self.bot, "db_write_lock", None),
+                self._purge_stale_horoscope_cache,
+                today_str,
+            )
             loading_msg = None
             try:
                 loading_msg = await ctx.send(f"🔮 星象儀啟動，正在為 {sign} 觀測今日星象...")

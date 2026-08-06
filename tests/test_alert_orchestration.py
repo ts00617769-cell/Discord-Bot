@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -481,3 +482,99 @@ async def test_transfer_dedupe_kept_until_transfer_retention(tmp_path):
         assert remaining == ["recent-transfer"]
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_transfer_check_prunes_missing_without_channels(tmp_path):
+    """未設警報頻道仍應清過期 transfer_missing。"""
+    db = await aiosqlite.connect(str(tmp_path / "nochan.db"))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO transfer_missing (
+                player_name, server_name, last_seen, last_exp, level, class_name,
+                subjugation_grade, guild_name, miss_count, window_label, created_at,
+                resolved_at
+            ) VALUES ('Gone', 'S1', '2026-01-01 00:00:00', 1e12, 90, '戰士',
+                      1, '', 2, 't', '2026-01-01 00:00:00', NULL)
+            """
+        )
+        await db.commit()
+
+        with patch(
+            "services.transfer_alert_runner.prune_stale_missing",
+            new_callable=AsyncMock,
+            return_value=1,
+        ) as prune:
+            await run_transfer_check(
+                write_db=db,
+                read_db=db,
+                time_now="2026-08-05 12:00:00",
+                time_prev="2026-08-05 11:50:00",
+                channel_ids=[],
+                send_alert=AsyncMock(),
+            )
+        prune.assert_awaited_once()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_secondary_prune_clears_stale_transfer_missing(tmp_path):
+    db = await aiosqlite.connect(str(tmp_path / "missing_prune.db"))
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO transfer_missing (
+                player_name, server_name, last_seen, last_exp, level, class_name,
+                subjugation_grade, guild_name, miss_count, window_label, created_at,
+                resolved_at
+            ) VALUES ('Gone', 'S1', '2020-01-01 00:00:00', 1e12, 90, '戰士',
+                      1, '', 2, 't', '2020-01-01 00:00:00', NULL)
+            """
+        )
+        await db.commit()
+        plan = RetentionPlan(
+            keep_ranges=[],
+            thin_ranges=[],
+            retention_cutoff="2026-08-01 00:00:00",
+            transfer_cutoff="2026-01-01 00:00:00",
+        )
+        stats = await prune_secondary_async(db, plan)
+        assert stats.deleted_transfer_missing >= 1
+        async with db.execute("SELECT COUNT(*) FROM transfer_missing") as cur:
+            assert await cur.fetchone() == (0,)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_alert_toggle_rolls_back_memory_on_save_fail():
+    from cogs.exp_commands import ExpCommands
+
+    bot = MagicMock()
+    cog = ExpCommands(bot)
+    tracker = MagicMock()
+    tracker.alerts_enabled = True
+    tracker.alert_count = 30
+    tracker.alert_server = "萊涅01"
+    tracker.alert_guild = "狼團"
+    tracker.SPEED_LIMIT = 2000.0
+    tracker.alert_interval_minutes = 10
+    tracker.alert_speed_window_minutes = 10
+    tracker._save_alert_settings = AsyncMock(
+        side_effect=sqlite3.DatabaseError("locked")
+    )
+    bot.get_cog.return_value = tracker
+
+    ctx = MagicMock()
+    ctx.send = AsyncMock()
+
+    # 直接呼叫 coroutine，略過 discord.py Command wrapper
+    await ExpCommands.toggle_alerts.callback(cog, ctx, "關")
+
+    assert tracker.alerts_enabled is True
+    ctx.send.assert_awaited()
+    assert "失敗" in ctx.send.await_args.args[0]
