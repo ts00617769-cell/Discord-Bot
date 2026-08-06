@@ -169,6 +169,90 @@ async def test_finalize_reveal_retries_then_clears_memory():
 
 
 @pytest.mark.asyncio
+async def test_check_active_quiz_resume_clears_orphan_missing_title(tmp_path):
+    db = await aiosqlite.connect(tmp_path / "orphan.db")
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            """
+            INSERT INTO active_quiz_status (id, is_active, quiz_id, channel_id, date_str)
+            VALUES (1, 1, '已刪除的舊題目', 99, '2026-08-05')
+            ON CONFLICT(id) DO UPDATE SET
+              is_active=excluded.is_active,
+              quiz_id=excluded.quiz_id,
+              channel_id=excluded.channel_id,
+              date_str=excluded.date_str
+            """
+        )
+        await db.execute(
+            "INSERT INTO quiz_votes (user_id, user_name, choice) VALUES (1, 'Alice', 'A')"
+        )
+        await db.commit()
+
+        bot = MagicMock()
+        bot.db = db
+        bot.db_write_lock = None
+        bot.add_view = MagicMock()
+        cog = _cog(bot)
+        await cog.check_active_quiz_resume()
+
+        assert cog.active_poll["is_active"] is False
+        async with db.execute(
+            "SELECT is_active FROM active_quiz_status WHERE id=1"
+        ) as cursor:
+            assert await cursor.fetchone() == (0,)
+        async with db.execute("SELECT COUNT(*) FROM quiz_votes") as cursor:
+            assert await cursor.fetchone() == (0,)
+        bot.add_view.assert_not_called()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_reveal_keeps_poll_when_channel_missing():
+    bot = MagicMock()
+    cog = _cog(bot)
+    cog._start_poll(123, "2026-08-05", QUESTION)
+    cog.active_poll["votes"] = {"1": {"name": "Alice", "choice": "A"}}
+    finalize = AsyncMock()
+    cog._finalize_reveal = finalize
+
+    with patch(
+        "cogs.quiz.resolve_bot_channel",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await QuizSystem.auto_reveal_quiz.coro(cog)
+
+    finalize.assert_not_awaited()
+    assert cog.active_poll["is_active"] is True
+    assert cog.active_poll["votes"]["1"]["choice"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_auto_reveal_keeps_poll_on_structure_error():
+    bot = MagicMock()
+    cog = _cog(bot)
+    cog._start_poll(123, "2026-08-05", QUESTION)
+    cog.active_poll["votes"] = {"1": {"name": "Alice", "choice": "A"}}
+    finalize = AsyncMock()
+    cog._finalize_reveal = finalize
+    channel = MagicMock(id=123)
+
+    with patch(
+        "cogs.quiz.resolve_bot_channel",
+        new_callable=AsyncMock,
+        return_value=channel,
+    ), patch.object(
+        cog, "_build_reveal_embed", side_effect=KeyError("options")
+    ):
+        await QuizSystem.auto_reveal_quiz.coro(cog)
+
+    finalize.assert_not_awaited()
+    assert cog.active_poll["is_active"] is True
+
+
+@pytest.mark.asyncio
 async def test_check_active_quiz_resume_restores_poll(tmp_path):
     db = await aiosqlite.connect(tmp_path / "resume.db")
     try:

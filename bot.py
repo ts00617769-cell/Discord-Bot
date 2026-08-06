@@ -307,7 +307,7 @@ async def on_ready():
         logger.warning(f"無法更新 presence: {e}")
 
     try:
-        await prune_command_dedupe(bot.db)
+        await run_locked(bot.db_write_lock, prune_command_dedupe, bot.db)
     except sqlite3.DatabaseError as e:
         logger.warning(f"清理 cmd_dedupe 失敗: {e}")
 

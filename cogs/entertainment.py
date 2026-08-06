@@ -10,6 +10,7 @@ import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands
 
+from services.db_lock import run_locked
 from services.timeutil import today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -150,10 +151,11 @@ class Entertainment(commands.Cog):
         ) as cursor:
             cached_result = await cursor.fetchone()
 
-        await self.bot.db.execute(
-            "DELETE FROM horoscope_cache WHERE date != ?", (today_str,)
+        await run_locked(
+            getattr(self.bot, "db_write_lock", None),
+            self._purge_stale_horoscope_cache,
+            today_str,
         )
-        await self.bot.db.commit()
 
         if cached_result:
             fortune_text = cached_result[0]
@@ -192,11 +194,13 @@ class Entertainment(commands.Cog):
                     )
                     footer_text = "※ 資料來源：科技紫微網即時連線"
 
-                    await self.bot.db.execute(
-                        "INSERT OR REPLACE INTO horoscope_cache (date, sign, content) VALUES (?, ?, ?)",
-                        (today_str, sign, fortune_text),
+                    await run_locked(
+                        getattr(self.bot, "db_write_lock", None),
+                        self._store_horoscope_cache,
+                        today_str,
+                        sign,
+                        fortune_text,
                     )
-                    await self.bot.db.commit()
                 else:
                     fortune_text = (
                         "⚠️ 目前無法取得今日運勢（外部網站版面可能已改版）。\n"
@@ -238,6 +242,22 @@ class Entertainment(commands.Cog):
         )
         embed.set_footer(text=footer_text)
         await ctx.send(content=f"✅ {ctx.author.mention}", embed=embed)
+
+    async def _purge_stale_horoscope_cache(self, today_str: str) -> None:
+        await self.bot.db.execute(
+            "DELETE FROM horoscope_cache WHERE date != ?", (today_str,)
+        )
+        await self.bot.db.commit()
+
+    async def _store_horoscope_cache(
+        self, today_str: str, sign: str, fortune_text: str
+    ) -> None:
+        await self.bot.db.execute(
+            "INSERT OR REPLACE INTO horoscope_cache (date, sign, content) "
+            "VALUES (?, ?, ?)",
+            (today_str, sign, fortune_text),
+        )
+        await self.bot.db.commit()
 
 
 async def setup(bot):

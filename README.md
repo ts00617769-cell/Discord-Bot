@@ -169,6 +169,8 @@ python cleanup_db.py --wipe-history   # 清空歷史表（慎用）
 > NAS 部署：最近 3 天每 10 分鐘保留一輪，確保警報即時；上次官方轉移窗至最近 3 天之間會連續保留，但每日清理成同角同服首尾，避免時間斷層與容量暴增。尋人逾時時請**停 bot** 後跑 `--for-search`（含 VACUUM）。
 >
 > 跨主機防雙開依賴所有實例使用同一個 `DB_PATH`；若兩台各用自己的 DB，任何 SQLite 鎖都無法互相看見。
+>
+> 離線 `cleanup_db.py` 除本機 `.bot.lock` 外，也會拒絕在仍有活躍 `bot_instance_lock` heartbeat 的共享庫上清理（避免他機 bot 仍在寫入）。請先停掉所有 bot 實例，或等 heartbeat 過期；緊急才加 `--force`（會印出警告）。
 
 ### HTTP／Ranking
 

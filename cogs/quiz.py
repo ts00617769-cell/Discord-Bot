@@ -218,25 +218,40 @@ class QuizSystem(commands.Cog):
         ) as cursor:
             row = await cursor.fetchone()
 
-        if row and row[0] == 1:
-            quiz_title, channel_id, date_str = row[1], int(row[2]), row[3]
-            q_data = next((q for q in self.quiz_data if q["title"] == quiz_title), None)
+        if not (row and row[0] == 1):
+            return
 
-            if q_data:
-                async with self.bot.db.execute(
-                    "SELECT user_id, user_name, choice FROM quiz_votes"
-                ) as v_cursor:
-                    votes = await v_cursor.fetchall()
+        quiz_title, channel_id, date_str = row[1], int(row[2]), row[3]
+        q_data = next((q for q in self.quiz_data if q["title"] == quiz_title), None)
 
-                self.active_poll = {
-                    "is_active": True,
-                    "date": date_str,
-                    "channel_id": channel_id,
-                    "data": q_data,
-                    "votes": {v[0]: {"name": v[1], "choice": v[2]} for v in votes},
-                }
-                self.bot.add_view(SecretQuizView(q_data))
-                logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
+        if not q_data:
+            logger.critical(
+                "Quiz resume 孤兒狀態：DB active 但題庫無此題 "
+                "(title=%r date=%s channel=%s)；清除卡住的 active 避免隔日刪票",
+                quiz_title,
+                date_str,
+                channel_id,
+            )
+            try:
+                await self.clear_active_status()
+            except sqlite3.DatabaseError:
+                logger.critical("清除孤兒 quiz active 失敗", exc_info=True)
+            return
+
+        async with self.bot.db.execute(
+            "SELECT user_id, user_name, choice FROM quiz_votes"
+        ) as v_cursor:
+            votes = await v_cursor.fetchall()
+
+        self.active_poll = {
+            "is_active": True,
+            "date": date_str,
+            "channel_id": channel_id,
+            "data": q_data,
+            "votes": {v[0]: {"name": v[1], "choice": v[2]} for v in votes},
+        }
+        self.bot.add_view(SecretQuizView(q_data))
+        logger.info(f"[Quiz] 已成功接關尚未開獎的測驗：{quiz_title}")
 
     async def get_unrepeated_quiz(self):
         """抽出尚未用過的題目；發布 claim 成功後才寫入 history。"""
@@ -456,11 +471,12 @@ class QuizSystem(commands.Cog):
                 label="quiz reveal channel",
             )
             if not channel:
-                logger.warning(
-                    f"Quiz reveal channel {self.active_poll['channel_id']} missing; "
-                    "clearing stuck active poll"
+                logger.critical(
+                    "Quiz reveal channel %s 無法解析；保留投票待補送 "
+                    "(date=%s)",
+                    self.active_poll["channel_id"],
+                    self.active_poll.get("date"),
                 )
-                await self._finalize_reveal()
                 return
 
             embed = self._build_reveal_embed("🕕 每日測驗開獎時間！", self.active_poll["data"])
@@ -480,12 +496,12 @@ class QuizSystem(commands.Cog):
                     self.active_poll.get("channel_id"),
                     self.active_poll.get("date"),
                 )
-        except KeyError as e:
-            logger.error(f"Missing required field in active poll data: {e}")
-            await self._finalize_reveal()
-        except AttributeError as e:
-            logger.error(f"Quiz data structure error during reveal: {e}")
-            await self._finalize_reveal()
+        except (KeyError, AttributeError) as e:
+            logger.critical(
+                "Quiz reveal 資料結構異常，已保留投票待人工處理: %s",
+                e,
+                exc_info=True,
+            )
         except sqlite3.DatabaseError as e:
             logger.error(f"Failed to auto-reveal quiz (db): {e}")
 
