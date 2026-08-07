@@ -91,3 +91,30 @@ async def test_persist_snapshot_round_rolls_back_partial_failure(tmp_path):
             assert (await cursor.fetchone())[0] == 0
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_persist_snapshot_round_dedupes_via_separate_read_db(tmp_path):
+    import aiosqlite
+
+    path = tmp_path / "split.db"
+    write_db = await aiosqlite.connect(path)
+    read_conn = await aiosqlite.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        await apply_migrations(write_db)
+        first = (
+            datetime.datetime(2026, 8, 4, 12, 0),
+            *_row("S1", "A")[1:],
+        )
+        await persist_snapshot_round(write_db, [[first]])
+        updated = (*first[:3], 62, 3_000.0, *first[5:])
+        await persist_snapshot_round(write_db, [[updated]], read_db=read_conn)
+        async with write_db.execute(
+            "SELECT COUNT(*), level, exp FROM exp_history "
+            "WHERE record_time=? AND server_name=? AND player_name=?",
+            first[:3],
+        ) as cursor:
+            assert await cursor.fetchone() == (1, 62, 3_000.0)
+    finally:
+        await read_conn.close()
+        await write_db.close()

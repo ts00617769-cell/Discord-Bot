@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from db import apply_migrations, connect_db, connect_db_ro
 from db.connection import INSTANCE_BUSY_TIMEOUT_MS, DatabaseIntegrityError
 from db.instance_lock import (
+    INSTANCE_LOCK_TTL_SECONDS,
     make_holder_id,
     refresh_instance_lock,
     release_instance_lock,
@@ -63,13 +64,14 @@ class PrasiaBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.instance_holder_id = make_holder_id()
-        self._heartbeat_fail_count = 0
+        self._last_heartbeat_ok: float | None = None
         self._fatal_shutdown_started = False
         self._closing = False
-        # 僅協調本程序內的大型寫入；heartbeat 保持獨立，避免 lease 被清庫拖住。
+        # 程序內所有寫入（含 heartbeat）共用一條連線，經此鎖排隊，避免自我撞鎖。
         self.db_write_lock = asyncio.Lock()
 
-    HEARTBEAT_FAIL_LIMIT = 5
+    # 與 INSTANCE_LOCK_TTL_SECONDS 對齊：超過此時間仍無法刷新 lease 才視為致命
+    LEASE_GRACE_SECONDS = INSTANCE_LOCK_TTL_SECONDS
 
     async def fatal_shutdown(self, reason: str) -> None:
         """立即結束失去安全執行條件的程序，交由容器重啟。
@@ -81,11 +83,11 @@ class PrasiaBot(commands.Bot):
             return
         self._fatal_shutdown_started = True
         logger.critical("%s；立即終止程序，等待容器重啟", reason)
-        instance_db = getattr(self, "instance_db", None)
-        if instance_db is not None:
+        db = getattr(self, "db", None)
+        if db is not None:
             try:
                 await asyncio.wait_for(
-                    release_instance_lock(instance_db, self.instance_holder_id),
+                    release_instance_lock(db, self.instance_holder_id),
                     timeout=2,
                 )
             except (asyncio.TimeoutError, sqlite3.DatabaseError) as e:
@@ -97,24 +99,29 @@ class PrasiaBot(commands.Bot):
 
     @tasks.loop(seconds=30)
     async def instance_heartbeat(self):
+        # 本程序正在寫入：跳過本次，不計為失敗（撞的是自己）
+        if self.db_write_lock.locked():
+            return
         try:
-            if not await refresh_instance_lock(
-                self.instance_db, self.instance_holder_id
-            ):
+            async with self.db_write_lock:
+                ok = await refresh_instance_lock(self.db, self.instance_holder_id)
+            if not ok:
                 await self.fatal_shutdown("共享 DB 實例鎖已失效，避免重複執行")
                 return
-            self._heartbeat_fail_count = 0
+            self._last_heartbeat_ok = asyncio.get_running_loop().time()
         except sqlite3.DatabaseError as e:
-            self._heartbeat_fail_count += 1
-            logger.error(
-                "更新共享 DB 實例 heartbeat 失敗 (%s/%s): %s",
-                self._heartbeat_fail_count,
-                self.HEARTBEAT_FAIL_LIMIT,
+            now = asyncio.get_running_loop().time()
+            last_ok = self._last_heartbeat_ok
+            age = None if last_ok is None else now - last_ok
+            logger.warning(
+                "更新共享 DB 實例 heartbeat 失敗（距上次成功 %.0fs / grace %ss）: %s",
+                -1.0 if age is None else age,
+                self.LEASE_GRACE_SECONDS,
                 e,
             )
-            if self._heartbeat_fail_count >= self.HEARTBEAT_FAIL_LIMIT:
+            if last_ok is None or age is None or age >= self.LEASE_GRACE_SECONDS:
                 await self.fatal_shutdown(
-                    "共享 DB heartbeat 連續失敗，避免 split-brain"
+                    "共享 DB heartbeat 超過 grace 仍失敗，避免 split-brain"
                 )
                 return
         except Exception:
@@ -142,25 +149,23 @@ class PrasiaBot(commands.Bot):
             db_path = resolve_db_path(os.path.dirname(os.path.abspath(__file__)))
             logger.info("⏳ 正在開啟資料庫 %s …", db_path)
             try:
-                self.db = await connect_db(db_path, check_integrity=True)
+                self.db = await connect_db(
+                    db_path,
+                    check_integrity=True,
+                    busy_timeout_ms=INSTANCE_BUSY_TIMEOUT_MS,
+                )
             except DatabaseIntegrityError as e:
                 logger.error(f"❌ 資料庫完整性檢查失敗，拒絕啟動: {e}")
                 raise
             schema_ver = await apply_migrations(self.db)
             logger.info(f"✅ schema 版本: v{schema_ver}")
-            # heartbeat 使用獨立連線，避免其 commit 切斷快照的原子交易
-            self.instance_db = await connect_db(
-                db_path,
-                check_integrity=False,
-                busy_timeout_ms=INSTANCE_BUSY_TIMEOUT_MS,
-            )
-            self.snapshot_db = await connect_db(db_path, check_integrity=False)
             if not await try_acquire_instance_lock(
-                self.instance_db, self.instance_holder_id
+                self.db, self.instance_holder_id
             ):
                 raise RuntimeError(
                     "共享 DB 已有另一個 bot 實例持有鎖；請關閉舊實例或等待鎖逾時"
                 )
+            self._last_heartbeat_ok = asyncio.get_running_loop().time()
 
             try:
                 self.db_ro = await connect_db_ro(db_path)
@@ -242,27 +247,17 @@ class PrasiaBot(commands.Bot):
             await self.session.close()
         db_ro = getattr(self, "db_ro", None)
         db = getattr(self, "db", None)
-        snapshot_db = getattr(self, "snapshot_db", None)
         if db_ro is not None and db_ro is not db:
             await db_ro.close()
             logger.info("✅ 唯讀資料庫已關閉")
         if db is not None:
-            instance_db = getattr(self, "instance_db", None)
             try:
-                if instance_db is not None:
-                    await release_instance_lock(
-                        instance_db, self.instance_holder_id
-                    )
+                await release_instance_lock(db, self.instance_holder_id)
             except sqlite3.DatabaseError as e:
                 logger.warning("釋放共享 DB 實例鎖失敗: %s", e)
-            if instance_db is not None:
-                await instance_db.close()
-            if snapshot_db is not None:
-                await snapshot_db.close()
             await db.close()
             logger.info("✅ 資料庫已安全關閉")
         await super().close()
-
 
 bot = PrasiaBot()
 _app_commands_synced = False

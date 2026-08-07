@@ -249,8 +249,9 @@ class ExpTracker(commands.Cog):
 
             async with self.bot.db_write_lock:
                 await persist_snapshot_round(
-                    getattr(self.bot, "snapshot_db", self.bot.db),
+                    self.bot.db,
                     round_batches,
+                    read_db=read_db(self.bot),
                 )
             invalidate_player_search_cache()
             snapshot_complete = len(servers_ok) >= min_complete_snapshot_servers()

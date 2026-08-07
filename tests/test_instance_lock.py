@@ -1,6 +1,7 @@
 """共享 SQLite bot 實例 lease。"""
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -135,47 +136,99 @@ def test_refuse_if_bot_running_blocks_remote_without_force(tmp_path, monkeypatch
         conn.close()
 
 
-@pytest.mark.asyncio
-async def test_heartbeat_closes_after_consecutive_db_errors():
+def _heartbeat_bot(*, last_ok: float = 1000.0) -> PrasiaBot:
     bot = PrasiaBot.__new__(PrasiaBot)
-    bot.instance_db = object()
+    bot.db = object()
     bot.instance_holder_id = "host:1"
-    bot._heartbeat_fail_count = 0
+    bot.db_write_lock = asyncio.Lock()
+    bot._last_heartbeat_ok = last_ok
     bot.fatal_shutdown = AsyncMock()
+    return bot
 
-    with patch(
-        "bot.refresh_instance_lock",
-        new_callable=AsyncMock,
-        side_effect=sqlite3.DatabaseError("database is locked"),
-    ):
-        for _ in range(PrasiaBot.HEARTBEAT_FAIL_LIMIT):
+
+@pytest.mark.asyncio
+async def test_heartbeat_skips_when_write_lock_held():
+    bot = _heartbeat_bot()
+    await bot.db_write_lock.acquire()
+    try:
+        with patch(
+            "bot.refresh_instance_lock", new_callable=AsyncMock
+        ) as refresh:
             await PrasiaBot.instance_heartbeat.coro(bot)
+        refresh.assert_not_awaited()
+        bot.fatal_shutdown.assert_not_awaited()
+    finally:
+        bot.db_write_lock.release()
 
-    assert bot._heartbeat_fail_count >= PrasiaBot.HEARTBEAT_FAIL_LIMIT
-    bot.fatal_shutdown.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_heartbeat_closes_after_grace_on_db_errors():
+    bot = _heartbeat_bot(last_ok=1000.0)
+    bot.LEASE_GRACE_SECONDS = 600
+
+    class _Loop:
+        def __init__(self) -> None:
+            self._t = 1000.0
+
+        def time(self) -> float:
+            return self._t
+
+    loop = _Loop()
+
+    with (
+        patch(
+            "bot.refresh_instance_lock",
+            new_callable=AsyncMock,
+            side_effect=sqlite3.DatabaseError("database is locked"),
+        ),
+        patch("bot.asyncio.get_running_loop", return_value=loop),
+    ):
+        await PrasiaBot.instance_heartbeat.coro(bot)
+        bot.fatal_shutdown.assert_not_awaited()
+
+        loop._t = 1000.0 + 599.0
+        await PrasiaBot.instance_heartbeat.coro(bot)
+        bot.fatal_shutdown.assert_not_awaited()
+
+        loop._t = 1000.0 + 600.0
+        await PrasiaBot.instance_heartbeat.coro(bot)
+        bot.fatal_shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_heartbeat_recovers_after_transient_db_errors():
-    bot = PrasiaBot.__new__(PrasiaBot)
-    bot.instance_db = object()
-    bot.instance_holder_id = "host:1"
-    bot._heartbeat_fail_count = 0
-    bot.fatal_shutdown = AsyncMock()
+    bot = _heartbeat_bot(last_ok=1000.0)
+    bot.LEASE_GRACE_SECONDS = 600
 
-    with patch(
-        "bot.refresh_instance_lock",
-        new_callable=AsyncMock,
-        side_effect=[
-            sqlite3.DatabaseError("database is locked"),
-            sqlite3.DatabaseError("database is locked"),
-            True,
-        ],
+    class _Loop:
+        def __init__(self) -> None:
+            self._t = 1000.0
+
+        def time(self) -> float:
+            return self._t
+
+    loop = _Loop()
+
+    with (
+        patch(
+            "bot.refresh_instance_lock",
+            new_callable=AsyncMock,
+            side_effect=[
+                sqlite3.DatabaseError("database is locked"),
+                sqlite3.DatabaseError("database is locked"),
+                True,
+            ],
+        ),
+        patch("bot.asyncio.get_running_loop", return_value=loop),
     ):
-        for _ in range(3):
-            await PrasiaBot.instance_heartbeat.coro(bot)
+        loop._t = 1100.0
+        await PrasiaBot.instance_heartbeat.coro(bot)
+        loop._t = 1200.0
+        await PrasiaBot.instance_heartbeat.coro(bot)
+        loop._t = 1300.0
+        await PrasiaBot.instance_heartbeat.coro(bot)
 
-    assert bot._heartbeat_fail_count == 0
+    assert bot._last_heartbeat_ok == 1300.0
     bot.fatal_shutdown.assert_not_awaited()
 
 
@@ -202,11 +255,7 @@ async def test_refresh_instance_lock_retries_busy_then_succeeds():
 
 @pytest.mark.asyncio
 async def test_heartbeat_closes_immediately_when_lease_is_lost():
-    bot = PrasiaBot.__new__(PrasiaBot)
-    bot.instance_db = object()
-    bot.instance_holder_id = "host:1"
-    bot._heartbeat_fail_count = 0
-    bot.fatal_shutdown = AsyncMock()
+    bot = _heartbeat_bot()
 
     with patch(
         "bot.refresh_instance_lock", new_callable=AsyncMock, return_value=False
@@ -218,11 +267,7 @@ async def test_heartbeat_closes_immediately_when_lease_is_lost():
 
 @pytest.mark.asyncio
 async def test_heartbeat_unexpected_error_fails_closed():
-    bot = PrasiaBot.__new__(PrasiaBot)
-    bot.instance_db = object()
-    bot.instance_holder_id = "host:1"
-    bot._heartbeat_fail_count = 0
-    bot.fatal_shutdown = AsyncMock()
+    bot = _heartbeat_bot()
 
     with patch(
         "bot.refresh_instance_lock",
@@ -238,7 +283,7 @@ async def test_heartbeat_unexpected_error_fails_closed():
 async def test_fatal_shutdown_releases_lease_and_hard_exits_once():
     bot = PrasiaBot.__new__(PrasiaBot)
     bot._fatal_shutdown_started = False
-    bot.instance_db = object()
+    bot.db = object()
     bot.instance_holder_id = "host:1"
 
     with (
@@ -251,6 +296,6 @@ async def test_fatal_shutdown_releases_lease_and_hard_exits_once():
         await bot.fatal_shutdown("lease lost")
         await bot.fatal_shutdown("duplicate")
 
-    release_instance_lock.assert_awaited_once_with(bot.instance_db, "host:1")
+    release_instance_lock.assert_awaited_once_with(bot.db, "host:1")
     shutdown.assert_called_once()
     hard_exit.assert_called_once_with(1)

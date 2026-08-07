@@ -197,34 +197,41 @@ async def persist_snapshot_round(
     server_batches: Iterable[Iterable[tuple]],
     *,
     persist_history: bool = True,
+    read_db=None,
 ) -> None:
-    """整輪伺服器快照單一交易寫入；任一失敗即 rollback，不留下半套時間點。"""
+    """整輪伺服器快照單一交易寫入；任一失敗即 rollback，不留下半套時間點。
+
+    read_db: 可選唯讀連線，用於在 BEGIN IMMEDIATE 之前查既有 key，縮短持鎖時間。
+    """
     batches = [list(batch) for batch in server_batches if batch]
     if not batches:
         return
     insert_batch = [row for batch in batches for row in batch]
     profile_batch = profiles_from_insert_batch(insert_batch)
+    existing_keys: set[tuple[str, str, str]] = set()
+    if persist_history:
+        # 正常新快照只 INSERT；不要再把剛寫入的數千列逐筆 UPDATE。
+        # 正式大庫可能略過 unique index，舊作法會讓每輪交易長時間持鎖。
+        # 既有 key 查詢移出交易，縮短 BEGIN IMMEDIATE 持鎖時間（呼叫端持有寫入鎖）。
+        source = read_db if read_db is not None else db
+        record_times = {str(row[0]) for row in insert_batch}
+        for record_time in record_times:
+            async with source.execute(
+                """
+                SELECT record_time, server_name, player_name
+                FROM exp_history
+                WHERE record_time = ?
+                """,
+                (record_time,),
+            ) as cursor:
+                existing_keys.update(
+                    (str(row[0]), str(row[1]), str(row[2]))
+                    for row in await cursor.fetchall()
+                )
+
     try:
         await db.execute("BEGIN IMMEDIATE")
         if persist_history:
-            # 正常新快照只 INSERT；不要再把剛寫入的數千列逐筆 UPDATE。
-            # 正式大庫可能略過 unique index，舊作法會讓每輪交易長時間持鎖。
-            existing_keys: set[tuple[str, str, str]] = set()
-            record_times = {str(row[0]) for row in insert_batch}
-            for record_time in record_times:
-                async with db.execute(
-                    """
-                    SELECT record_time, server_name, player_name
-                    FROM exp_history
-                    WHERE record_time = ?
-                    """,
-                    (record_time,),
-                ) as cursor:
-                    existing_keys.update(
-                        (str(row[0]), str(row[1]), str(row[2]))
-                        for row in await cursor.fetchall()
-                    )
-
             new_rows = [
                 row
                 for row in insert_batch

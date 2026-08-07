@@ -29,7 +29,7 @@ class DatabaseIntegrityError(RuntimeError):
     """PRAGMA quick_check 失敗。"""
 
 
-# 一般寫入：30s；instance_db heartbeat：120s（對齊 offline cleanup，撐過 NAS 短鎖）
+# 單一寫入連線 busy_timeout：120s（對齊 heartbeat grace，撐過 NAS 短鎖）
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
 INSTANCE_BUSY_TIMEOUT_MS = 120_000
 

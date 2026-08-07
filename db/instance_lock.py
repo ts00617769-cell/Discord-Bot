@@ -13,6 +13,8 @@ from services.timeutil import FMT_SQL, now_naive_taipei
 logger = logging.getLogger(__name__)
 
 LOCK_NAME = "primary"
+# 與 bot LEASE_GRACE 對齊：大快照／分批 DELETE 期間允許 heartbeat 延遲，避免誤判過期
+INSTANCE_LOCK_TTL_SECONDS = 600
 BUSY_RETRY_ATTEMPTS = 8
 BUSY_RETRY_BASE_DELAY = 0.25
 
@@ -36,7 +38,7 @@ async def try_acquire_instance_lock(
     db,
     holder_id: str,
     *,
-    ttl_seconds: int = 120,
+    ttl_seconds: int = INSTANCE_LOCK_TTL_SECONDS,
 ) -> bool:
     now = now_naive_taipei()
     now_s = now.strftime(FMT_SQL)
@@ -155,7 +157,7 @@ async def release_instance_lock(db, holder_id: str) -> None:
 def get_live_instance_holder(
     conn,
     *,
-    ttl_seconds: int = 120,
+    ttl_seconds: int = INSTANCE_LOCK_TTL_SECONDS,
 ) -> tuple[str, str] | None:
     """同步查詢：若有未過期的 bot_instance_lock，回傳 (holder_id, heartbeat_at)。
 
