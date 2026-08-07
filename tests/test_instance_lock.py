@@ -86,6 +86,28 @@ def test_get_live_instance_holder_sync(tmp_path):
         conn.close()
 
 
+def test_get_live_instance_holder_treats_invalid_timestamp_as_stale(tmp_path):
+    path = tmp_path / "invalid-heartbeat.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE bot_instance_lock (
+                lock_name TEXT PRIMARY KEY,
+                holder_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL
+            );
+            INSERT INTO bot_instance_lock
+            VALUES ('primary', 'broken:1', '2026-08-06 08:00:00', 'not-a-time');
+            """
+        )
+        conn.commit()
+        assert get_live_instance_holder(conn, ttl_seconds=120) is None
+    finally:
+        conn.close()
+
+
 def test_refuse_if_bot_running_blocks_remote_without_force(tmp_path, monkeypatch):
     import cleanup_db
 

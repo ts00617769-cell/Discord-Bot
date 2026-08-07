@@ -113,7 +113,8 @@ def get_live_instance_holder(
     try:
         hb = datetime.datetime.strptime(str(heartbeat_at), FMT_SQL)
     except ValueError:
-        return (str(holder_id), str(heartbeat_at))
+        # 無法解析的時間戳不能永久佔住 lease；視為損壞且已過期。
+        return None
     now = now_naive_taipei()
     if hb.tzinfo is not None:
         hb = hb.replace(tzinfo=None)

@@ -37,6 +37,7 @@ from services.error_handler import (
     CANNOT_SEND,
     bot_can_send_in_channel,
     handle_command_error,
+    parse_env_channel_id,
 )
 from services.ranking_api import get_ranking_client
 
@@ -64,6 +65,7 @@ class PrasiaBot(commands.Bot):
         self.instance_holder_id = make_holder_id()
         self._heartbeat_fail_count = 0
         self._fatal_shutdown_started = False
+        self._closing = False
         # 僅協調本程序內的大型寫入；heartbeat 保持獨立，避免 lease 被清庫拖住。
         self.db_write_lock = asyncio.Lock()
 
@@ -155,7 +157,6 @@ class PrasiaBot(commands.Bot):
                 raise RuntimeError(
                     "共享 DB 已有另一個 bot 實例持有鎖；請關閉舊實例或等待鎖逾時"
                 )
-            self.instance_heartbeat.start()
 
             try:
                 self.db_ro = await connect_db_ro(db_path)
@@ -169,6 +170,7 @@ class PrasiaBot(commands.Bot):
             except StartupReadinessError as e:
                 logger.critical("❌ 資料庫搜尋條件未就緒，拒絕啟動: %s", e)
                 raise
+            self.instance_heartbeat.start()
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.error(
@@ -220,8 +222,18 @@ class PrasiaBot(commands.Bot):
             raise
 
     async def close(self):
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
         if self.instance_heartbeat.is_running():
             self.instance_heartbeat.cancel()
+        # 先卸載 cogs，讓其 tasks.loop / 背景工作停止，再關閉共用資源。
+        for ext_name in reversed(list(self.extensions)):
+            try:
+                await self.unload_extension(ext_name)
+            except Exception:
+                logger.warning("關閉時卸載模組 %s 失敗", ext_name, exc_info=True)
+        await asyncio.sleep(0)
         if hasattr(self, "session"):
             await self.session.close()
         db_ro = getattr(self, "db_ro", None)
@@ -312,7 +324,12 @@ async def on_command_error(ctx, error):
     """WarRoom 在場時由其處理；否則在此回覆使用者。"""
     if bot.get_cog("WarRoom") is not None:
         return
-    await handle_command_error(ctx, error)
+    await handle_command_error(
+        ctx,
+        error,
+        log_channel_id=parse_env_channel_id("WAR_ROOM_CHANNEL_ID") or None,
+        bot=bot,
+    )
 
 
 @bot.event
