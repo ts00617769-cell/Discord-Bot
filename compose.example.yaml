@@ -10,11 +10,13 @@ services:
       - .env
     environment:
       - TZ=Asia/Taipei
-      # 建議把 DB 指到 SSD 掛載路徑，例如 /data/prasia_data.db
+      # NAS 大庫建議略過啟動 quick_check，避免長鎖觸發 heartbeat 失敗
+      - SKIP_DB_QUICK_CHECK=1
+      # 建議把 DB 指到本機 SSD（勿與程式碼共用高延遲 NAS 路徑）
       # - DB_PATH=/data/prasia_data.db
     volumes:
       - /volume1/docker/dc_bot:/app
-      # 可選：獨立掛載資料庫目錄
+      # 可選：獨立掛載資料庫目錄（本機碟優先於 NAS）
       # - /volume1/docker/dc_bot_data:/data
     working_dir: /app
     # 依賴已在 image 內；勿在 command 重複 pip install

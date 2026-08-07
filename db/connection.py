@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_DB_NAME",
+    "DEFAULT_BUSY_TIMEOUT_MS",
+    "INSTANCE_BUSY_TIMEOUT_MS",
     "DatabaseIntegrityError",
     "configure_connection",
     "connect_db",
@@ -27,11 +29,20 @@ class DatabaseIntegrityError(RuntimeError):
     """PRAGMA quick_check 失敗。"""
 
 
-async def configure_connection(db: aiosqlite.Connection) -> None:
+# 一般寫入：30s；instance_db heartbeat：120s（對齊 offline cleanup，撐過 NAS 短鎖）
+DEFAULT_BUSY_TIMEOUT_MS = 30_000
+INSTANCE_BUSY_TIMEOUT_MS = 120_000
+
+
+async def configure_connection(
+    db: aiosqlite.Connection,
+    *,
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+) -> None:
     """套用適合長跑 bot 的 PRAGMA（WAL + 合理快取，降低鎖庫機率）。"""
     # WAL：讀寫較不易互擋；busy_timeout：忙時等待而非立刻失敗
     await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA busy_timeout=30000")
+    await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     # NORMAL：WAL 下足夠安全，比 FULL 寫入負擔小
     await db.execute("PRAGMA synchronous=NORMAL")
     # 負值單位為 KB：約 64MB page cache
@@ -62,12 +73,13 @@ async def connect_db(
     db_path: str | Path | None = None,
     *,
     check_integrity: bool = True,
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
 ) -> aiosqlite.Connection:
     """開啟並設定好 PRAGMA 的 aiosqlite 連線（讀寫）。"""
     path = Path(db_path) if db_path else resolve_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(str(path))
-    await configure_connection(db)
+    await configure_connection(db, busy_timeout_ms=busy_timeout_ms)
     if check_integrity:
         skip = (os.getenv("SKIP_DB_QUICK_CHECK") or "").strip().lower() in {
             "1",

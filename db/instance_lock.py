@@ -1,18 +1,35 @@
 """以共享 SQLite heartbeat 阻擋跨主機重複 bot 實例。"""
 from __future__ import annotations
 
+import asyncio
 import datetime
+import logging
 import os
 import socket
 import sqlite3
 
 from services.timeutil import FMT_SQL, now_naive_taipei
 
+logger = logging.getLogger(__name__)
+
 LOCK_NAME = "primary"
+BUSY_RETRY_ATTEMPTS = 8
+BUSY_RETRY_BASE_DELAY = 0.25
 
 
 def make_holder_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _is_busy_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
+async def _sleep_busy_backoff(attempt: int) -> None:
+    await asyncio.sleep(min(BUSY_RETRY_BASE_DELAY * (2**attempt), 10.0))
 
 
 async def try_acquire_instance_lock(
@@ -24,65 +41,115 @@ async def try_acquire_instance_lock(
     now = now_naive_taipei()
     now_s = now.strftime(FMT_SQL)
     stale_s = (now - datetime.timedelta(seconds=ttl_seconds)).strftime(FMT_SQL)
-    try:
-        await db.execute("BEGIN IMMEDIATE")
-        await db.execute(
-            """
-            INSERT OR IGNORE INTO bot_instance_lock
-            (lock_name, holder_id, acquired_at, heartbeat_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (LOCK_NAME, holder_id, now_s, now_s),
-        )
-        await db.execute(
-            """
-            UPDATE bot_instance_lock
-            SET holder_id = ?,
-                acquired_at = CASE WHEN holder_id = ? THEN acquired_at ELSE ? END,
-                heartbeat_at = ?
-            WHERE lock_name = ?
-              AND (holder_id = ? OR heartbeat_at < ?)
-            """,
-            (
-                holder_id,
-                holder_id,
-                now_s,
-                now_s,
-                LOCK_NAME,
-                holder_id,
-                stale_s,
-            ),
-        )
-        async with db.execute(
-            "SELECT holder_id FROM bot_instance_lock WHERE lock_name = ?",
-            (LOCK_NAME,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        await db.commit()
-        return bool(row and row[0] == holder_id)
-    except Exception:
-        await db.rollback()
-        raise
+    last: BaseException | None = None
+    for attempt in range(BUSY_RETRY_ATTEMPTS):
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO bot_instance_lock
+                (lock_name, holder_id, acquired_at, heartbeat_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (LOCK_NAME, holder_id, now_s, now_s),
+            )
+            await db.execute(
+                """
+                UPDATE bot_instance_lock
+                SET holder_id = ?,
+                    acquired_at = CASE WHEN holder_id = ? THEN acquired_at ELSE ? END,
+                    heartbeat_at = ?
+                WHERE lock_name = ?
+                  AND (holder_id = ? OR heartbeat_at < ?)
+                """,
+                (
+                    holder_id,
+                    holder_id,
+                    now_s,
+                    now_s,
+                    LOCK_NAME,
+                    holder_id,
+                    stale_s,
+                ),
+            )
+            async with db.execute(
+                "SELECT holder_id FROM bot_instance_lock WHERE lock_name = ?",
+                (LOCK_NAME,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            await db.commit()
+            return bool(row and row[0] == holder_id)
+        except Exception as e:
+            last = e
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            if _is_busy_error(e) and attempt < BUSY_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    "取得實例鎖忙碌（%s），重試 %s/%s…",
+                    e,
+                    attempt + 1,
+                    BUSY_RETRY_ATTEMPTS,
+                )
+                await _sleep_busy_backoff(attempt)
+                continue
+            raise
+    assert last is not None
+    raise last
 
 
 async def refresh_instance_lock(db, holder_id: str) -> bool:
-    cursor = await db.execute(
-        """
-        UPDATE bot_instance_lock SET heartbeat_at = ?
-        WHERE lock_name = ? AND holder_id = ?
-        """,
-        (now_naive_taipei().strftime(FMT_SQL), LOCK_NAME, holder_id),
-    )
-    await db.commit()
-    return cursor.rowcount == 1
+    last: BaseException | None = None
+    for attempt in range(BUSY_RETRY_ATTEMPTS):
+        try:
+            cursor = await db.execute(
+                """
+                UPDATE bot_instance_lock SET heartbeat_at = ?
+                WHERE lock_name = ? AND holder_id = ?
+                """,
+                (now_naive_taipei().strftime(FMT_SQL), LOCK_NAME, holder_id),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+        except sqlite3.DatabaseError as e:
+            last = e
+            if not _is_busy_error(e) or attempt == BUSY_RETRY_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "更新實例 heartbeat 忙碌（%s），重試 %s/%s…",
+                e,
+                attempt + 1,
+                BUSY_RETRY_ATTEMPTS,
+            )
+            await _sleep_busy_backoff(attempt)
+    assert last is not None
+    raise last
 
 
 async def release_instance_lock(db, holder_id: str) -> None:
-    await db.execute(
-        "DELETE FROM bot_instance_lock WHERE lock_name = ? AND holder_id = ?",
-        (LOCK_NAME, holder_id),
-    )
-    await db.commit()
+    last: BaseException | None = None
+    for attempt in range(BUSY_RETRY_ATTEMPTS):
+        try:
+            await db.execute(
+                "DELETE FROM bot_instance_lock WHERE lock_name = ? AND holder_id = ?",
+                (LOCK_NAME, holder_id),
+            )
+            await db.commit()
+            return
+        except sqlite3.DatabaseError as e:
+            last = e
+            if not _is_busy_error(e) or attempt == BUSY_RETRY_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "釋放實例鎖忙碌（%s），重試 %s/%s…",
+                e,
+                attempt + 1,
+                BUSY_RETRY_ATTEMPTS,
+            )
+            await _sleep_busy_backoff(attempt)
+    assert last is not None
+    raise last
 
 
 def get_live_instance_holder(

@@ -17,6 +17,9 @@ DEFAULT_TRANSFER_ALERT_DAYS = 180
 # 線上／離線分批 DELETE（NAS 記憶體較緊時偏小）
 ONLINE_DELETE_BATCH_SIZE = 20_000
 ONLINE_CHECKPOINT_EVERY_BATCHES = 10
+# 線上清庫時間盒：避免 04:15 清庫拖進白天 :10 快照窗
+ONLINE_CLEANUP_MAX_BATCHES = 60
+ONLINE_CLEANUP_MAX_SECONDS = 45 * 60
 
 
 def _parse(s: str) -> Optional[datetime.datetime]:

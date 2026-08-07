@@ -12,7 +12,6 @@ from db.schema import (
     denorm_coverage_stats,
     list_missing_search_indexes_async,
     prune_orphaned_player_profiles,
-    rebuild_player_profiles,
 )
 from services.discord_send import send_text_to_channels
 from services.error_handler import (
@@ -28,6 +27,8 @@ from services.retention_cleanup import (
 )
 from services.retention_windows import (
     ONLINE_CHECKPOINT_EVERY_BATCHES,
+    ONLINE_CLEANUP_MAX_BATCHES,
+    ONLINE_CLEANUP_MAX_SECONDS,
     ONLINE_DELETE_BATCH_SIZE,
 )
 from services.search_cache import invalidate_player_search_cache
@@ -162,12 +163,29 @@ class WarRoom(commands.Cog):
         raise last
 
     async def _delete_exp_history_in_batches(
-        self, sql: str, params: tuple, *, label: str
-    ) -> int:
-        """分批 DELETE + commit；每數批 WAL checkpoint。"""
+        self,
+        sql: str,
+        params: tuple,
+        *,
+        label: str,
+        deadline: float | None = None,
+        batch_budget: list[int] | None = None,
+    ) -> tuple[int, bool]:
+        """分批 DELETE + commit；每數批 WAL checkpoint。
+
+        batch_budget: 可選單元素 list，作為剩餘批次數（跨多次呼叫共用）。
+        回傳 (刪除筆數, 是否因時間盒提早停止)。
+        """
         total = 0
         batch_no = 0
+        stopped_early = False
         while True:
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                stopped_early = True
+                break
+            if batch_budget is not None and batch_budget[0] <= 0:
+                stopped_early = True
+                break
             async with self.bot.db_write_lock:
                 cursor = await self._execute_delete_with_busy_retry(sql, params)
                 n = cursor.rowcount or 0
@@ -175,6 +193,8 @@ class WarRoom(commands.Cog):
                 await self.bot.db.commit()
             total += n
             batch_no += 1
+            if batch_budget is not None:
+                batch_budget[0] -= 1
             if batch_no % ONLINE_CHECKPOINT_EVERY_BATCHES == 0:
                 try:
                     async with self.bot.db_write_lock:
@@ -187,41 +207,68 @@ class WarRoom(commands.Cog):
             await asyncio.sleep(0.05)
         if total:
             logger.info("線上清庫 %s 刪除 %s 筆（%s 批）", label, total, batch_no)
-        return total
+        if stopped_early:
+            logger.warning(
+                "線上清庫 %s 達時間盒上限，剩餘留待下次排程（已刪 %s 筆）",
+                label,
+                total,
+            )
+        return total, stopped_early
 
     @tasks.loop(time=clean_time)
     async def db_cleanup_task(self):
         """每天凌晨 4:15：尋人導向保留（近 N 天 ∪ 轉移窗）外分批刪除；不過期 VACUUM。"""
         try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ONLINE_CLEANUP_MAX_SECONDS
+            batch_budget = [ONLINE_CLEANUP_MAX_BATCHES]
+            timeboxed = False
+
             plan = build_retention_plan()
             outside_sql, outside_params = outside_keep_batch(
                 plan, batch_size=ONLINE_DELETE_BATCH_SIZE
             )
-            deleted_exp = await self._delete_exp_history_in_batches(
-                outside_sql, outside_params, label="保留窗外"
+            deleted_exp, early = await self._delete_exp_history_in_batches(
+                outside_sql,
+                outside_params,
+                label="保留窗外",
+                deadline=deadline,
+                batch_budget=batch_budget,
             )
+            timeboxed = timeboxed or early
 
             deleted_middle = 0
-            for thin_sql, thin_params, label in thin_range_batches(
-                plan, batch_size=ONLINE_DELETE_BATCH_SIZE
-            ):
-                deleted_middle += await self._delete_exp_history_in_batches(
-                    thin_sql, thin_params, label=label
-                )
+            if not timeboxed:
+                for thin_sql, thin_params, label in thin_range_batches(
+                    plan, batch_size=ONLINE_DELETE_BATCH_SIZE
+                ):
+                    n, early = await self._delete_exp_history_in_batches(
+                        thin_sql,
+                        thin_params,
+                        label=label,
+                        deadline=deadline,
+                        batch_budget=batch_budget,
+                    )
+                    deleted_middle += n
+                    if early:
+                        timeboxed = True
+                        break
 
             pruned_profiles = 0
-            rebuilt_profiles = 0
             backfilled = 0
             profile_touch = deleted_exp + deleted_middle
             if profile_touch > 0:
                 async with self.bot.db_write_lock:
                     pruned_profiles = await prune_orphaned_player_profiles(self.bot.db)
-                    if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
-                        rebuilt_profiles = await rebuild_player_profiles(self.bot.db)
-                    else:
-                        backfilled = await backfill_player_profile_denorm(
-                            self.bot.db, batch_limit=1000
-                        )
+                    backfilled = await backfill_player_profile_denorm(
+                        self.bot.db, batch_limit=1000
+                    )
+                if profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD:
+                    logger.warning(
+                        "線上清庫刪除 %s 筆，略過全量 rebuild_player_profiles；"
+                        "請停 bot 後執行 python cleanup_db.py --for-search",
+                        profile_touch,
+                    )
 
             async with self.bot.db_write_lock:
                 secondary = await prune_secondary_async(self.bot.db, plan)
@@ -246,19 +293,21 @@ class WarRoom(commands.Cog):
                 or deleted_alert_dedupe > 0
                 or deleted_cmd_dedupe > 0
                 or deleted_transfer_missing > 0
-                or rebuilt_profiles > 0
                 or pruned_profiles > 0
                 or backfilled > 0
+                or timeboxed
             ):
                 vacuum_hint = ""
-                if profile_touch >= 5000:
+                if (
+                    profile_touch >= ONLINE_FULL_REBUILD_EXP_DELETED_THRESHOLD
+                    or timeboxed
+                ):
                     vacuum_hint = (
-                        "\n💡 刪除量較大，建議停 bot 後執行 `python cleanup_db.py` 釋放磁碟。"
+                        "\n💡 刪除量較大或未清完：請停 bot 後執行 "
+                        "`python cleanup_db.py --for-search` 重建履歷並釋放磁碟。"
                     )
                 profile_note = ""
-                if rebuilt_profiles > 0:
-                    profile_note = f"、`player_profile` 全量重建 {rebuilt_profiles:,} 筆"
-                elif pruned_profiles or backfilled:
+                if pruned_profiles or backfilled:
                     profile_note = (
                         f"、履歷 prune {pruned_profiles}／backfill {backfilled}"
                     )
@@ -272,6 +321,7 @@ class WarRoom(commands.Cog):
                     if deleted_middle
                     else ""
                 )
+                timebox_note = "（已達時間盒，剩餘下次再清）" if timeboxed else ""
                 await send_text_to_channels(
                     self.bot,
                     [self.log_channel_id],
@@ -281,7 +331,7 @@ class WarRoom(commands.Cog):
                     f"`bot_settings` 去重 key {deleted_settings} 筆、"
                     f"`alert_dedupe` {deleted_alert_dedupe} 筆、"
                     f"`cmd_dedupe` {deleted_cmd_dedupe} 筆"
-                    f"{missing_note}{profile_note}。"
+                    f"{missing_note}{profile_note}{timebox_note}。"
                     f"（VACUUM 請離線執行 `cleanup_db.py`）{vacuum_hint}",
                     label="war room log channel",
                 )

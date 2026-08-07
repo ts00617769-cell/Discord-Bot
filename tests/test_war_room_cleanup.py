@@ -56,6 +56,60 @@ async def test_prune_secondary_async_removes_old_rows(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_war_room_cleanup_skips_online_full_rebuild():
+    bot = MagicMock()
+    bot.db = MagicMock()
+    bot.db_write_lock = asyncio.Lock()
+    bot.db.execute = AsyncMock()
+    bot.db.commit = AsyncMock()
+    bot.db.rollback = AsyncMock()
+
+    cog = WarRoom(bot)
+    cog._delete_exp_history_in_batches = AsyncMock(
+        side_effect=[(6000, False), (0, False)]
+    )
+
+    plan = build_retention_plan()
+    secondary = SimpleNamespace(
+        deleted_transfer=0,
+        deleted_settings=0,
+        deleted_alert_dedupe=0,
+        deleted_cmd_dedupe=0,
+        deleted_transfer_missing=0,
+    )
+    with patch(
+        "cogs.war_room.build_retention_plan", return_value=plan
+    ), patch(
+        "cogs.war_room.outside_keep_batch", return_value=("DELETE 1", ())
+    ), patch(
+        "cogs.war_room.thin_range_batches",
+        return_value=[("DELETE 2", (), "thin")],
+    ), patch(
+        "cogs.war_room.prune_secondary_async",
+        new_callable=AsyncMock,
+        return_value=secondary,
+    ), patch(
+        "cogs.war_room.prune_orphaned_player_profiles",
+        new_callable=AsyncMock,
+        return_value=0,
+    ), patch(
+        "cogs.war_room.backfill_player_profile_denorm",
+        new_callable=AsyncMock,
+        return_value=0,
+    ) as backfill, patch(
+        "cogs.war_room.invalidate_player_search_cache"
+    ), patch(
+        "cogs.war_room.parse_env_channel_id", return_value=0
+    ), patch(
+        "db.schema.rebuild_player_profiles", new_callable=AsyncMock
+    ) as rebuild:
+        await WarRoom.db_cleanup_task.coro(cog)
+
+    backfill.assert_awaited_once()
+    rebuild.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_war_room_cleanup_uses_retention_plan():
     bot = MagicMock()
     bot.db = MagicMock()
@@ -65,7 +119,7 @@ async def test_war_room_cleanup_uses_retention_plan():
     bot.db.rollback = AsyncMock()
 
     cog = WarRoom(bot)
-    cog._delete_exp_history_in_batches = AsyncMock(return_value=0)
+    cog._delete_exp_history_in_batches = AsyncMock(return_value=(0, False))
 
     plan = build_retention_plan()
     secondary = SimpleNamespace(

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -153,6 +153,51 @@ async def test_heartbeat_closes_after_consecutive_db_errors():
 
     assert bot._heartbeat_fail_count >= PrasiaBot.HEARTBEAT_FAIL_LIMIT
     bot.fatal_shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_recovers_after_transient_db_errors():
+    bot = PrasiaBot.__new__(PrasiaBot)
+    bot.instance_db = object()
+    bot.instance_holder_id = "host:1"
+    bot._heartbeat_fail_count = 0
+    bot.fatal_shutdown = AsyncMock()
+
+    with patch(
+        "bot.refresh_instance_lock",
+        new_callable=AsyncMock,
+        side_effect=[
+            sqlite3.DatabaseError("database is locked"),
+            sqlite3.DatabaseError("database is locked"),
+            True,
+        ],
+    ):
+        for _ in range(3):
+            await PrasiaBot.instance_heartbeat.coro(bot)
+
+    assert bot._heartbeat_fail_count == 0
+    bot.fatal_shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_lock_retries_busy_then_succeeds():
+    db = AsyncMock()
+    cursor = MagicMock()
+    cursor.rowcount = 1
+    db.execute = AsyncMock(
+        side_effect=[
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+            cursor,
+        ]
+    )
+    db.commit = AsyncMock()
+
+    with patch("db.instance_lock.asyncio.sleep", new_callable=AsyncMock):
+        assert await refresh_instance_lock(db, "host:1") is True
+
+    assert db.execute.await_count == 3
+    db.commit.assert_awaited()
 
 
 @pytest.mark.asyncio

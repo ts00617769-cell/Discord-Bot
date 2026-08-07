@@ -66,11 +66,18 @@ ruff check .
 | `EXP_ALERT_SEND_CLEAR` | 設 `1` 時無超速者也送綠訊巡檢（預設關閉） |
 | `SNAPSHOT_MIN_SERVERS` | 完整快照最少「品質達標」服數（預設＝`SERVER_MAP` 全服） |
 | `SNAPSHOT_MIN_PLAYERS` | 單服算完整所需最少玩家人數（預設 `30`） |
-| `DB_PATH` | SQLite 路徑（預設專案根 `prasia_data.db`） |
-| `SKIP_DB_QUICK_CHECK` | 設 `1` 略過啟動 `PRAGMA quick_check`（大庫／NAS 可暫用） |
+| `DB_PATH` | SQLite 路徑（預設專案根 `prasia_data.db`；**建議本機 SSD**，NAS 易 `database is locked`） |
+| `SKIP_DB_QUICK_CHECK` | 設 `1` 略過啟動 `PRAGMA quick_check`（大庫／NAS **建議開啟**） |
 | `RANKING_CACHE_TTL` | Ranking 成功快取秒數（預設 `45`；`0`＝關閉） |
 
 跨主機共用同一 `DB_PATH` 時，啟動會以 `bot_instance_lock` heartbeat 互斥，避免雙開重複警報。
+
+**NAS／`database is locked` 維運檢查（止血優先）：**
+
+1. 同一 `DB_PATH` **只跑一個** bot 容器／主機（雙開會互相鎖死並觸發重啟循環）。
+2. 執行 `cleanup_db.py`（含 `--for-search`／VACUUM）前**先停 bot**；勿用 `--force` 硬搶還在寫的庫。
+3. NAS 部署設 `SKIP_DB_QUICK_CHECK=1`，避免啟動 `quick_check` 長鎖。
+4. 儘可能把 `DB_PATH` 指到容器本機碟／SSD；NAS 只當備份同步目標。
 
 開服／合服後請更新 [`game_data.py`](game_data.py) 的 `SERVER_MAP`，再用擁有者指令 `!伺服器檢查` 探活。
 
@@ -127,7 +134,7 @@ ruff check .
 | 轉服偵測 | 僅在本輪「品質達標服數」≥ `SNAPSHOT_MIN_SERVERS` 時執行；即使未設轉服警報頻道，仍會定期清理過期的 `transfer_missing` 佇列 |
 | Boss 提醒 | 召喚前 10 分鐘內 `@everyone`；錯過（重啟／延遲）會在剩餘分鐘內補送，DB 去重確保只送一次 |
 | 每日盲投 | 依 `QUIZ_POST_TIME`／`QUIZ_REVEAL_TIME` 發布與開獎 |
-| DB 清理 | 每日台北時間 **04:15** 執行；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`／`transfer_missing`／`cmd_dedupe`；大量刪除後建議離線 VACUUM |
+| DB 清理 | 每日台北時間 **04:15** 執行（有時間盒，避免拖進白天快照）；從最近 1 次官方轉移窗到現在連續保留，近 **3** 天保留 10 分鐘快照，較舊橋接區同角同服只留首尾；另清過期轉服 log／`alert_dedupe`／`transfer_missing`／`cmd_dedupe`；**不做線上全量** `player_profile` 重建——大量刪除後請停 bot 跑 `cleanup_db.py --for-search`／VACUUM |
 | 健康摘要 | 每週日 09:00（台北）發到 `WAR_ROOM_CHANNEL_ID`（若有設） |
 
 快照「品質達標」條件：該服**總榜成功**，且合併玩家人數 ≥ `SNAPSHOT_MIN_PLAYERS`。部分職業榜失敗仍會寫入可用資料，但該服不計入完整快照門檻，以降低假轉服。

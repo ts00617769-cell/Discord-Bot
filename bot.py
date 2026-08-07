@@ -13,7 +13,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from db import apply_migrations, connect_db, connect_db_ro
-from db.connection import DatabaseIntegrityError
+from db.connection import INSTANCE_BUSY_TIMEOUT_MS, DatabaseIntegrityError
 from db.instance_lock import (
     make_holder_id,
     refresh_instance_lock,
@@ -69,7 +69,7 @@ class PrasiaBot(commands.Bot):
         # 僅協調本程序內的大型寫入；heartbeat 保持獨立，避免 lease 被清庫拖住。
         self.db_write_lock = asyncio.Lock()
 
-    HEARTBEAT_FAIL_LIMIT = 3
+    HEARTBEAT_FAIL_LIMIT = 5
 
     async def fatal_shutdown(self, reason: str) -> None:
         """立即結束失去安全執行條件的程序，交由容器重啟。
@@ -149,7 +149,11 @@ class PrasiaBot(commands.Bot):
             schema_ver = await apply_migrations(self.db)
             logger.info(f"✅ schema 版本: v{schema_ver}")
             # heartbeat 使用獨立連線，避免其 commit 切斷快照的原子交易
-            self.instance_db = await connect_db(db_path, check_integrity=False)
+            self.instance_db = await connect_db(
+                db_path,
+                check_integrity=False,
+                busy_timeout_ms=INSTANCE_BUSY_TIMEOUT_MS,
+            )
             self.snapshot_db = await connect_db(db_path, check_integrity=False)
             if not await try_acquire_instance_lock(
                 self.instance_db, self.instance_holder_id
