@@ -142,15 +142,24 @@ class RankingClient:
         if None in class_list:
             overall_ok = bool(results[class_list.index(None)].ok)
 
+        aggregate_error: Optional[str] = None
         if failed:
-            err = failed[0].error or "class_fetch_failed"
+            aggregate_error = (
+                "session_closed"
+                if any(r.error == "session_closed" for r in failed)
+                else (failed[0].error or "class_fetch_failed")
+            )
             logger.warning(
                 f"fetch_server incomplete group={group_id} world={world_id}: "
-                f"{len(failed)}/{len(results)} class endpoints failed ({err})"
+                f"{len(failed)}/{len(results)} class endpoints failed "
+                f"({aggregate_error})"
             )
             if not ok_results:
                 return FetchResult(
-                    ok=False, error=err, partial=True, overall_ok=overall_ok
+                    ok=False,
+                    error=aggregate_error,
+                    partial=True,
+                    overall_ok=overall_ok,
                 )
 
         unique_players: dict[str, Any] = {}
@@ -175,6 +184,7 @@ class RankingClient:
         return FetchResult(
             ok=True,
             players=list(unique_players.values()),
+            error=aggregate_error,
             partial=bool(failed),
             overall_ok=overall_ok,
         )

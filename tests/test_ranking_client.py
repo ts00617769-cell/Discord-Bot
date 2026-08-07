@@ -15,6 +15,21 @@ def test_retryable_errors():
     assert _is_retryable_error("timeout") is True
     assert _is_retryable_error("HTTP 500") is True
     assert _is_retryable_error("HTTP 404") is False
+    assert _is_retryable_error("session_closed") is False
+
+
+@pytest.mark.asyncio
+async def test_closed_session_fails_without_request_or_retry():
+    session = MagicMock()
+    session.closed = True
+    session.post = MagicMock()
+    http = BeanfunClient(session, cache_ttl=0, max_retries=2)
+
+    result = await http.post_json("https://example.invalid", use_cache=False)
+
+    assert result.ok is False
+    assert result.error == "session_closed"
+    session.post.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -108,6 +123,24 @@ async def test_fetch_server_merges_partial_class_success():
     assert result.overall_ok is True
     names = {p["gc_name"] for p in result.players}
     assert names == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_propagates_session_closed_from_partial_failure():
+    session = MagicMock()
+    client = RankingClient(session, cache_ttl=0, max_retries=0)
+    client.fetch_class = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            FetchResult(ok=True, players=[{"gc_name": "A"}]),
+            FetchResult(ok=False, error="session_closed"),
+        ]
+    )
+
+    result = await client.fetch_server("g", "w", classes=[None, "Enforcer"])
+
+    assert result.ok is True
+    assert result.partial is True
+    assert result.error == "session_closed"
 
 
 @pytest.mark.asyncio

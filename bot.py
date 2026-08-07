@@ -33,7 +33,11 @@ from services.cmd_dedupe import (
     try_claim_command,
 )
 from services.db_lock import run_locked
-from services.error_handler import handle_command_error
+from services.error_handler import (
+    CANNOT_SEND,
+    bot_can_send_in_channel,
+    handle_command_error,
+)
 from services.ranking_api import get_ranking_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -59,10 +63,35 @@ class PrasiaBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.instance_holder_id = make_holder_id()
         self._heartbeat_fail_count = 0
+        self._fatal_shutdown_started = False
         # 僅協調本程序內的大型寫入；heartbeat 保持獨立，避免 lease 被清庫拖住。
         self.db_write_lock = asyncio.Lock()
 
     HEARTBEAT_FAIL_LIMIT = 3
+
+    async def fatal_shutdown(self, reason: str) -> None:
+        """立即結束失去安全執行條件的程序，交由容器重啟。
+
+        不呼叫 close()：此方法可能由 heartbeat task 本身觸發，而 close()
+        會取消 heartbeat，造成清理在只關閉 HTTP session 後中斷，留下殭屍程序。
+        """
+        if getattr(self, "_fatal_shutdown_started", False):
+            return
+        self._fatal_shutdown_started = True
+        logger.critical("%s；立即終止程序，等待容器重啟", reason)
+        instance_db = getattr(self, "instance_db", None)
+        if instance_db is not None:
+            try:
+                await asyncio.wait_for(
+                    release_instance_lock(instance_db, self.instance_holder_id),
+                    timeout=2,
+                )
+            except (asyncio.TimeoutError, sqlite3.DatabaseError) as e:
+                logger.warning("終止前釋放共享 DB 實例鎖失敗: %s", e)
+            except Exception:
+                logger.warning("終止前釋放共享 DB 實例鎖發生非預期錯誤", exc_info=True)
+        logging.shutdown()
+        os._exit(1)
 
     @tasks.loop(seconds=30)
     async def instance_heartbeat(self):
@@ -70,8 +99,7 @@ class PrasiaBot(commands.Bot):
             if not await refresh_instance_lock(
                 self.instance_db, self.instance_holder_id
             ):
-                logger.critical("共享 DB 實例鎖已失效，立即關閉避免重複執行")
-                await self.close()
+                await self.fatal_shutdown("共享 DB 實例鎖已失效，避免重複執行")
                 return
             self._heartbeat_fail_count = 0
         except sqlite3.DatabaseError as e:
@@ -83,16 +111,18 @@ class PrasiaBot(commands.Bot):
                 e,
             )
             if self._heartbeat_fail_count >= self.HEARTBEAT_FAIL_LIMIT:
-                logger.critical(
-                    "共享 DB heartbeat 連續失敗，立即關閉避免 split-brain"
+                await self.fatal_shutdown(
+                    "共享 DB heartbeat 連續失敗，避免 split-brain"
                 )
-                await self.close()
+                return
         except Exception:
             logger.critical(
-                "共享 DB heartbeat 發生非預期錯誤，立即關閉避免 split-brain",
+                "共享 DB heartbeat 發生非預期錯誤",
                 exc_info=True,
             )
-            await self.close()
+            await self.fatal_shutdown(
+                "共享 DB heartbeat 發生非預期錯誤，避免 split-brain"
+            )
 
     async def setup_hook(self):
         try:
@@ -220,6 +250,14 @@ class PrasiaBot(commands.Bot):
 
 bot = PrasiaBot()
 _app_commands_synced = False
+
+
+@bot.check
+async def ensure_bot_can_reply(ctx: commands.Context) -> bool:
+    """沒有發言權限就別執行：避免指令改完狀態卻回不了訊息（403 50001）。"""
+    if bot_can_send_in_channel(ctx.channel, getattr(ctx, "me", None)):
+        return True
+    raise commands.CheckFailure(CANNOT_SEND)
 
 
 @bot.before_invoke

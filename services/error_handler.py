@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import traceback
 from typing import Optional
 
@@ -16,6 +17,11 @@ from game_data import SERVER_MAP
 logger = logging.getLogger(__name__)
 
 CHANNEL_DENIED = "channel_denied"
+CANNOT_SEND = "cannot_send"
+
+# 同一頻道的「無發言權限」通報間隔，避免使用者連按時洗版戰情室
+_PERM_REPORT_COOLDOWN_SECONDS = 600.0
+_perm_report_last: dict[int, float] = {}
 
 
 async def resolve_bot_channel(bot, channel_id: int, *, label: str = "channel"):
@@ -76,6 +82,84 @@ def is_allowed_command_channel(
     if not allowed_channel_ids:
         return False
     return channel_id in allowed_channel_ids
+
+
+def bot_can_send_in_channel(channel, me) -> bool:
+    """判斷機器人能否在該頻道發言；無法判定時一律放行（交給 Forbidden 處理）。"""
+    if me is None:
+        return True
+    permissions_for = getattr(channel, "permissions_for", None)
+    if permissions_for is None:
+        return True
+    try:
+        perms = permissions_for(me)
+    except (AttributeError, TypeError, discord.ClientException):
+        return True
+    if not perms.view_channel:
+        return False
+    if isinstance(channel, discord.Thread):
+        if not perms.send_messages_in_threads:
+            return False
+        if channel.is_private() and channel.me is None:
+            return False
+        if (channel.locked or channel.archived) and not perms.manage_threads:
+            return False
+    elif not perms.send_messages:
+        return False
+    return True
+
+
+def is_forbidden_error(error: BaseException | None) -> bool:
+    """走訪例外鏈，辨識 Discord Missing Access（50001）。"""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error] if error is not None else []
+    while pending:
+        exc = pending.pop()
+        if id(exc) in seen:
+            continue
+        if isinstance(exc, discord.Forbidden):
+            return getattr(exc, "code", None) == 50001
+        seen.add(id(exc))
+        # original：discord.py 包裝例外時不一定會設 __cause__
+        for nested in (getattr(exc, "original", None), exc.__cause__, exc.__context__):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
+async def _report_missing_send_permission(
+    ctx, *, log_channel_id: int | None, bot, command_name: str
+) -> None:
+    """權限不足只記一行摘要，不丟整串 traceback，也不再嘗試回覆該頻道。"""
+    channel_id = getattr(ctx.channel, "id", 0)
+    channel_name = getattr(ctx.channel, "name", "?")
+    logger.warning(
+        "無法在頻道 %s (%s) 回覆指令 %s：機器人缺少檢視／發送訊息權限",
+        channel_name,
+        channel_id,
+        command_name,
+    )
+    if not log_channel_id or bot is None:
+        return
+    now = time.monotonic()
+    last = _perm_report_last.get(channel_id)
+    if last is not None and now - last < _PERM_REPORT_COOLDOWN_SECONDS:
+        return
+    from services.discord_send import send_text_to_channels
+
+    sent = await send_text_to_channels(
+        bot,
+        [log_channel_id],
+        "⚠️ **【權限不足】**\n"
+        f"頻道：<#{channel_id}>（`{channel_name}`）\n"
+        f"指令：`!{command_name}`\n"
+        "機器人無法在該頻道發言，指令已略過。"
+        "請確認機器人具備「檢視頻道」「發送訊息」"
+        "（討論串需另加「在討論串發送訊息」）權限。",
+        label="war room log channel",
+    )
+    if log_channel_id in sent:
+        _perm_report_last[channel_id] = now
 
 
 async def _send_channel_deny(ctx) -> None:
@@ -198,8 +282,17 @@ async def handle_command_error(
     """統一處理指令錯誤（WarRoom 與 bot 後備共用）。回傳 True 表示已處理。"""
     if isinstance(error, commands.CheckFailure) and str(error) in (
         "duplicate_invoke",
-        "channel_denied",
+        CHANNEL_DENIED,
     ):
+        return True
+
+    cmd_name = getattr(ctx.command, "qualified_name", "unknown")
+    if (isinstance(error, commands.CheckFailure) and str(error) == CANNOT_SEND) or (
+        is_forbidden_error(error)
+    ):
+        await _report_missing_send_permission(
+            ctx, log_channel_id=log_channel_id, bot=bot, command_name=cmd_name
+        )
         return True
 
     if isinstance(error, commands.CommandOnCooldown):
@@ -251,7 +344,6 @@ async def handle_command_error(
     error_msg = "".join(
         traceback.format_exception(type(error), error, error.__traceback__)
     )
-    cmd_name = getattr(ctx.command, "qualified_name", "unknown")
     await send_text_to_channels(
         bot,
         [log_channel_id],

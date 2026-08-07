@@ -1,6 +1,7 @@
 """整輪快照必須全成或全敗。"""
 from __future__ import annotations
 
+import datetime
 import sqlite3
 
 import pytest
@@ -34,6 +35,32 @@ async def test_persist_snapshot_round_commits_all_servers(tmp_path):
             "SELECT server_name, player_name FROM exp_history ORDER BY server_name"
         ) as cursor:
             assert await cursor.fetchall() == [("S1", "A"), ("S2", "B")]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_repeat_snapshot_updates_without_unique_index_or_duplicates(tmp_path):
+    import aiosqlite
+
+    db = await aiosqlite.connect(tmp_path / "repeat.db")
+    try:
+        await apply_migrations(db)
+
+        first = (
+            datetime.datetime(2026, 8, 4, 12, 0),
+            *_row("S1", "A")[1:],
+        )
+        updated = (*first[:3], 61, 2_000.0, *first[5:])
+        await persist_snapshot_round(db, [[first]])
+        await persist_snapshot_round(db, [[updated]])
+
+        async with db.execute(
+            "SELECT COUNT(*), level, exp FROM exp_history "
+            "WHERE record_time=? AND server_name=? AND player_name=?",
+            first[:3],
+        ) as cursor:
+            assert await cursor.fetchone() == (1, 61, 2_000.0)
     finally:
         await db.close()
 

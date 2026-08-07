@@ -207,11 +207,41 @@ async def persist_snapshot_round(
     try:
         await db.execute("BEGIN IMMEDIATE")
         if persist_history:
-            await db.executemany(EXP_HISTORY_INSERT_SQL, insert_batch)
-            await db.executemany(
-                EXP_HISTORY_TOUCH_SQL,
-                touch_params_from_insert_batch(insert_batch),
-            )
+            # 正常新快照只 INSERT；不要再把剛寫入的數千列逐筆 UPDATE。
+            # 正式大庫可能略過 unique index，舊作法會讓每輪交易長時間持鎖。
+            existing_keys: set[tuple[str, str, str]] = set()
+            record_times = {str(row[0]) for row in insert_batch}
+            for record_time in record_times:
+                async with db.execute(
+                    """
+                    SELECT record_time, server_name, player_name
+                    FROM exp_history
+                    WHERE record_time = ?
+                    """,
+                    (record_time,),
+                ) as cursor:
+                    existing_keys.update(
+                        (str(row[0]), str(row[1]), str(row[2]))
+                        for row in await cursor.fetchall()
+                    )
+
+            new_rows = [
+                row
+                for row in insert_batch
+                if (str(row[0]), str(row[1]), str(row[2])) not in existing_keys
+            ]
+            existing_rows = [
+                row
+                for row in insert_batch
+                if (str(row[0]), str(row[1]), str(row[2])) in existing_keys
+            ]
+            if new_rows:
+                await db.executemany(EXP_HISTORY_INSERT_SQL, new_rows)
+            if existing_rows:
+                await db.executemany(
+                    EXP_HISTORY_TOUCH_SQL,
+                    touch_params_from_insert_batch(existing_rows),
+                )
         if profile_batch:
             await db.executemany(PLAYER_PROFILE_UPSERT_SQL, profile_batch)
         await db.commit()

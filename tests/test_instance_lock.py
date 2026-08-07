@@ -119,7 +119,7 @@ async def test_heartbeat_closes_after_consecutive_db_errors():
     bot.instance_db = object()
     bot.instance_holder_id = "host:1"
     bot._heartbeat_fail_count = 0
-    bot.close = AsyncMock()
+    bot.fatal_shutdown = AsyncMock()
 
     with patch(
         "bot.refresh_instance_lock",
@@ -130,7 +130,7 @@ async def test_heartbeat_closes_after_consecutive_db_errors():
             await PrasiaBot.instance_heartbeat.coro(bot)
 
     assert bot._heartbeat_fail_count >= PrasiaBot.HEARTBEAT_FAIL_LIMIT
-    bot.close.assert_awaited()
+    bot.fatal_shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -139,14 +139,14 @@ async def test_heartbeat_closes_immediately_when_lease_is_lost():
     bot.instance_db = object()
     bot.instance_holder_id = "host:1"
     bot._heartbeat_fail_count = 0
-    bot.close = AsyncMock()
+    bot.fatal_shutdown = AsyncMock()
 
     with patch(
         "bot.refresh_instance_lock", new_callable=AsyncMock, return_value=False
     ):
         await PrasiaBot.instance_heartbeat.coro(bot)
 
-    bot.close.assert_awaited_once()
+    bot.fatal_shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -155,7 +155,7 @@ async def test_heartbeat_unexpected_error_fails_closed():
     bot.instance_db = object()
     bot.instance_holder_id = "host:1"
     bot._heartbeat_fail_count = 0
-    bot.close = AsyncMock()
+    bot.fatal_shutdown = AsyncMock()
 
     with patch(
         "bot.refresh_instance_lock",
@@ -164,4 +164,26 @@ async def test_heartbeat_unexpected_error_fails_closed():
     ):
         await PrasiaBot.instance_heartbeat.coro(bot)
 
-    bot.close.assert_awaited_once()
+    bot.fatal_shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fatal_shutdown_releases_lease_and_hard_exits_once():
+    bot = PrasiaBot.__new__(PrasiaBot)
+    bot._fatal_shutdown_started = False
+    bot.instance_db = object()
+    bot.instance_holder_id = "host:1"
+
+    with (
+        patch(
+            "bot.release_instance_lock", new_callable=AsyncMock
+        ) as release_instance_lock,
+        patch("bot.logging.shutdown") as shutdown,
+        patch("bot.os._exit") as hard_exit,
+    ):
+        await bot.fatal_shutdown("lease lost")
+        await bot.fatal_shutdown("duplicate")
+
+    release_instance_lock.assert_awaited_once_with(bot.instance_db, "host:1")
+    shutdown.assert_called_once()
+    hard_exit.assert_called_once_with(1)

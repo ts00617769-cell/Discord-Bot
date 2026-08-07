@@ -205,6 +205,11 @@ class ExpTracker(commands.Cog):
             for server_name, (g_id, w_id) in SERVER_MAP.items():
                 try:
                     result = await client.fetch_server(g_id, w_id)
+                    if result.error == "session_closed":
+                        await self.bot.fatal_shutdown(
+                            "排行榜 HTTP session 已關閉，無法繼續自動測速"
+                        )
+                        return
                     if not result.ok:
                         servers_failed.append(server_name)
                         logger.warning(

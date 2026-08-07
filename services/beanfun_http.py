@@ -65,6 +65,8 @@ def _cache_key(url: str, payload: dict) -> str:
 def _is_retryable_error(error: Optional[str]) -> bool:
     if not error:
         return False
+    if error == "session_closed":
+        return False
     if error.startswith("HTTP 4"):
         return False
     return True
@@ -121,6 +123,9 @@ class BeanfunClient:
         headers: dict,
         timeout: float,
     ) -> FetchResult:
+        if self.session.closed:
+            logger.critical("Beanfun API session is closed; runtime restart required")
+            return FetchResult(ok=False, error="session_closed")
         async with self._sem:
             try:
                 async with self.session.post(
@@ -141,6 +146,14 @@ class BeanfunClient:
             except aiohttp.ClientError as e:
                 logger.error(f"Beanfun API client error: {e}")
                 return FetchResult(ok=False, error=str(e))
+            except RuntimeError:
+                # ClientSession may close between the pre-check and post().
+                if self.session.closed:
+                    logger.critical(
+                        "Beanfun API session closed during request; runtime restart required"
+                    )
+                    return FetchResult(ok=False, error="session_closed")
+                raise
             except (ValueError, TypeError) as e:
                 logger.error(f"Beanfun API JSON parse error: {e}")
                 return FetchResult(ok=False, error=str(e))
