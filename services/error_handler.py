@@ -52,6 +52,14 @@ def parse_env_channel_id(env_name: str, default: int = 0) -> int:
     return ids[0] if ids else default
 
 
+def exp_alert_channel_ids() -> list[int]:
+    return parse_env_channel_ids(env_name="EXP_ALERT_CHANNEL_ID")
+
+
+def transfer_alert_channel_ids() -> list[int]:
+    return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
+
+
 def get_allowed_command_channels() -> list[int]:
     """每次從環境變數熱讀白名單（改 .env 後不必重載 cog）。"""
     return parse_env_channel_ids(env_name="ALLOWED_COMMAND_CHANNELS")

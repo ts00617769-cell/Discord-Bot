@@ -235,6 +235,15 @@ async def _prune_missing_for_time(
     )
 
 
+async def _try_prune_missing(
+    write_db: Any, time_now, write_lock: Any | None
+) -> None:
+    try:
+        await _prune_missing_for_time(write_db, time_now, write_lock)
+    except (ValueError, TypeError, sqlite3.DatabaseError) as e:
+        logger.warning("prune transfer_missing skipped: %s", e)
+
+
 async def run_transfer_check(
     *,
     write_db: Any,
@@ -242,16 +251,14 @@ async def run_transfer_check(
     time_now,
     time_prev,
     channel_ids: Sequence[int],
-    send_alert: SendTransferAlert,
+    send_alert: SendTransferAlert | None = None,
+    bot: Any | None = None,
     complete_times=None,
     write_lock: Any | None = None,
 ) -> None:
     if not channel_ids:
         # 未設警報頻道仍要清過期佇列，避免表無限成長
-        try:
-            await _prune_missing_for_time(write_db, time_now, write_lock)
-        except (ValueError, TypeError, sqlite3.DatabaseError) as e:
-            logger.warning(f"prune transfer_missing skipped: {e}")
+        await _try_prune_missing(write_db, time_now, write_lock)
         return
     try:
         in_active = is_transfer_active_period(str(time_now))
@@ -283,10 +290,7 @@ async def run_transfer_check(
                 logger.error(f"transfer_missing match failed: {e}")
 
         if not transfer_records:
-            try:
-                await _prune_missing_for_time(write_db, time_now, write_lock)
-            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
-                logger.warning(f"prune transfer_missing skipped: {e}")
+            await _try_prune_missing(write_db, time_now, write_lock)
             return
 
         miss_times = [time_now]
@@ -299,10 +303,7 @@ async def run_transfer_check(
             in_active_period=in_active,
         )
         if not ranked:
-            try:
-                await _prune_missing_for_time(write_db, time_now, write_lock)
-            except (ValueError, TypeError, sqlite3.DatabaseError) as e:
-                logger.warning(f"prune transfer_missing skipped: {e}")
+            await _try_prune_missing(write_db, time_now, write_lock)
             return
 
         candidate_keys = [pair_key_from_row(row) for row in ranked]
@@ -347,21 +348,39 @@ async def run_transfer_check(
                 already_alerted.add(pair_key)
                 continue
 
-            sent = await send_alert(
-                time_now,
-                pair["new_name"],
-                pair["new_server"],
-                pair["old_name"],
-                pair["old_server"],
-                pair["new_lvl"],
-                pair["new_cls"],
-                pair["new_sub_grade"],
-                pair["status"],
-                pair["exp_diff"],
-                old_guild=pair.get("old_guild") or "",
-                new_guild=pair.get("new_guild") or "",
-                channel_ids=claimed_channels,
-            )
+            if send_alert is not None:
+                sent = await send_alert(
+                    time_now,
+                    pair["new_name"],
+                    pair["new_server"],
+                    pair["old_name"],
+                    pair["old_server"],
+                    pair["new_lvl"],
+                    pair["new_cls"],
+                    pair["new_sub_grade"],
+                    pair["status"],
+                    pair["exp_diff"],
+                    old_guild=pair.get("old_guild") or "",
+                    new_guild=pair.get("new_guild") or "",
+                    channel_ids=claimed_channels,
+                )
+            else:
+                sent = await send_transfer_alert_message(
+                    bot,
+                    claimed_channels,
+                    time_now=time_now,
+                    new_name=pair["new_name"],
+                    new_server=pair["new_server"],
+                    old_name=pair["old_name"],
+                    old_server=pair["old_server"],
+                    new_lvl=pair["new_lvl"],
+                    new_cls=pair["new_cls"],
+                    new_sub_grade=pair["new_sub_grade"],
+                    status_str=pair["status"],
+                    exp_diff=pair["exp_diff"],
+                    old_guild=pair.get("old_guild") or "",
+                    new_guild=pair.get("new_guild") or "",
+                )
             sent_ids = set(sent) if sent else set()
             failed = sorted(set(claimed_channels) - sent_ids)
 
@@ -391,10 +410,7 @@ async def run_transfer_check(
                     logger.error("轉服警報已送出但後續寫入失敗: %s", e)
                 already_alerted.add(pair_key)
 
-        try:
-            await _prune_missing_for_time(write_db, time_now, write_lock)
-        except (ValueError, TypeError, sqlite3.DatabaseError) as e:
-            logger.warning(f"prune transfer_missing skipped: {e}")
+        await _try_prune_missing(write_db, time_now, write_lock)
     except sqlite3.DatabaseError as e:
         logger.error(f"DB error in transfer check: {e}\n{traceback.format_exc()}")
     except (ValueError, TypeError, KeyError) as e:

@@ -33,7 +33,7 @@ from services.cmd_dedupe import (
     release_command_claim,
     try_claim_command,
 )
-from services.db_lock import run_locked
+from services.db_lock import bot_write_lock, run_locked
 from services.error_handler import (
     CANNOT_SEND,
     bot_can_send_in_channel,
@@ -286,7 +286,7 @@ async def claim_command_once(ctx: commands.Context):
         ctx.bot.db,
         invoke_id,
         host=host,
-        write_lock=getattr(ctx.bot, "db_write_lock", None),
+        write_lock=bot_write_lock(ctx.bot),
     ):
         logger.warning(
             f"⚠️ 略過重複指令: invoke={invoke_id} cmd={getattr(ctx.command, 'name', '?')} "
@@ -309,7 +309,7 @@ async def release_command_claim_on_failure(ctx: commands.Context):
         return
     try:
         await run_locked(
-            getattr(ctx.bot, "db_write_lock", None),
+            bot_write_lock(ctx.bot),
             release_command_claim,
             ctx.bot.db,
             invoke_id,

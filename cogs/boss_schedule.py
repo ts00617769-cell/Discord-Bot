@@ -4,15 +4,10 @@ import discord
 from discord.ext import commands, tasks
 
 from game_data import GAP_BOSS_SCHEDULE, WEEKDAY_NAMES
-from services.alert_dedupe import (
-    KIND_BOSS_REMINDER,
-    alert_already_sent,
-    release_alert_claim,
-    try_claim_alert,
-)
 from services.boss_reminder import run_boss_reminder
+from services.db_lock import bot_write_lock
 from services.error_handler import parse_env_channel_id
-from services.timeutil import now_naive_taipei, now_taipei
+from services.timeutil import now_taipei
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +28,13 @@ class BossSchedule(commands.Cog):
         if self.auto_boss_reminder.is_running():
             self.auto_boss_reminder.cancel()
 
-    async def _already_reminded(self, key: str) -> bool:
-        """測試／相容用包裝。"""
-        return await alert_already_sent(self.bot.db, KIND_BOSS_REMINDER, key)
-
-    async def _try_claim_reminder(self, key: str) -> bool:
-        """測試／相容用包裝。"""
-        now = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
-        return await try_claim_alert(
-            self.bot.db, KIND_BOSS_REMINDER, key, created_at=now
-        )
-
-    async def _release_reminder_claim(self, key: str) -> None:
-        """測試／相容用包裝。"""
-        await release_alert_claim(self.bot.db, KIND_BOSS_REMINDER, key)
-
     @tasks.loop(minutes=1)
     async def auto_boss_reminder(self):
         await run_boss_reminder(
             self.bot,
             write_db=self.bot.db,
             channel_id=self.REMINDER_CHANNEL_ID,
-            write_lock=getattr(self.bot, "db_write_lock", None),
+            write_lock=bot_write_lock(self.bot),
         )
 
     @auto_boss_reminder.before_loop

@@ -20,12 +20,6 @@ INSERT OR IGNORE INTO alert_dedupe (kind, dedupe_key, created_at)
 VALUES (?, ?, ?)
 """
 
-UPSERT_SQL = """
-INSERT INTO alert_dedupe (kind, dedupe_key, created_at)
-VALUES (?, ?, ?)
-ON CONFLICT(kind, dedupe_key) DO UPDATE SET created_at=excluded.created_at
-"""
-
 RELEASE_SQL = "DELETE FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?"
 
 
@@ -60,15 +54,4 @@ async def try_claim_alert(db, kind: str, key: str, *, created_at: str) -> bool:
 
 async def release_alert_claim(db, kind: str, key: str) -> None:
     await db.execute(RELEASE_SQL, (kind, key))
-    await db.commit()
-
-
-async def overspeed_already_sent(db, key: str) -> bool:
-    """相容舊呼叫：等同 alert_already_sent(overspeed)。"""
-    return await alert_already_sent(db, KIND_OVERSPEED, key)
-
-
-async def mark_overspeed_sent(db, key: str, *, created_at: str) -> None:
-    """相容舊呼叫（UPSERT）；新路徑請用 try_claim_alert。"""
-    await db.execute(UPSERT_SQL, (KIND_OVERSPEED, key, created_at))
     await db.commit()

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import discord
@@ -11,7 +11,8 @@ import pytest
 from cogs.exp_tracker import ExpTracker
 from db.schema import apply_migrations
 from services.alert_dedupe import KIND_OVERSPEED, alert_already_sent
-from services.overspeed_alerts import run_overspeed_patrol
+from services.discord_send import send_embeds_to_channels
+from services.overspeed_alerts import build_overspeed_embeds, run_overspeed_patrol
 
 
 def _tracker_for_embeds() -> ExpTracker:
@@ -32,7 +33,8 @@ def test_alert_output_and_speed_windows_are_ten_minutes(monkeypatch):
 
 
 def test_build_overspeed_embeds_reports_clear_round():
-    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+    embeds = build_overspeed_embeds(
+        _tracker_for_embeds(),
         [],
         record_count=12,
         time_now="2026-08-04 12:10:00",
@@ -48,7 +50,8 @@ def test_build_overspeed_embeds_reports_clear_round():
 
 def test_build_overspeed_embeds_skips_clear_by_default(monkeypatch):
     monkeypatch.delenv("EXP_ALERT_SEND_CLEAR", raising=False)
-    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+    embeds = build_overspeed_embeds(
+        _tracker_for_embeds(),
         [],
         record_count=12,
         time_now="2026-08-04 12:10:00",
@@ -58,7 +61,8 @@ def test_build_overspeed_embeds_skips_clear_by_default(monkeypatch):
 
 
 def test_build_overspeed_embeds_warns_when_guild_has_no_records():
-    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+    embeds = build_overspeed_embeds(
+        _tracker_for_embeds(),
         [],
         record_count=0,
         time_now="2026-08-04 12:10:00",
@@ -69,7 +73,8 @@ def test_build_overspeed_embeds_warns_when_guild_has_no_records():
 
 
 def test_build_overspeed_embeds_uses_new_threshold_and_window():
-    embeds = _tracker_for_embeds()._build_overspeed_embeds(
+    embeds = build_overspeed_embeds(
+        _tracker_for_embeds(),
         [{"name": "玩家", "server": "萊涅01", "level": 90, "speed": 2500}],
         record_count=1,
         time_now="2026-08-04 12:10:00",
@@ -87,12 +92,9 @@ async def test_send_overspeed_embeds_counts_success():
     bot.get_channel.return_value = channel
     bot.fetch_channel = AsyncMock()
 
-    cog = ExpTracker.__new__(ExpTracker)
-    cog.bot = bot
-    with patch.object(
-        ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[111]
-    ):
-        sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
+    sent = await send_embeds_to_channels(
+        bot, [111], [discord.Embed(title="t")], label="overspeed alert channel"
+    )
     assert sent == {111}
     channel.send.assert_awaited_once()
     bot.fetch_channel.assert_not_awaited()
@@ -106,12 +108,9 @@ async def test_send_overspeed_embeds_fetch_fallback():
     channel.send = AsyncMock()
     bot.fetch_channel = AsyncMock(return_value=channel)
 
-    cog = ExpTracker.__new__(ExpTracker)
-    cog.bot = bot
-    with patch.object(
-        ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[222]
-    ):
-        sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
+    sent = await send_embeds_to_channels(
+        bot, [222], [discord.Embed(title="t")], label="overspeed alert channel"
+    )
     assert sent == {222}
     bot.fetch_channel.assert_awaited_once_with(222)
 
@@ -125,12 +124,9 @@ async def test_send_overspeed_embeds_failure_returns_zero():
     channel.send = AsyncMock(side_effect=discord.HTTPException(response, "fail"))
     bot.get_channel.return_value = channel
 
-    cog = ExpTracker.__new__(ExpTracker)
-    cog.bot = bot
-    with patch.object(
-        ExpTracker, "ALERT_CHANNEL_IDS", new_callable=PropertyMock, return_value=[333]
-    ):
-        sent = await cog._send_overspeed_embeds([discord.Embed(title="t")])
+    sent = await send_embeds_to_channels(
+        bot, [333], [discord.Embed(title="t")], label="overspeed alert channel"
+    )
     assert sent == set()
 
 
@@ -144,10 +140,8 @@ async def test_send_overspeed_embeds_tracks_success_per_channel():
     bad.send = AsyncMock(side_effect=discord.HTTPException(response, "fail"))
     bot.get_channel.side_effect = lambda channel_id: {1: good, 2: bad}[channel_id]
 
-    cog = ExpTracker.__new__(ExpTracker)
-    cog.bot = bot
-    sent = await cog._send_overspeed_embeds(
-        [discord.Embed(title="t")], channel_ids=[1, 2]
+    sent = await send_embeds_to_channels(
+        bot, [1, 2], [discord.Embed(title="t")], label="overspeed alert channel"
     )
 
     assert sent == {1}

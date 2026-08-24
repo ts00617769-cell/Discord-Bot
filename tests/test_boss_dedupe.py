@@ -10,6 +10,12 @@ import pytest
 from cogs.boss_schedule import BossSchedule
 from db.schema import apply_migrations
 from game_data import GAP_BOSS_SCHEDULE
+from services.alert_dedupe import (
+    KIND_BOSS_REMINDER,
+    alert_already_sent,
+    release_alert_claim,
+    try_claim_alert,
+)
 from services.boss_reminder import run_boss_reminder
 
 
@@ -51,13 +57,11 @@ async def test_try_claim_reminder_is_exclusive(tmp_path):
     db = await aiosqlite.connect(tmp_path / "claim.db")
     try:
         await apply_migrations(db)
-        bot = MagicMock()
-        bot.db = db
-        cog = BossSchedule(bot)
         key = "boss_reminder:2026-08-05:20"
-        assert await cog._try_claim_reminder(key) is True
-        assert await cog._try_claim_reminder(key) is False
-        assert await cog._already_reminded(key) is True
+        created = "2026-08-05 20:00:00"
+        assert await try_claim_alert(db, KIND_BOSS_REMINDER, key, created_at=created)
+        assert not await try_claim_alert(db, KIND_BOSS_REMINDER, key, created_at=created)
+        assert await alert_already_sent(db, KIND_BOSS_REMINDER, key) is True
     finally:
         await db.close()
 
@@ -67,14 +71,12 @@ async def test_release_reminder_claim_allows_retry(tmp_path):
     db = await aiosqlite.connect(tmp_path / "release.db")
     try:
         await apply_migrations(db)
-        bot = MagicMock()
-        bot.db = db
-        cog = BossSchedule(bot)
         key = "boss_reminder:2026-08-05:20"
-        assert await cog._try_claim_reminder(key) is True
-        await cog._release_reminder_claim(key)
-        assert await cog._already_reminded(key) is False
-        assert await cog._try_claim_reminder(key) is True
+        created = "2026-08-05 20:00:00"
+        assert await try_claim_alert(db, KIND_BOSS_REMINDER, key, created_at=created)
+        await release_alert_claim(db, KIND_BOSS_REMINDER, key)
+        assert await alert_already_sent(db, KIND_BOSS_REMINDER, key) is False
+        assert await try_claim_alert(db, KIND_BOSS_REMINDER, key, created_at=created)
     finally:
         await db.close()
 

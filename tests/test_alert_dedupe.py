@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from db.schema import apply_migrations
-from services.alert_dedupe import mark_overspeed_sent, overspeed_already_sent
+from services.alert_dedupe import KIND_OVERSPEED, alert_already_sent, try_claim_alert
 
 
 @pytest.mark.asyncio
@@ -15,9 +15,11 @@ async def test_overspeed_dedupe_write_and_read(tmp_path):
     try:
         await apply_migrations(db)
         key = "overspeed:2026-07-27 12:00:00|2026-07-27 11:30:00|全服|30"
-        assert await overspeed_already_sent(db, key) is False
-        await mark_overspeed_sent(db, key, created_at="2026-07-27 12:00:00")
-        assert await overspeed_already_sent(db, key) is True
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is False
+        assert await try_claim_alert(
+            db, KIND_OVERSPEED, key, created_at="2026-07-27 12:00:00"
+        )
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is True
     finally:
         await db.close()
 
@@ -35,6 +37,6 @@ async def test_overspeed_dedupe_falls_back_to_bot_settings(tmp_path):
             (key, "1"),
         )
         await db.commit()
-        assert await overspeed_already_sent(db, key) is True
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is True
     finally:
         await db.close()

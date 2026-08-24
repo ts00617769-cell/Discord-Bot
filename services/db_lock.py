@@ -7,6 +7,11 @@ from typing import Any, TypeVar
 T = TypeVar("T")
 
 
+def bot_write_lock(bot: Any | None) -> Any | None:
+    """讀取 bot.db_write_lock；測試 stub 沒有此屬性時回 None。"""
+    return getattr(bot, "db_write_lock", None) if bot is not None else None
+
+
 async def run_locked(
     lock: Any | None,
     func: Callable[..., Awaitable[T]],

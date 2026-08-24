@@ -13,12 +13,13 @@ from discord.ext import commands, tasks
 from db import ensure_search_indexes
 from db.connection import read_db
 from game_data import SERVER_MAP
-from services.db_lock import run_locked
+from services.db_lock import bot_write_lock, run_locked
 from services.error_handler import (
+    exp_alert_channel_ids,
     min_complete_snapshot_servers,
     min_snapshot_players,
-    parse_env_channel_ids,
     parse_env_float,
+    transfer_alert_channel_ids,
 )
 from services.exp_snapshots import (
     fetch_recent_complete_snapshot_times,
@@ -26,18 +27,11 @@ from services.exp_snapshots import (
     persist_snapshot_round,
     players_to_insert_batch,
 )
-from services.overspeed_alerts import (
-    build_overspeed_embeds,
-    run_overspeed_patrol,
-)
+from services.overspeed_alerts import run_overspeed_patrol
 from services.ranking_api import get_ranking_client
 from services.search_cache import invalidate_player_search_cache
 from services.timeutil import now_naive_taipei
-from services.transfer_alert_runner import (
-    fetch_potential_transfers,
-    run_transfer_check,
-    send_transfer_alert_message,
-)
+from services.transfer_alert_runner import run_transfer_check
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +50,10 @@ class ExpTracker(commands.Cog):
 
     @property
     def ALERT_CHANNEL_IDS(self):
-        return parse_env_channel_ids(env_name="EXP_ALERT_CHANNEL_ID")
-
-    @property
-    def TRANSFER_ALERT_CHANNEL_IDS(self):
-        return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
+        return exp_alert_channel_ids()
 
     async def cog_load(self):
         await self._load_alert_settings()
-        if not self.ALERT_CHANNEL_IDS:
-            logger.warning(
-                "⚠️ EXP_ALERT_CHANNEL_ID 未設定或無效：超速警報不會發送。"
-            )
-        if not self.TRANSFER_ALERT_CHANNEL_IDS:
-            logger.warning(
-                "⚠️ TRANSFER_ALERT_CHANNEL_ID 未設定或無效：轉服警報不會發送。"
-            )
         self._index_task = asyncio.create_task(self._ensure_search_indexes())
         if not self.auto_fetch_exp.is_running():
             self.auto_fetch_exp.start()
@@ -143,7 +125,7 @@ class ExpTracker(commands.Cog):
             )
             await self.bot.db.commit()
 
-        await run_locked(getattr(self.bot, "db_write_lock", None), _persist)
+        await run_locked(bot_write_lock(self.bot), _persist)
 
     async def _startup_validate_servers(self):
         try:
@@ -180,7 +162,7 @@ class ExpTracker(commands.Cog):
             if self.bot.is_closed():
                 return
             await run_locked(
-                getattr(self.bot, "db_write_lock", None),
+                bot_write_lock(self.bot),
                 ensure_search_indexes,
                 self.bot.db,
             )
@@ -281,7 +263,7 @@ class ExpTracker(commands.Cog):
         if len(times) < 2:
             return
         time_now, time_prev_scan = times[0][0], times[1][0]
-        write_lock = getattr(self.bot, "db_write_lock", None)
+        write_lock = bot_write_lock(self.bot)
 
         await run_overspeed_patrol(
             self.bot,
@@ -294,90 +276,18 @@ class ExpTracker(commands.Cog):
         )
 
         if run_transfers:
-            await self.check_for_transfers(
-                time_now, time_prev_scan, complete_times=times
+            await run_transfer_check(
+                bot=self.bot,
+                write_db=self.bot.db,
+                read_db=read_db(self.bot),
+                time_now=time_now,
+                time_prev=time_prev_scan,
+                complete_times=times,
+                channel_ids=transfer_alert_channel_ids(),
+                write_lock=write_lock,
             )
         else:
             logger.info("本輪略過轉服偵測（快照不完整）")
-
-    def _build_overspeed_embeds(
-        self,
-        alert_list: list[dict],
-        *,
-        record_count: int,
-        time_now: str,
-        minutes_diff: float,
-        include_clear: bool | None = None,
-    ) -> list[discord.Embed]:
-        """測試／相容用包裝。"""
-        return build_overspeed_embeds(
-            self,
-            alert_list,
-            record_count=record_count,
-            time_now=time_now,
-            minutes_diff=minutes_diff,
-            include_clear=include_clear,
-        )
-
-    async def _send_overspeed_embeds(
-        self,
-        embeds: list,
-        *,
-        channel_ids: list[int] | None = None,
-    ) -> set[int]:
-        from services.discord_send import send_embeds_to_channels
-
-        targets = channel_ids if channel_ids is not None else self.ALERT_CHANNEL_IDS
-        return await send_embeds_to_channels(
-            self.bot, targets, embeds, label="overspeed alert channel"
-        )
-
-    async def _get_potential_transfers(self, time_now, time_prev, name_margin, class_margin):
-        return await fetch_potential_transfers(
-            read_db(self.bot), time_now, time_prev, name_margin, class_margin
-        )
-
-    async def _send_transfer_alert(
-        self, time_now, new_name, new_server, old_name, old_server,
-        new_lvl, new_cls, new_sub_grade, status_str, exp_diff,
-        *,
-        old_guild: str = "",
-        new_guild: str = "",
-        channel_ids: list[int] | None = None,
-    ) -> set[int]:
-        targets = (
-            channel_ids
-            if channel_ids is not None
-            else self.TRANSFER_ALERT_CHANNEL_IDS
-        )
-        return await send_transfer_alert_message(
-            self.bot,
-            targets,
-            time_now=time_now,
-            new_name=new_name,
-            new_server=new_server,
-            old_name=old_name,
-            old_server=old_server,
-            new_lvl=new_lvl,
-            new_cls=new_cls,
-            new_sub_grade=new_sub_grade,
-            status_str=status_str,
-            exp_diff=exp_diff,
-            old_guild=old_guild,
-            new_guild=new_guild,
-        )
-
-    async def check_for_transfers(self, time_now, time_prev, complete_times=None):
-        await run_transfer_check(
-            write_db=self.bot.db,
-            read_db=read_db(self.bot),
-            time_now=time_now,
-            time_prev=time_prev,
-            complete_times=complete_times,
-            channel_ids=self.TRANSFER_ALERT_CHANNEL_IDS,
-            send_alert=self._send_transfer_alert,
-            write_lock=getattr(self.bot, "db_write_lock", None),
-        )
 
     @auto_fetch_exp.before_loop
     async def before_auto_fetch(self):

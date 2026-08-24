@@ -16,12 +16,12 @@ from db.schema import (
 )
 from game_data import SERVER_MAP
 from services import player_matching as match
-from services.db_lock import run_locked
+from services.db_lock import bot_write_lock, run_locked
 from services.discord_send import send_embeds_to_channels
 from services.error_handler import (
     allowed_channel,
-    parse_env_channel_ids,
     resolve_bot_channel,
+    transfer_alert_channel_ids,
 )
 from services.player_search_db import PlayerSearchStore
 from services.player_search_engine import (
@@ -46,10 +46,6 @@ class PlayerSearch(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.store = PlayerSearchStore(read_db(bot))
-
-    @property
-    def TRANSFER_ALERT_CHANNEL_IDS(self):
-        return parse_env_channel_ids(env_name="TRANSFER_ALERT_CHANNEL_ID")
 
     def _refresh_store(self):
         self.store = PlayerSearchStore(read_db(self.bot))
@@ -372,7 +368,7 @@ class PlayerSearch(commands.Cog):
     @commands.command(name="測試轉移警報", help="發送測試訊息以確認轉移警報頻道設定是否正確。")
     @allowed_channel("TRANSFER_ALERT_CHANNEL_ID")
     async def test_transfer_alert(self, ctx):
-        channel_ids = self.TRANSFER_ALERT_CHANNEL_IDS
+        channel_ids = transfer_alert_channel_ids()
         if not channel_ids:
             return await ctx.send(
                 "❌ 系統尚未設定 `TRANSFER_ALERT_CHANNEL_ID` 環境變數，請確認 `.env` 檔案設定。"
@@ -430,7 +426,7 @@ class PlayerSearch(commands.Cog):
             if mode in ("全量", "full", "全部"):
                 await ctx.send("⏳ 全量重建中（使用 bot 寫入連線，可能較久）…")
                 n = await run_locked(
-                    getattr(self.bot, "db_write_lock", None),
+                    bot_write_lock(self.bot),
                     rebuild_player_profiles,
                     self.bot.db,
                 )
@@ -442,7 +438,7 @@ class PlayerSearch(commands.Cog):
             else:
                 total, filled = await denorm_coverage_stats(read_db(self.bot))
                 n = await run_locked(
-                    getattr(self.bot, "db_write_lock", None),
+                    bot_write_lock(self.bot),
                     backfill_player_profile_denorm,
                     self.bot.db,
                     batch_limit=2000,

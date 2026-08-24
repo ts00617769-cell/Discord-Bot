@@ -10,7 +10,7 @@ import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands
 
-from services.db_lock import run_locked
+from services.db_lock import bot_write_lock, run_locked
 from services.timeutil import today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,7 @@ class Entertainment(commands.Cog):
     ) -> tuple[str, str] | None:
         """爬外網並寫入快取；失敗時已回覆使用者，回傳 None。"""
         await run_locked(
-            getattr(self.bot, "db_write_lock", None),
+            bot_write_lock(self.bot),
             self._purge_stale_horoscope_cache,
             today_str,
         )
@@ -232,7 +232,7 @@ class Entertainment(commands.Cog):
                     .replace("財運運勢", "\n\n**財運運勢**")
                 )
                 await run_locked(
-                    getattr(self.bot, "db_write_lock", None),
+                    bot_write_lock(self.bot),
                     self._store_horoscope_cache,
                     today_str,
                     sign,

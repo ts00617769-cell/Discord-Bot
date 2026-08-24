@@ -13,7 +13,7 @@ from typing import cast
 import discord
 from discord.ext import commands, tasks
 
-from services.db_lock import run_locked
+from services.db_lock import bot_write_lock, run_locked
 from services.discord_send import send_to_channel
 from services.error_handler import parse_env_channel_id, resolve_bot_channel
 from services.timeutil import TAIPEI, now_taipei, today_taipei_str
@@ -113,7 +113,7 @@ class SecretQuizButton(discord.ui.Button):
         try:
             bot = cast(commands.Bot, interaction.client)
             db = bot.db  # type: ignore[attr-defined]
-            write_lock = getattr(bot, "db_write_lock", None)
+            write_lock = bot_write_lock(bot)
 
             async def _persist_vote():
                 cursor = await db.execute(
@@ -266,7 +266,7 @@ class QuizSystem(commands.Cog):
                 await self.bot.db.execute("DELETE FROM quiz_history")
                 await self.bot.db.commit()
 
-            await run_locked(getattr(self.bot, "db_write_lock", None), _reset_history)
+            await run_locked(bot_write_lock(self.bot), _reset_history)
             available = self.quiz_data
 
         if not available:
@@ -309,7 +309,7 @@ class QuizSystem(commands.Cog):
                 await self.bot.db.rollback()
                 raise
 
-        return await run_locked(getattr(self.bot, "db_write_lock", None), _claim)
+        return await run_locked(bot_write_lock(self.bot), _claim)
 
     async def rollback_quiz_post(self, date_str: str, question: dict) -> None:
         """Discord 發送失敗時，只撤銷本次 claim 與 history。"""
@@ -334,7 +334,7 @@ class QuizSystem(commands.Cog):
                 await self.bot.db.rollback()
                 raise
 
-        await run_locked(getattr(self.bot, "db_write_lock", None), _rollback)
+        await run_locked(bot_write_lock(self.bot), _rollback)
 
     async def clear_active_status(self):
         async def _clear() -> None:
@@ -344,7 +344,7 @@ class QuizSystem(commands.Cog):
             await self.bot.db.execute("DELETE FROM quiz_votes")
             await self.bot.db.commit()
 
-        await run_locked(getattr(self.bot, "db_write_lock", None), _clear)
+        await run_locked(bot_write_lock(self.bot), _clear)
 
     def _start_poll(self, channel_id, current_date, question):
         self.active_poll = {

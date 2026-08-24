@@ -1,18 +1,17 @@
 """轉服 dedupe 針對性查詢。"""
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from cogs.exp_tracker import ExpTracker
 from db.schema import apply_migrations
 from services.transfer_alert_flow import (
     filter_viable_ranked,
     lookup_alerted_pairs,
     pair_key_from_row,
 )
+from services.transfer_alert_runner import run_transfer_check
 
 
 def _xfer_row(
@@ -150,9 +149,6 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
     db = await aiosqlite.connect(str(tmp_path / "rollback.db"))
     try:
         await apply_migrations(db)
-        bot = SimpleNamespace(db=db, db_ro=db)
-        cog = ExpTracker.__new__(ExpTracker)
-        cog.bot = bot
         row = _xfer_row(old_last_seen="2026-08-05 11:50:00")
         pair = {
             "pair_key": ("Old", "S1", "New", "S2"),
@@ -168,14 +164,9 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             "old_guild": "",
             "new_guild": "",
         }
-        cog._send_transfer_alert = AsyncMock(return_value=set())
+        send = AsyncMock(return_value=set())
 
-        with patch.object(
-            ExpTracker,
-            "TRANSFER_ALERT_CHANNEL_IDS",
-            new_callable=PropertyMock,
-            return_value=[7],
-        ), patch(
+        with patch(
             "services.transfer_alert_runner.is_transfer_active_period", return_value=False
         ), patch(
             "services.transfer_alert_runner.rank_transfer_candidates", return_value=[row]
@@ -196,8 +187,13 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
             new_callable=AsyncMock,
             return_value=[row],
         ):
-            await cog.check_for_transfers(
-                "2026-08-05 12:00:00", "2026-08-05 11:50:00"
+            await run_transfer_check(
+                write_db=db,
+                read_db=db,
+                time_now="2026-08-05 12:00:00",
+                time_prev="2026-08-05 11:50:00",
+                channel_ids=[7],
+                send_alert=send,
             )
 
         async with db.execute(
