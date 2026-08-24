@@ -32,6 +32,7 @@ from services.retention_windows import (
     ONLINE_DELETE_BATCH_SIZE,
 )
 from services.search_cache import invalidate_player_search_cache
+from services.sqlite_busy import await_with_busy_retry
 from services.timeutil import TAIPEI, now_taipei
 
 logger = logging.getLogger(__name__)
@@ -145,22 +146,18 @@ class WarRoom(commands.Cog):
 
     async def _execute_delete_with_busy_retry(self, sql: str, params: tuple):
         """database is locked 時短重試（避免卡住 event loop 用 asyncio.sleep）。"""
-        last: BaseException | None = None
-        for attempt in range(1, 9):
-            try:
-                cursor = await self.bot.db.execute(sql, params)
-                return cursor
-            except sqlite3.OperationalError as e:
-                last = e
-                msg = str(e).lower()
-                if "locked" not in msg and "busy" not in msg:
-                    raise
-                logger.warning(
-                    "線上清庫忙碌（%s），重試 %s/8…", e, attempt
-                )
-                await asyncio.sleep(min(2.0 * attempt, 10.0))
-        assert last is not None
-        raise last
+
+        async def _run():
+            return await self.bot.db.execute(sql, params)
+
+        return await await_with_busy_retry(
+            _run,
+            attempts=8,
+            delay_for_attempt=lambda attempt: min(2.0 * attempt, 10.0),
+            on_retry=lambda e, attempt: logger.warning(
+                "線上清庫忙碌（%s），重試 %s/8…", e, attempt
+            ),
+        )
 
     async def _delete_exp_history_in_batches(
         self,

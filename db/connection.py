@@ -29,7 +29,7 @@ class DatabaseIntegrityError(RuntimeError):
     """PRAGMA quick_check 失敗。"""
 
 
-# 單一寫入連線 busy_timeout：120s（對齊 heartbeat grace，撐過 NAS 短鎖）
+# 預設 busy_timeout 30s；bot 寫入連線用 INSTANCE_BUSY_TIMEOUT_MS=120s 撐過 NAS 短鎖
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
 INSTANCE_BUSY_TIMEOUT_MS = 120_000
 
@@ -118,7 +118,7 @@ async def connect_db_ro(
         raise FileNotFoundError(f"資料庫不存在，無法開唯讀連線: {path}")
     uri = path.resolve().as_uri() + "?mode=ro"
     db = await aiosqlite.connect(uri, uri=True)
-    await db.execute("PRAGMA busy_timeout=30000")
+    await db.execute(f"PRAGMA busy_timeout={INSTANCE_BUSY_TIMEOUT_MS}")
     await db.execute("PRAGMA cache_size=-65536")
     await db.execute("PRAGMA temp_store=MEMORY")
     try:

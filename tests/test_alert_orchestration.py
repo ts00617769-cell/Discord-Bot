@@ -141,10 +141,10 @@ async def test_transfer_partial_channel_failure_retries_failed_only(tmp_path):
         k1 = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 1)
         k2 = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 2)
         assert await alert_already_sent(
-            db, KIND_TRANSFER, k1, check_legacy_settings=False
+            db, KIND_TRANSFER, k1
         )
         assert not await alert_already_sent(
-            db, KIND_TRANSFER, k2, check_legacy_settings=False
+            db, KIND_TRANSFER, k2
         )
         async with db.execute(
             "SELECT 1 FROM transfer_alerts_log WHERE old_name='Old'"
@@ -187,7 +187,7 @@ async def test_transfer_partial_channel_failure_retries_failed_only(tmp_path):
 
         assert send2.await_args.kwargs["channel_ids"] == [2]
         assert await alert_already_sent(
-            db, KIND_TRANSFER, k2, check_legacy_settings=False
+            db, KIND_TRANSFER, k2
         )
         async with db.execute(
             "SELECT 1 FROM transfer_alerts_log WHERE old_name='Old'"

@@ -1,4 +1,4 @@
-"""alert_dedupe 寫入／相容舊 bot_settings。"""
+"""alert_dedupe 寫入／讀取。"""
 from __future__ import annotations
 
 import pytest
@@ -25,7 +25,7 @@ async def test_overspeed_dedupe_write_and_read(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_overspeed_dedupe_falls_back_to_bot_settings(tmp_path):
+async def test_overspeed_dedupe_ignores_bot_settings_keys(tmp_path):
     import aiosqlite
 
     db = await aiosqlite.connect(str(tmp_path / "dedupe_legacy.db"))
@@ -37,6 +37,6 @@ async def test_overspeed_dedupe_falls_back_to_bot_settings(tmp_path):
             (key, "1"),
         )
         await db.commit()
-        assert await alert_already_sent(db, KIND_OVERSPEED, key) is True
+        assert await alert_already_sent(db, KIND_OVERSPEED, key) is False
     finally:
         await db.close()

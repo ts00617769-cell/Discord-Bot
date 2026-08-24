@@ -10,7 +10,7 @@ services:
       - .env
     environment:
       - TZ=Asia/Taipei
-      # NAS 大庫建議略過啟動 quick_check，避免長鎖觸發 heartbeat 失敗
+      # NAS 大庫建議略過啟動 quick_check，避免長鎖
       - SKIP_DB_QUICK_CHECK=1
       # 建議把 DB 指到本機 SSD（勿與程式碼共用高延遲 NAS 路徑）
       # - DB_PATH=/data/prasia_data.db

@@ -9,6 +9,7 @@ import sqlite3
 from typing import Any
 
 from services.db_lock import run_locked
+from services.sqlite_busy import is_sqlite_busy
 from services.timeutil import now_naive_taipei, taipei_cutoff_str
 
 logger = logging.getLogger(__name__)
@@ -28,11 +29,6 @@ BUSY_RETRY_ATTEMPTS = 6
 BUSY_RETRY_BASE_DELAY = 0.25
 
 
-def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
-    msg = str(exc).lower()
-    return "locked" in msg or "busy" in msg
-
-
 async def try_claim_command(
     db,
     invoke_id: int,
@@ -45,7 +41,7 @@ async def try_claim_command(
     """INSERT cmd_dedupe；成功取得 claim 回 True，重複回 False。
 
     DB 忙碌時指數退避重試；仍失敗則放行（fail-open）並記錄——去重是防雙重
-    回覆的盡力機制，實例鎖才是真正的互斥保證，不該因暫時鎖表讓使用者指令失敗。
+    回覆的盡力機制，本機檔案鎖才是互斥保證，不該因暫時鎖表讓使用者指令失敗。
     """
     claimed_at = claimed_at or now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
     pid = os.getpid() if pid is None else pid
@@ -66,7 +62,7 @@ async def try_claim_command(
         except sqlite3.IntegrityError:
             return False
         except sqlite3.OperationalError as e:
-            if not _is_busy_error(e) or attempt == BUSY_RETRY_ATTEMPTS - 1:
+            if not is_sqlite_busy(e) or attempt == BUSY_RETRY_ATTEMPTS - 1:
                 logger.warning(
                     "cmd_dedupe claim 失敗（放行執行）invoke=%s after %s tries: %s",
                     invoke_id,

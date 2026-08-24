@@ -211,6 +211,6 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
         )
 
         key = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 7)
-        assert await alert_already_sent(db, KIND_TRANSFER, key, check_legacy_settings=False) is False
+        assert await alert_already_sent(db, KIND_TRANSFER, key) is False
     finally:
         await db.close()

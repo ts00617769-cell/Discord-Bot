@@ -9,18 +9,11 @@ from collections import Counter
 
 import aiohttp
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from dotenv import load_dotenv
 
 from db import apply_migrations, connect_db, connect_db_ro
 from db.connection import INSTANCE_BUSY_TIMEOUT_MS, DatabaseIntegrityError
-from db.instance_lock import (
-    INSTANCE_LOCK_TTL_SECONDS,
-    make_holder_id,
-    refresh_instance_lock,
-    release_instance_lock,
-    try_acquire_instance_lock,
-)
 from db.paths import resolve_db_path
 from db.schema import (
     StartupReadinessError,
@@ -63,75 +56,22 @@ class PrasiaBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.instance_holder_id = make_holder_id()
-        self._last_heartbeat_ok: float | None = None
         self._fatal_shutdown_started = False
         self._closing = False
-        # 程序內所有寫入（含 heartbeat）共用一條連線，經此鎖排隊，避免自我撞鎖。
+        # 程序內所有寫入共用一條連線，經此鎖排隊，避免自我撞鎖。
         self.db_write_lock = asyncio.Lock()
-
-    # 與 INSTANCE_LOCK_TTL_SECONDS 對齊：超過此時間仍無法刷新 lease 才視為致命
-    LEASE_GRACE_SECONDS = INSTANCE_LOCK_TTL_SECONDS
 
     async def fatal_shutdown(self, reason: str) -> None:
         """立即結束失去安全執行條件的程序，交由容器重啟。
 
-        不呼叫 close()：此方法可能由 heartbeat task 本身觸發，而 close()
-        會取消 heartbeat，造成清理在只關閉 HTTP session 後中斷，留下殭屍程序。
+        不呼叫 close()：避免在背景 task 內取消自身導致半關機殭屍程序。
         """
         if getattr(self, "_fatal_shutdown_started", False):
             return
         self._fatal_shutdown_started = True
         logger.critical("%s；立即終止程序，等待容器重啟", reason)
-        db = getattr(self, "db", None)
-        if db is not None:
-            try:
-                await asyncio.wait_for(
-                    release_instance_lock(db, self.instance_holder_id),
-                    timeout=2,
-                )
-            except (asyncio.TimeoutError, sqlite3.DatabaseError) as e:
-                logger.warning("終止前釋放共享 DB 實例鎖失敗: %s", e)
-            except Exception:
-                logger.warning("終止前釋放共享 DB 實例鎖發生非預期錯誤", exc_info=True)
         logging.shutdown()
         os._exit(1)
-
-    @tasks.loop(seconds=30)
-    async def instance_heartbeat(self):
-        # 本程序正在寫入：跳過本次，不計為失敗（撞的是自己）
-        if self.db_write_lock.locked():
-            return
-        try:
-            async with self.db_write_lock:
-                ok = await refresh_instance_lock(self.db, self.instance_holder_id)
-            if not ok:
-                await self.fatal_shutdown("共享 DB 實例鎖已失效，避免重複執行")
-                return
-            self._last_heartbeat_ok = asyncio.get_running_loop().time()
-        except sqlite3.DatabaseError as e:
-            now = asyncio.get_running_loop().time()
-            last_ok = self._last_heartbeat_ok
-            age = None if last_ok is None else now - last_ok
-            logger.warning(
-                "更新共享 DB 實例 heartbeat 失敗（距上次成功 %.0fs / grace %ss）: %s",
-                -1.0 if age is None else age,
-                self.LEASE_GRACE_SECONDS,
-                e,
-            )
-            if last_ok is None or age is None or age >= self.LEASE_GRACE_SECONDS:
-                await self.fatal_shutdown(
-                    "共享 DB heartbeat 超過 grace 仍失敗，避免 split-brain"
-                )
-                return
-        except Exception:
-            logger.critical(
-                "共享 DB heartbeat 發生非預期錯誤",
-                exc_info=True,
-            )
-            await self.fatal_shutdown(
-                "共享 DB heartbeat 發生非預期錯誤，避免 split-brain"
-            )
 
     async def setup_hook(self):
         try:
@@ -159,13 +99,6 @@ class PrasiaBot(commands.Bot):
                 raise
             schema_ver = await apply_migrations(self.db)
             logger.info(f"✅ schema 版本: v{schema_ver}")
-            if not await try_acquire_instance_lock(
-                self.db, self.instance_holder_id
-            ):
-                raise RuntimeError(
-                    "共享 DB 已有另一個 bot 實例持有鎖；請關閉舊實例或等待鎖逾時"
-                )
-            self._last_heartbeat_ok = asyncio.get_running_loop().time()
 
             try:
                 self.db_ro = await connect_db_ro(db_path)
@@ -179,7 +112,6 @@ class PrasiaBot(commands.Bot):
             except StartupReadinessError as e:
                 logger.critical("❌ 資料庫搜尋條件未就緒，拒絕啟動: %s", e)
                 raise
-            self.instance_heartbeat.start()
 
             if not os.getenv("ALLOWED_COMMAND_CHANNELS", "").strip():
                 logger.error(
@@ -234,8 +166,6 @@ class PrasiaBot(commands.Bot):
         if getattr(self, "_closing", False):
             return
         self._closing = True
-        if self.instance_heartbeat.is_running():
-            self.instance_heartbeat.cancel()
         # 先卸載 cogs，讓其 tasks.loop / 背景工作停止，再關閉共用資源。
         for ext_name in reversed(list(self.extensions)):
             try:
@@ -251,10 +181,6 @@ class PrasiaBot(commands.Bot):
             await db_ro.close()
             logger.info("✅ 唯讀資料庫已關閉")
         if db is not None:
-            try:
-                await release_instance_lock(db, self.instance_holder_id)
-            except sqlite3.DatabaseError as e:
-                logger.warning("釋放共享 DB 實例鎖失敗: %s", e)
             await db.close()
             logger.info("✅ 資料庫已安全關閉")
         await super().close()
@@ -372,7 +298,7 @@ if __name__ == "__main__":
         acquire_process_lock()
         print(f"🔒 單例鎖已取得 (PID {os.getpid()} @ {socket.gethostname()})")
         print(
-            "⚠️ 若指令仍回兩次：代表另一台機器/雲端也在跑同一個 Token，"
+            "⚠️ 若指令仍回兩次：代表另一台機器也在跑同一個 Token，"
             "請關閉其中一邊，或到 Discord Developer Portal 重設 Token。"
         )
         bot.run(TOKEN)

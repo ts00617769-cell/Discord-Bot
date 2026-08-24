@@ -26,10 +26,7 @@ from services.settings_prune import (
     overspeed_prune_bound,
 )
 from services.timeutil import taipei_cutoff_str, today_taipei_str
-from services.transfer_missing import (
-    PRUNE_TRANSFER_MISSING_SQL,
-    prune_stale_missing_sync,
-)
+from services.transfer_missing import PRUNE_TRANSFER_MISSING_SQL
 
 
 @dataclass(frozen=True)
@@ -110,10 +107,52 @@ def thin_range_batches(
     return out
 
 
+TRANSFER_ALERTS_PRUNE_SQL = """
+DELETE FROM transfer_alerts_log
+WHERE alert_time < ?
+"""
+
+CMD_DEDUPE_PRUNE_SQL = "DELETE FROM cmd_dedupe WHERE claimed_at < ?"
+
+
 def _settings_date_only(retention_cutoff: str) -> str:
     if len(retention_cutoff) >= 10:
         return retention_cutoff[:10]
     return today_taipei_str()
+
+
+def _secondary_prune_steps(
+    plan: RetentionPlan,
+) -> list[tuple[str, str, tuple]]:
+    """回傳 [(stat_field, sql, params), ...]。alert_dedupe 兩段都寫入同一欄位。"""
+    cutoff_date_only = _settings_date_only(plan.retention_cutoff)
+    missing_cutoff = _transfer_missing_cutoff()
+    return [
+        ("deleted_transfer", TRANSFER_ALERTS_PRUNE_SQL, (plan.transfer_cutoff,)),
+        (
+            "deleted_settings",
+            PRUNE_DEDUPE_SQL,
+            (
+                overspeed_prune_bound(plan.retention_cutoff),
+                boss_reminder_prune_bound(cutoff_date_only),
+            ),
+        ),
+        (
+            "deleted_alert_dedupe",
+            PRUNE_ALERT_DEDUPE_SQL,
+            (plan.retention_cutoff,),
+        ),
+        (
+            "deleted_alert_dedupe",
+            PRUNE_TRANSFER_DEDUPE_SQL,
+            (plan.transfer_cutoff,),
+        ),
+        (
+            "deleted_transfer_missing",
+            PRUNE_TRANSFER_MISSING_SQL,
+            (missing_cutoff, missing_cutoff),
+        ),
+    ]
 
 
 async def prune_secondary_async(
@@ -125,48 +164,14 @@ async def prune_secondary_async(
 ) -> SecondaryPruneStats:
     """刪除 transfer / settings / alert_dedupe / cmd_dedupe 並 commit。"""
     stats = SecondaryPruneStats()
-    async with db.execute(
-        """
-        DELETE FROM transfer_alerts_log
-        WHERE alert_time < ?
-        """,
-        (plan.transfer_cutoff,),
-    ) as cursor:
-        stats.deleted_transfer = cursor.rowcount or 0
-
-    cutoff_date_only = _settings_date_only(plan.retention_cutoff)
-    async with db.execute(
-        PRUNE_DEDUPE_SQL,
-        (
-            overspeed_prune_bound(plan.retention_cutoff),
-            boss_reminder_prune_bound(cutoff_date_only),
-        ),
-    ) as cursor:
-        stats.deleted_settings = cursor.rowcount or 0
-
-    async with db.execute(
-        PRUNE_ALERT_DEDUPE_SQL, (plan.retention_cutoff,)
-    ) as cursor:
-        stats.deleted_alert_dedupe = cursor.rowcount or 0
-
-    async with db.execute(
-        PRUNE_TRANSFER_DEDUPE_SQL, (plan.transfer_cutoff,)
-    ) as cursor:
-        stats.deleted_alert_dedupe += cursor.rowcount or 0
+    for field, sql, params in _secondary_prune_steps(plan):
+        async with db.execute(sql, params) as cursor:
+            setattr(stats, field, getattr(stats, field) + (cursor.rowcount or 0))
 
     if prune_cmd_dedupe:
         cmd_cutoff = taipei_cutoff_str(cmd_dedupe_days)
-        async with db.execute(
-            "DELETE FROM cmd_dedupe WHERE claimed_at < ?",
-            (cmd_cutoff,),
-        ) as cursor:
+        async with db.execute(CMD_DEDUPE_PRUNE_SQL, (cmd_cutoff,)) as cursor:
             stats.deleted_cmd_dedupe = cursor.rowcount or 0
-
-    missing_cutoff = _transfer_missing_cutoff()
-    async with db.execute(
-        PRUNE_TRANSFER_MISSING_SQL, (missing_cutoff, missing_cutoff)
-    ) as cursor:
-        stats.deleted_transfer_missing = cursor.rowcount or 0
 
     await db.commit()
     return stats
@@ -184,34 +189,17 @@ def prune_secondary_sync(
     cmd_dedupe_days: int = 2,
 ) -> SecondaryPruneStats:
     stats = SecondaryPruneStats()
-    if has_transfer:
-        stats.deleted_transfer = conn.execute(
-            """
-            DELETE FROM transfer_alerts_log
-            WHERE alert_time < ?
-            """,
-            (plan.transfer_cutoff,),
-        ).rowcount
-    if has_settings:
-        cutoff_date_only = _settings_date_only(plan.retention_cutoff)
-        stats.deleted_settings = conn.execute(
-            PRUNE_DEDUPE_SQL,
-            (
-                overspeed_prune_bound(plan.retention_cutoff),
-                boss_reminder_prune_bound(cutoff_date_only),
-            ),
-        ).rowcount
-    if has_alert_dedupe:
-        stats.deleted_alert_dedupe = conn.execute(
-            PRUNE_ALERT_DEDUPE_SQL, (plan.retention_cutoff,)
-        ).rowcount
-        stats.deleted_alert_dedupe += conn.execute(
-            PRUNE_TRANSFER_DEDUPE_SQL, (plan.transfer_cutoff,)
-        ).rowcount
-    if has_transfer_missing:
-        stats.deleted_transfer_missing = prune_stale_missing_sync(
-            conn, before=_transfer_missing_cutoff()
-        )
+    enabled = {
+        "deleted_transfer": has_transfer,
+        "deleted_settings": has_settings,
+        "deleted_alert_dedupe": has_alert_dedupe,
+        "deleted_transfer_missing": has_transfer_missing,
+    }
+    for field, sql, params in _secondary_prune_steps(plan):
+        if not enabled[field]:
+            continue
+        stats_add = conn.execute(sql, params).rowcount or 0
+        setattr(stats, field, getattr(stats, field) + stats_add)
     if prune_cmd_dedupe:
         stats.deleted_cmd_dedupe = prune_command_dedupe_sync(
             conn, days=cmd_dedupe_days

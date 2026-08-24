@@ -117,9 +117,7 @@ async def _pair_channels_fully_claimed(
         return False
     for channel_id in channel_ids:
         key = transfer_channel_dedupe_key(pair_key, channel_id)
-        if not await alert_already_sent(
-            db, KIND_TRANSFER, key, check_legacy_settings=False
-        ):
+        if not await alert_already_sent(db, KIND_TRANSFER, key):
             return False
     return True
 
@@ -148,9 +146,7 @@ async def _claim_pair_channels(
     for channel_id in channel_ids:
         channel_key = transfer_channel_dedupe_key(pair_key, channel_id)
         try:
-            if await alert_already_sent(
-                read_db, KIND_TRANSFER, channel_key, check_legacy_settings=False
-            ):
+            if await alert_already_sent(read_db, KIND_TRANSFER, channel_key):
                 continue
             if not await try_claim_alert(
                 write_db, KIND_TRANSFER, channel_key, created_at=created_at

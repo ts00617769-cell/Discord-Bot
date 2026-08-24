@@ -1,4 +1,4 @@
-"""警報去重：通用 claim / already / release；相容舊 bot_settings。"""
+"""警報去重：通用 claim / already / release。"""
 from __future__ import annotations
 
 KIND_OVERSPEED = "overspeed"
@@ -23,24 +23,10 @@ VALUES (?, ?, ?)
 RELEASE_SQL = "DELETE FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?"
 
 
-async def alert_already_sent(
-    db,
-    kind: str,
-    key: str,
-    *,
-    check_legacy_settings: bool = True,
-) -> bool:
-    """先查 alert_dedupe，可選回退 bot_settings。"""
+async def alert_already_sent(db, kind: str, key: str) -> bool:
     async with db.execute(
         "SELECT 1 FROM alert_dedupe WHERE kind = ? AND dedupe_key = ?",
         (kind, key),
-    ) as cursor:
-        if await cursor.fetchone():
-            return True
-    if not check_legacy_settings:
-        return False
-    async with db.execute(
-        "SELECT 1 FROM bot_settings WHERE key = ?", (key,)
     ) as cursor:
         return await cursor.fetchone() is not None
 

@@ -32,7 +32,6 @@ CHECKPOINT_EVERY_BATCHES = 10
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from db.instance_lock import get_live_instance_holder  # noqa: E402
 from db.paths import resolve_db_path  # noqa: E402
 from db.schema import (  # noqa: E402
     build_search_indexes_sync,
@@ -40,8 +39,8 @@ from db.schema import (  # noqa: E402
     rebuild_player_profiles_sync,
 )
 from db.singleton_lock import is_process_lock_held  # noqa: E402
-from services.cmd_dedupe import prune_command_dedupe_sync  # noqa: E402
 from services.retention_cleanup import (  # noqa: E402
+    RetentionPlan,
     build_retention_plan,
     prune_secondary_sync,
 )
@@ -49,22 +48,16 @@ from services.retention_windows import (  # noqa: E402
     DEFAULT_MAX_TRANSFER_WINDOWS,
     DEFAULT_RECENT_DAYS,
     DEFAULT_TRANSFER_PAD_DAYS,
-    build_bridge_thin_ranges,
-    build_search_keep_ranges,
-    build_transfer_thin_ranges,
     exp_history_outside_keep_batch_sql,
     exp_history_outside_keep_sql,
     exp_history_transfer_middle_batch_sql,
     exp_history_transfer_middle_statements,
-    search_retention_cutoff,
-    transfer_alert_retention_cutoff,
 )
 from services.settings_prune import (  # noqa: E402
-    PRUNE_ALERT_DEDUPE_SQL,
-    PRUNE_DEDUPE_SQL,
     boss_reminder_prune_bound,
     overspeed_prune_bound,
 )
+from services.sqlite_busy import execute_with_busy_retry  # noqa: E402
 from services.timeutil import taipei_cutoff_str  # noqa: E402
 
 try:
@@ -79,43 +72,24 @@ def _bot_appears_running() -> bool:
     return is_process_lock_held(LOCK_PATH)
 
 
-def _refuse_if_bot_running(conn: sqlite3.Connection, *, force: bool) -> int | None:
-    """本機檔案鎖或跨機 instance heartbeat 仍活著時拒絕（除非 --force）。
+def _refuse_if_bot_running(*, force: bool) -> int | None:
+    """本機檔案鎖仍活著時拒絕（除非 --force）。
 
     回傳非 0 表示應結束程式；None 表示可繼續。
     """
-    local_held = _bot_appears_running()
-    remote = get_live_instance_holder(conn)
-    if not local_held and remote is None:
+    if not _bot_appears_running():
         return None
     if force:
-        if local_held:
-            print(
-                f"警告：--force 略過本機 {LOCK_PATH.name}；"
-                "若 bot 仍在跑可能損壞資料庫。",
-                flush=True,
-            )
-        if remote is not None:
-            holder, heartbeat = remote
-            print(
-                f"警告：--force 略過跨機 instance lock "
-                f"（holder={holder}, heartbeat={heartbeat}）。",
-                flush=True,
-            )
-        return None
-    if local_held:
         print(
-            f"錯誤：偵測到 bot 仍佔用 {LOCK_PATH.name}（檔案鎖）。\n"
-            "請先在 Docker 停止 prasia-bot-final，或確認已停後加 --force。\n"
-            "（若容器已停仍出現此訊息，多半是舊版誤判殘留 PID；請 git pull 後重試。）",
-            file=sys.stderr,
+            f"警告：--force 略過本機 {LOCK_PATH.name}；"
+            "若 bot 仍在跑可能損壞資料庫。",
+            flush=True,
         )
-        return 1
-    holder, heartbeat = remote  # type: ignore[misc]
+        return None
     print(
-        "錯誤：偵測到共享資料庫上仍有活躍 bot 實例 "
-        f"（holder={holder}, heartbeat={heartbeat}）。\n"
-        "請先停止遠端 bot，或確認 heartbeat 過期後再跑；緊急時加 --force。",
+        f"錯誤：偵測到 bot 仍佔用 {LOCK_PATH.name}（檔案鎖）。\n"
+        "請先在 Docker 停止 prasia-bot-final，或確認已停後加 --force。\n"
+        "（若容器已停仍出現此訊息，多半是舊版誤判殘留 PID；請 git pull 後重試。）",
         file=sys.stderr,
     )
     return 1
@@ -156,24 +130,15 @@ def _execute_with_busy_retry(
     sleep_sec: float = 5.0,
 ):
     """database is locked 時重試（常見於 bot 未停乾淨／WAL 殘留）。"""
-    import time
-
-    last: BaseException | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            return conn.execute(sql, params)
-        except sqlite3.OperationalError as e:
-            last = e
-            msg = str(e).lower()
-            if "locked" not in msg and "busy" not in msg:
-                raise
-            _log(
-                f"  資料庫忙碌（{e}），{sleep_sec:.0f}s 後重試 "
-                f"{attempt}/{retries}…"
-            )
-            time.sleep(sleep_sec)
-    assert last is not None
-    raise last
+    return execute_with_busy_retry(
+        lambda: conn.execute(sql, params),
+        attempts=retries,
+        sleep_sec=sleep_sec,
+        on_retry=lambda e, attempt: _log(
+            f"  資料庫忙碌（{e}），{sleep_sec:.0f}s 後重試 "
+            f"{attempt}/{retries}…"
+        ),
+    )
 
 
 def _delete_in_batches(
@@ -363,7 +328,7 @@ def main() -> int:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
 
-        refuse = _refuse_if_bot_running(conn, force=bool(args.force))
+        refuse = _refuse_if_bot_running(force=bool(args.force))
         if refuse is not None:
             return refuse
         # 約 64MB page cache，降低大 DELETE 被 OOM 的機率
@@ -412,6 +377,7 @@ def main() -> int:
         thin_ranges: list[tuple[str, str]] = []
         settings_cutoff: str | None = None
         transfer_cutoff: str | None = None
+        search_plan: RetentionPlan | None = None
 
         if args.wipe_history:
             mode = "清空全部歷史"
@@ -444,29 +410,15 @@ def main() -> int:
                     else 0
                 )
         elif args.for_search:
-            keep_ranges = build_search_keep_ranges(
+            search_plan = build_retention_plan(
                 recent_days=args.recent_days,
                 pad_days=args.transfer_pad_days,
                 max_transfer_windows=args.max_transfer_windows,
             )
-            thin_ranges = build_transfer_thin_ranges(
-                max_transfer_windows=args.max_transfer_windows,
-                pad_days=args.transfer_pad_days,
-            )
-            thin_ranges.extend(
-                build_bridge_thin_ranges(
-                    recent_days=args.recent_days,
-                    max_transfer_windows=args.max_transfer_windows,
-                    pad_days=args.transfer_pad_days,
-                )
-            )
-            thin_ranges.sort(key=lambda item: item[0])
-            settings_cutoff = search_retention_cutoff(
-                recent_days=args.recent_days,
-                pad_days=args.transfer_pad_days,
-                max_transfer_windows=args.max_transfer_windows,
-            )
-            transfer_cutoff = transfer_alert_retention_cutoff()
+            keep_ranges = search_plan.keep_ranges
+            thin_ranges = search_plan.thin_ranges
+            settings_cutoff = search_plan.retention_cutoff
+            transfer_cutoff = search_plan.transfer_cutoff
             mode = (
                 f"尋人導向（最近 {args.recent_days} 天 ∪ "
                 f"最近 {args.max_transfer_windows} 次轉移窗"
@@ -705,17 +657,12 @@ def main() -> int:
                     )
                     deleted_middle += n
                     _log(f"  本窗中間合計已刪 {n:,} 筆")
+            assert search_plan is not None
             assert settings_cutoff is not None
             assert transfer_cutoff is not None
-            plan = build_retention_plan(
-                recent_days=args.recent_days,
-                pad_days=args.transfer_pad_days,
-                max_transfer_windows=args.max_transfer_windows,
-            )
-            # dry-run 計數路徑仍用上方 cutoff；實際刪除走共用 prune
             secondary = prune_secondary_sync(
                 conn,
-                plan,
+                search_plan,
                 has_transfer=has_transfer,
                 has_settings=has_settings,
                 has_alert_dedupe=has_alert_dedupe,
@@ -739,34 +686,25 @@ def main() -> int:
                     (cutoff,),
                 ).rowcount
                 _log(f"  已刪 {deleted_exp:,} 筆")
-            if has_transfer:
-                deleted_transfer = conn.execute(
-                    """
-                    DELETE FROM transfer_alerts_log
-                    WHERE alert_time < ?
-                    """,
-                    (cutoff,),
-                ).rowcount
-            if has_settings:
-                deleted_settings = conn.execute(
-                    PRUNE_DEDUPE_SQL,
-                    (
-                        overspeed_prune_bound(cutoff),
-                        boss_reminder_prune_bound(cutoff[:10]),
-                    ),
-                ).rowcount
-            if has_alert_dedupe:
-                deleted_alert_dedupe = conn.execute(
-                    PRUNE_ALERT_DEDUPE_SQL, (cutoff,)
-                ).rowcount
-            if has_transfer_missing:
-                from services.transfer_missing import prune_stale_missing_sync
-
-                deleted_transfer_missing = prune_stale_missing_sync(
-                    conn, before=cutoff
-                )
-            if has_cmd_dedupe:
-                deleted_cmd_dedupe = prune_command_dedupe_sync(conn, days=2)
+            secondary = prune_secondary_sync(
+                conn,
+                RetentionPlan(
+                    keep_ranges=[],
+                    thin_ranges=[],
+                    retention_cutoff=cutoff,
+                    transfer_cutoff=cutoff,
+                ),
+                has_transfer=has_transfer,
+                has_settings=has_settings,
+                has_alert_dedupe=has_alert_dedupe,
+                has_transfer_missing=has_transfer_missing,
+                prune_cmd_dedupe=has_cmd_dedupe,
+            )
+            deleted_transfer = secondary.deleted_transfer
+            deleted_settings = secondary.deleted_settings
+            deleted_alert_dedupe = secondary.deleted_alert_dedupe
+            deleted_transfer_missing = secondary.deleted_transfer_missing
+            deleted_cmd_dedupe = secondary.deleted_cmd_dedupe
 
         conn.commit()
         middle_note = (

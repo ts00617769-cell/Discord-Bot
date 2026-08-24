@@ -70,11 +70,11 @@ ruff check .
 | `SKIP_DB_QUICK_CHECK` | 設 `1` 略過啟動 `PRAGMA quick_check`（大庫／NAS **建議開啟**） |
 | `RANKING_CACHE_TTL` | Ranking 成功快取秒數（預設 `45`；`0`＝關閉） |
 
-跨主機共用同一 `DB_PATH` 時，啟動會以 `bot_instance_lock` heartbeat 互斥，避免雙開重複警報。
+跨主機請勿共用同一個 `DB_PATH`；本機以 `.bot.lock` 擋同機雙開。同一 Token 只能跑一個實例。
 
 **NAS／`database is locked` 維運檢查（止血優先）：**
 
-1. 同一 `DB_PATH` **只跑一個** bot 容器／主機（雙開會互相鎖死並觸發重啟循環）。
+1. 同一 `DB_PATH` **只跑一個** bot 容器／主機（雙開會互相鎖死）。
 2. 執行 `cleanup_db.py`（含 `--for-search`／VACUUM）前**先停 bot**；勿用 `--force` 硬搶還在寫的庫。
 3. NAS 部署設 `SKIP_DB_QUICK_CHECK=1`，避免啟動 `quick_check` 長鎖。
 4. 儘可能把 `DB_PATH` 指到容器本機碟／SSD；NAS 只當備份同步目標。
@@ -174,9 +174,7 @@ python cleanup_db.py --wipe-history   # 清空歷史表含 transfer_missing（�
 >
 > `--wipe-history` 會一併清空 `transfer_missing`（消失佇列），避免舊列在下一轉移窗誤報。
 >
-> 跨主機防雙開依賴所有實例使用同一個 `DB_PATH`；若兩台各用自己的 DB，任何 SQLite 鎖都無法互相看見。
->
-> 離線 `cleanup_db.py` 除本機 `.bot.lock` 外，也會拒絕在仍有活躍 `bot_instance_lock` heartbeat 的共享庫上清理（避免他機 bot 仍在寫入）。請先停掉所有 bot 實例，或等 heartbeat 過期；緊急才加 `--force`（會印出警告）。
+> 離線 `cleanup_db.py` 會拒絕在本機 `.bot.lock` 仍被佔用時清理。請先停 bot；緊急才加 `--force`（會印出警告）。
 
 ### HTTP／Ranking
 
