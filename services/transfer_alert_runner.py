@@ -289,9 +289,9 @@ async def run_transfer_check(
             await _try_prune_missing(write_db, time_now, write_lock)
             return
 
+        # 只要求舊角在本輪缺席。連上一輪完整快照也要缺席的話，
+        # 「上一輪還在舊服、這一輪已在新服」的即時轉服（含改名回原 ID）永遠不會報。
         miss_times = [time_now]
-        if complete_times and len(complete_times) >= 2:
-            miss_times = [complete_times[0][0], complete_times[1][0]]
 
         ranked = rank_transfer_candidates(
             transfer_records,

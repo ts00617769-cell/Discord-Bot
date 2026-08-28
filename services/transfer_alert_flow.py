@@ -90,7 +90,7 @@ async def filter_viable_ranked(
     already_alerted: set[tuple],
     miss_times: Sequence[str],
 ) -> list[tuple]:
-    """略過已報過；舊角須在 miss_times 全部缺席。"""
+    """略過已報過；舊角須在 miss_times 全部缺席（呼叫端應只傳本輪時間）。"""
     candidates: list[tuple] = []
     old_keys: list[tuple[str, str]] = []
     for row in ranked:

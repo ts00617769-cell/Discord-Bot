@@ -108,6 +108,37 @@ async def test_filter_viable_ranked_requires_old_missing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_filter_viable_same_tick_only_requires_current_snapshot(
+    tmp_path,
+):
+    """上一輪舊角還在、這一輪才消失 → 仍應視為可報（即時轉服）。"""
+    import aiosqlite
+
+    db = await aiosqlite.connect(str(tmp_path / "same_tick.db"))
+    try:
+        await apply_migrations(db)
+        row = _xfer_row()
+        t_prev = "2026-08-28 14:00:00"
+        t_now = "2026-08-28 14:10:00"
+        await db.execute(
+            """
+            INSERT INTO exp_history
+            (record_time, player_name, server_name, level, exp, class_name,
+             subjugation_grade)
+            VALUES (?, 'Old', 'S1', 60, 2e12, '戰士', 1)
+            """,
+            (t_prev,),
+        )
+        await db.commit()
+        # 舊邏輯若把上一輪也列入 miss_times，會把即時轉服濾掉
+        assert await filter_viable_ranked(db, [row], set(), [t_prev, t_now]) == []
+        viable = await filter_viable_ranked(db, [row], set(), [t_now])
+        assert viable == [row]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_players_present_at_times_batches(tmp_path):
     import aiosqlite
 
@@ -212,5 +243,76 @@ async def test_transfer_alert_send_failure_releases_claim(tmp_path):
 
         key = transfer_channel_dedupe_key(("Old", "S1", "New", "S2"), 7)
         assert await alert_already_sent(db, KIND_TRANSFER, key) is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_same_tick_rename_reverse_alerts_despite_outbound_log(tmp_path):
+    """去程已報過後，同一輪快照改名轉回原 ID 仍應再報一則。"""
+    import aiosqlite
+
+    db = await aiosqlite.connect(str(tmp_path / "reverse.db"))
+    try:
+        await apply_migrations(db)
+        t_prev = "2026-08-28 14:00:00"
+        t_now = "2026-08-28 14:10:00"
+        orig = "一杯敬朝陽一杯敬月光"
+        dest = "環保局"
+        orig_sv = "伊奈司01"
+        dest_sv = "困特03"
+        cls = "香射手"
+        await db.executemany(
+            """
+            INSERT INTO exp_history (
+                record_time, server_name, player_name, level, exp,
+                class_name, subjugation_grade, guild_name
+            ) VALUES (?, ?, ?, 92, 2e12, ?, 25, ?)
+            """,
+            [
+                (t_prev, dest_sv, dest, cls, "TTKK"),
+                (t_now, orig_sv, orig, cls, "白月如火"),
+            ],
+        )
+        await db.execute(
+            """
+            INSERT INTO transfer_alerts_log
+            (old_name, old_server, new_name, new_server, alert_time)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (orig, orig_sv, dest, dest_sv, t_prev),
+        )
+        await db.commit()
+
+        sent_pairs: list[tuple[str, str, str, str]] = []
+
+        async def send_alert(
+            time_now,
+            new_name,
+            new_server,
+            old_name,
+            old_server,
+            new_lvl,
+            new_cls,
+            new_sub_grade,
+            status,
+            exp_diff,
+            old_guild="",
+            new_guild="",
+            channel_ids=None,
+        ):
+            sent_pairs.append((old_name, old_server, new_name, new_server))
+            return set(channel_ids or [])
+
+        await run_transfer_check(
+            write_db=db,
+            read_db=db,
+            time_now=t_now,
+            time_prev=t_prev,
+            complete_times=[(t_now,), (t_prev,)],
+            channel_ids=[7],
+            send_alert=send_alert,
+        )
+        assert sent_pairs == [(dest, dest_sv, orig, orig_sv)]
     finally:
         await db.close()
