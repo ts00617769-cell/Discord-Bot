@@ -184,6 +184,7 @@ def rename_allowed(
     *,
     cohort_boost: bool = False,
     in_transfer_window: bool = True,
+    max_speed_threshold: float = 200000000000,
 ) -> bool:
     """異名是否允許自動報警。"""
     if row[IDX_NEW_NAME] == row[IDX_OLD_NAME]:
@@ -191,6 +192,10 @@ def rename_allowed(
     if not in_transfer_window:
         return False
     exp_diff = float(row[IDX_NEW_EXP]) - float(row[IDX_OLD_EXP])
+
+    if exp_diff < 0 or exp_diff > max_speed_threshold:
+        return False
+
     if same_guild(row) or cohort_boost:
         return exp_diff <= CLASS_MARGIN
     return exp_diff <= RENAME_STRICT_MARGIN
@@ -348,6 +353,10 @@ def pick_unique_pairs(
         cohort = row_in_cohort(row, cohort_keys)
         matched_old.add(old_key)
         matched_new.add(new_key)
+
+        confidence_score = min(1.0, max(0.0, score / 1500.0))
+        is_name_change = new_name != old_name
+
         results.append(
             {
                 "pair_key": pair_key,
@@ -364,10 +373,13 @@ def pick_unique_pairs(
                 "new_sub_grade": row[IDX_NEW_SUB],
                 "old_guild": row_old_guild(row),
                 "new_guild": row_new_guild(row),
+                "new_exp": row[IDX_NEW_EXP],
                 "exp_diff": row[IDX_NEW_EXP] - row[IDX_OLD_EXP],
-                "status": transfer_status(new_name, old_name),
+                "status": f"疑似改名轉服 (信心: {confidence_score:.2f})" if is_name_change else "跨服轉移",
                 "score": score,
                 "cohort": cohort,
+                "confidence_score": confidence_score,
+                "is_name_change": is_name_change,
             }
         )
     return results

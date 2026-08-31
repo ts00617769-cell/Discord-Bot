@@ -299,7 +299,7 @@ async def test_same_tick_rename_reverse_alerts_despite_outbound_log(tmp_path):
             exp_diff,
             old_guild="",
             new_guild="",
-            channel_ids=None,
+            channel_ids=None, **kwargs
         ):
             sent_pairs.append((old_name, old_server, new_name, new_server))
             return set(channel_ids or [])

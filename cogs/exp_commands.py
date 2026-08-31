@@ -248,6 +248,57 @@ class ExpCommands(commands.Cog):
             )
         )
 
+    @commands.hybrid_command(
+        name="遷徙",
+        aliases=["移民紀錄", "跳服"],
+        help="查詢玩家歷史跳服歷程 (用法: !遷徙 玩家名稱)",
+    )
+    @app_commands.describe(player_name="要查詢的玩家名稱")
+    @allowed_channel()
+    async def transfer_history(self, ctx: commands.Context, player_name: str):
+        if not player_name.strip():
+            return await ctx.send("❌ 請提供玩家名稱。")
+
+        sql = """
+            SELECT old_name, new_server, old_server, transfer_time, exp, level, class_name, is_name_change
+            FROM player_transfers
+            WHERE player_name = ? OR old_name = ?
+            ORDER BY transfer_time DESC
+        """
+        try:
+            async with self._db().execute(sql, (player_name, player_name)) as cursor:
+                rows = await cursor.fetchall()
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Failed to fetch transfer history: {e}")
+            return await ctx.send("❌ 資料庫錯誤，請稍後再試。")
+
+        if not rows:
+            return await ctx.send(f"找不到玩家 **{player_name}** 的遷徙紀錄。")
+
+        embed = discord.Embed(
+            title=f"【波拉西亞戰記】玩家遷徙歷程：{player_name}",
+            description=f"共找到 {len(rows)} 筆跳服紀錄：\n{'-'*30}",
+            color=0x3498DB,
+        )
+
+        for i, row in enumerate(rows, 1):
+            old_name, new_srv, old_srv, t_time, exp, level, cls_name, is_rename = row
+
+            name_str = f"**{old_name}**" if not is_rename else f"**{old_name}** ➔ **{player_name}**"
+            exp_str = f"{exp/100000000:.1f}億" if exp else "未知"
+
+            embed.add_field(
+                name=f"[{i}] {t_time}",
+                value=(
+                    f"流向：{old_srv} ➡️ {new_srv}\n"
+                    f"身分：{name_str} (Lv.{level or '?'} {cls_name or '未知'})\n"
+                    f"經驗：{exp_str}"
+                ),
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(ExpCommands(bot))

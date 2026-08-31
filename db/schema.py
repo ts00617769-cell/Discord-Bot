@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class StartupReadinessError(RuntimeError):
     """必要尋人索引或 denorm 尚未就緒。"""
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # (version, description, sql statements)
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -244,6 +244,30 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        10,
+        "player transfers log and tracking",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS player_transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_name TEXT NOT NULL,
+                old_name TEXT NOT NULL,
+                old_server TEXT NOT NULL,
+                new_server TEXT NOT NULL,
+                transfer_time TIMESTAMP NOT NULL,
+                exp REAL,
+                level INTEGER,
+                class_name TEXT,
+                is_name_change INTEGER NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_transfers_name_time
+            ON player_transfers(player_name, transfer_time)
+            """,
+        ],
+    ),
 ]
 
 _SEARCH_INDEXES: list[tuple[str, str]] = [
@@ -343,6 +367,7 @@ _PRAGMA_TABLE_ALLOWLIST = frozenset(
         "alert_dedupe",
         "transfer_missing",
         "bot_instance_lock",
+        "player_transfers",
     }
 )
 
