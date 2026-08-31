@@ -354,3 +354,22 @@ async def test_v8_drops_unused_and_migrates_legacy_dedupe(tmp_path):
         assert keys == ["alert_enabled"]
     finally:
         await db.close()
+
+@pytest.mark.asyncio
+async def test_player_transfers_table(tmp_path):
+    db_path = tmp_path / "t2.db"
+    db = await aiosqlite.connect(str(db_path))
+    try:
+        ver = await apply_migrations(db)
+        assert ver == SCHEMA_VERSION
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='player_transfers'"
+        ) as cur:
+            assert await cur.fetchone() is not None
+
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_player_transfers_name_time'"
+        ) as cur:
+            assert await cur.fetchone() is not None
+    finally:
+        await db.close()

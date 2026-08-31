@@ -88,6 +88,23 @@ async def upsert_disappeared(
     新列 miss_count=0；同輪接著 bump_still_missing 會 +1。
     回傳本輪新寫入／重開列數。
     """
+
+    # 取得各服第 50 名經驗值門檻 cutoff_exp
+    cutoff_sql = """
+        SELECT server_name, MIN(exp) as cutoff_exp
+        FROM (
+            SELECT server_name, exp,
+                   ROW_NUMBER() OVER (PARTITION BY server_name ORDER BY exp DESC) as rn
+            FROM exp_history
+            WHERE record_time = ?
+        )
+        WHERE rn <= 50
+        GROUP BY server_name
+    """
+    async with db.execute(cutoff_sql, (time_prev,)) as cursor:
+        cutoff_rows = await cursor.fetchall()
+        cutoffs = {row[0]: float(row[1]) for row in cutoff_rows}
+
     sql = """
         SELECT e.player_name, e.server_name, e.record_time, e.exp, e.level,
                e.class_name, e.subjugation_grade, COALESCE(e.guild_name, '')
@@ -109,6 +126,11 @@ async def upsert_disappeared(
         label = disappear_in_transfer_window(str(last_seen))
         if not label:
             continue
+
+        cutoff_exp = cutoffs.get(server)
+        if cutoff_exp and abs(exp - cutoff_exp) / cutoff_exp < 0.005:
+            label = "疑似掉榜 (Rank 50+ Drop)"
+
         await db.execute(
             UPSERT_MISSING_SQL,
             (
@@ -185,6 +207,7 @@ async def fetch_open_missing(
         FROM transfer_missing
         WHERE resolved_at IS NULL
           AND miss_count >= ?
+          AND window_label != '疑似掉榜 (Rank 50+ Drop)'
         ORDER BY last_seen DESC
         """,
         (min_miss_count,),

@@ -14,7 +14,7 @@ def _init_minimal_db(path: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version (version) VALUES (7);
+            INSERT INTO schema_version (version) VALUES (8);
             CREATE TABLE exp_history (
                 record_time TEXT NOT NULL,
                 player_name TEXT NOT NULL,
@@ -44,7 +44,7 @@ def _init_minimal_db(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
 
 
 def test_validate_cleanup_args_rejects_wipe_with_for_search():
@@ -137,7 +137,7 @@ def test_for_search_thins_transfer_window_middles(tmp_path, monkeypatch):
         conn.executescript(
             """
             CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version (version) VALUES (7);
+            INSERT INTO schema_version (version) VALUES (8);
             CREATE TABLE exp_history (
                 record_time TEXT NOT NULL,
                 player_name TEXT NOT NULL,

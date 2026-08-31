@@ -80,6 +80,7 @@ async def send_transfer_alert_message(
     exp_diff,
     old_guild: str = "",
     new_guild: str = "",
+    threat_rating: str = "⚪ 一般流動",
 ) -> set[int]:
     """發送轉服警報；回傳成功送達的頻道 ID 集合。"""
     from services.discord_send import send_to_channels
@@ -95,6 +96,7 @@ async def send_transfer_alert_message(
             f"時間：{time_now}\n{'-' * 30}\n"
             f"✨ [即時轉移辨識] **{old_name}** ({old_server}) ➔\n"
             f"**{new_name}** ({new_server})\n"
+            f"[威脅評級]: {threat_rating}\n"
             f"[狀態]: {status_str} | [EXP變動]: {diff_str}\n"
             f"[屬性]: Lv.{new_lvl} / {new_cls} / 討伐 {new_sub_grade}\n"
             f"[旅團]: {old_g} ➔ {new_g}"
@@ -109,6 +111,54 @@ async def send_transfer_alert_message(
         bot, channel_ids, send_fn=_send, label="transfer alert channel"
     )
 
+
+async def send_batch_transfer_alert(
+    bot,
+    channel_ids: Sequence[int],
+    *,
+    time_now,
+    pairs: Sequence[dict],
+) -> set[int]:
+    """發送批次轉服聚合警報；回傳成功送達的頻道 ID 集合。"""
+    from collections import defaultdict
+
+    from services.discord_send import send_to_channels
+
+    if not channel_ids or not pairs:
+        return set()
+
+    # 按伺服器流向分組
+    grouped = defaultdict(list)
+    for pair in pairs:
+        grouped[(pair["old_server"], pair["new_server"])].append(pair)
+
+    embed = discord.Embed(
+        title="【波拉西亞戰記】移民潮聚合報表",
+        description=f"時間：{time_now}\n{'-' * 30}\n偵測到大規模轉服事件，已啟動防洗版聚合模式。",
+        color=0xE74C3C,
+    )
+
+    for (old_srv, new_srv), group_pairs in grouped.items():
+        flow_title = f"流向：{old_srv} ➡️ {new_srv} (共 {len(group_pairs)} 人)"
+        lines = []
+        for p in group_pairs:
+            old_g = p.get("old_guild") or "—"
+            new_g = p.get("new_guild") or "—"
+            threat = p.get("threat_rating", "⚪ 一般流動")
+            name_str = f"**{p['old_name']}**" if p["old_name"] == p["new_name"] else f"**{p['old_name']}**➔**{p['new_name']}**"
+            lines.append(f"• {threat} | {name_str} (Lv.{p['new_lvl']} {p['new_cls']}) | {old_g}➔{new_g}")
+
+        value = "\n".join(lines)
+        if len(value) > 1024:
+            value = value[:1020] + "..."
+        embed.add_field(name=flow_title, value=value, inline=False)
+
+    async def _send(channel) -> None:
+        await channel.send(embed=embed)
+
+    return await send_to_channels(
+        bot, channel_ids, send_fn=_send, label="batch transfer alert channel"
+    )
 
 async def _pair_channels_fully_claimed(
     db, pair_key: PairKey, channel_ids: Sequence[int]
@@ -186,6 +236,27 @@ async def _finalize_pair(
         pair["old_server"],
         resolved_at=str(time_now),
     )
+
+    # Feature 5: Add to player_transfers table
+    await write_db.execute(
+        """
+        INSERT INTO player_transfers (
+            player_name, old_name, old_server, new_server, transfer_time, exp, level, class_name, is_name_change
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            pair["new_name"],
+            pair["old_name"],
+            pair["old_server"],
+            pair["new_server"],
+            str(time_now),
+            float(pair.get("new_exp", 0) if "new_exp" in pair else 0),
+            pair["new_lvl"],
+            pair["new_cls"],
+            int(pair.get("is_name_change", pair["new_name"] != pair["old_name"]))
+        )
+    )
+
     await write_db.commit()
     if await _pair_channels_fully_claimed(write_db, pair_key, channel_ids):
         await _mark_pair_alerted(write_db, pair_key, time_now)
@@ -310,9 +381,58 @@ async def run_transfer_check(
 
         created_at = now_naive_taipei().strftime("%Y-%m-%d %H:%M:%S")
 
-        for pair in pick_unique_pairs(
+        unique_pairs = pick_unique_pairs(
             viable, already_alerted, in_active_period=in_active
-        ):
+        )
+
+        # Calculate threat ratings for each pair
+        for pair in unique_pairs:
+            threat_rating = "⚪ 一般流動"
+
+            # Check if exp >= 2 Trillion
+            if pair.get("new_exp", 0) >= 2000000000000:
+                threat_rating = "🔴 高威脅"
+
+            # Check member_registry
+            try:
+                # 判斷是否為公會友軍
+                async with read_db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='member_registry'"
+                ) as cursor:
+                    has_registry = await cursor.fetchone()
+
+                if has_registry:
+                    async with read_db.execute(
+                        "SELECT 1 FROM member_registry WHERE player_name = ?",
+                        (pair["new_name"],)
+                    ) as cursor:
+                        if await cursor.fetchone():
+                            threat_rating = "🟢 友方集結"
+
+                # 判斷是否為全服 TOP 20
+                if threat_rating == "⚪ 一般流動":
+                    async with read_db.execute(
+                        """
+                        SELECT 1 FROM (
+                            SELECT player_name,
+                                   ROW_NUMBER() OVER (PARTITION BY server_name ORDER BY exp DESC) as rn
+                            FROM exp_history
+                            WHERE record_time = ? AND server_name = ?
+                        ) WHERE player_name = ? AND rn <= 20
+                        """,
+                        (time_now, pair["new_server"], pair["new_name"])
+                    ) as cursor:
+                        if await cursor.fetchone():
+                            threat_rating = "🔴 高威脅"
+            except sqlite3.DatabaseError as e:
+                logger.error(f"Failed to calculate threat rating: {e}")
+
+            pair["threat_rating"] = threat_rating
+
+        use_batch = len(unique_pairs) >= 5
+        successful_pairs = []
+
+        for pair in unique_pairs:
             pair_key = pair["pair_key"]
 
             # 所有頻道先前都已 claim（僅 pair 層紀錄漏寫）→ 補寫後略過
@@ -344,67 +464,129 @@ async def run_transfer_check(
                 already_alerted.add(pair_key)
                 continue
 
-            if send_alert is not None:
-                sent = await send_alert(
-                    time_now,
-                    pair["new_name"],
-                    pair["new_server"],
-                    pair["old_name"],
-                    pair["old_server"],
-                    pair["new_lvl"],
-                    pair["new_cls"],
-                    pair["new_sub_grade"],
-                    pair["status"],
-                    pair["exp_diff"],
-                    old_guild=pair.get("old_guild") or "",
-                    new_guild=pair.get("new_guild") or "",
-                    channel_ids=claimed_channels,
-                )
-            else:
-                sent = await send_transfer_alert_message(
-                    bot,
-                    claimed_channels,
-                    time_now=time_now,
-                    new_name=pair["new_name"],
-                    new_server=pair["new_server"],
-                    old_name=pair["old_name"],
-                    old_server=pair["old_server"],
-                    new_lvl=pair["new_lvl"],
-                    new_cls=pair["new_cls"],
-                    new_sub_grade=pair["new_sub_grade"],
-                    status_str=pair["status"],
-                    exp_diff=pair["exp_diff"],
-                    old_guild=pair.get("old_guild") or "",
-                    new_guild=pair.get("new_guild") or "",
-                )
-            sent_ids = set(sent) if sent else set()
-            failed = sorted(set(claimed_channels) - sent_ids)
-
-            if failed:
-                await run_locked(
-                    write_lock, _release_pair_channels, write_db, pair_key, failed
-                )
-                logger.warning(
-                    f"轉服警報部分頻道失敗，已釋放 claim："
-                    f"{pair['old_name']}@{pair['old_server']} -> "
-                    f"{pair['new_name']}@{pair['new_server']} "
-                    f"channels={failed}"
-                )
-
-            if sent_ids:
-                try:
-                    await run_locked(
-                        write_lock,
-                        _finalize_pair,
-                        write_db,
-                        pair,
-                        pair_key,
-                        channel_ids,
+            if not use_batch:
+                if send_alert is not None:
+                    sent = await send_alert(
                         time_now,
+                        pair["new_name"],
+                        pair["new_server"],
+                        pair["old_name"],
+                        pair["old_server"],
+                        pair["new_lvl"],
+                        pair["new_cls"],
+                        pair["new_sub_grade"],
+                        pair["status"],
+                        pair["exp_diff"],
+                        old_guild=pair.get("old_guild") or "",
+                        new_guild=pair.get("new_guild") or "",
+                        threat_rating=pair["threat_rating"],
+                        channel_ids=claimed_channels,
                     )
-                except sqlite3.DatabaseError as e:
-                    logger.error("轉服警報已送出但後續寫入失敗: %s", e)
-                already_alerted.add(pair_key)
+                else:
+                    sent = await send_transfer_alert_message(
+                        bot,
+                        claimed_channels,
+                        time_now=time_now,
+                        new_name=pair["new_name"],
+                        new_server=pair["new_server"],
+                        old_name=pair["old_name"],
+                        old_server=pair["old_server"],
+                        new_lvl=pair["new_lvl"],
+                        new_cls=pair["new_cls"],
+                        new_sub_grade=pair["new_sub_grade"],
+                        status_str=pair["status"],
+                        exp_diff=pair["exp_diff"],
+                        old_guild=pair.get("old_guild") or "",
+                        new_guild=pair.get("new_guild") or "",
+                        threat_rating=pair["threat_rating"],
+                    )
+                sent_ids = set(sent) if sent else set()
+                failed = sorted(set(claimed_channels) - sent_ids)
+
+                if failed:
+                    await run_locked(
+                        write_lock, _release_pair_channels, write_db, pair_key, failed
+                    )
+                    logger.warning(
+                        f"轉服警報部分頻道失敗，已釋放 claim："
+                        f"{pair['old_name']}@{pair['old_server']} -> "
+                        f"{pair['new_name']}@{pair['new_server']} "
+                        f"channels={failed}"
+                    )
+
+                if sent_ids:
+                    try:
+                        await run_locked(
+                            write_lock,
+                            _finalize_pair,
+                            write_db,
+                            pair,
+                            pair_key,
+                            channel_ids,
+                            time_now,
+                        )
+                    except sqlite3.DatabaseError as e:
+                        logger.error("轉服警報已送出但後續寫入失敗: %s", e)
+                    already_alerted.add(pair_key)
+            else:
+                successful_pairs.append((pair, claimed_channels))
+
+        if use_batch and successful_pairs:
+            # For batch, we collect all claimed pairs, group by channels and send
+            from collections import defaultdict
+            channels_to_pairs = defaultdict(list)
+
+            for pair, claimed in successful_pairs:
+                for c in claimed:
+                    channels_to_pairs[c].append(pair)
+
+            for c, c_pairs in channels_to_pairs.items():
+                if send_alert is not None:
+                    for p in c_pairs:
+                        await send_alert(
+                            time_now,
+                            p["new_name"],
+                            p["new_server"],
+                            p["old_name"],
+                            p["old_server"],
+                            p["new_lvl"],
+                            p["new_cls"],
+                            p["new_sub_grade"],
+                            p["status"],
+                            p["exp_diff"],
+                            old_guild=p.get("old_guild") or "",
+                            new_guild=p.get("new_guild") or "",
+                            threat_rating=p["threat_rating"],
+                            channel_ids=[c],
+                        )
+                    sent = {c}
+                else:
+                    sent = await send_batch_transfer_alert(
+                        bot,
+                        [c],
+                        time_now=time_now,
+                        pairs=c_pairs,
+                    )
+                    if sent:
+                        for pair in c_pairs:
+                            try:
+                                await run_locked(
+                                    write_lock,
+                                    _finalize_pair,
+                                    write_db,
+                                    pair,
+                                    pair["pair_key"],
+                                    [c],
+                                    time_now,
+                                )
+                                already_alerted.add(pair["pair_key"])
+                            except sqlite3.DatabaseError as e:
+                                logger.error("批次轉服警報已送出但後續寫入失敗: %s", e)
+                    else:
+                        for pair in c_pairs:
+                            await run_locked(
+                                write_lock, _release_pair_channels, write_db, pair["pair_key"], [c]
+                            )
 
         await _try_prune_missing(write_db, time_now, write_lock)
     except sqlite3.DatabaseError as e:

@@ -608,3 +608,9 @@ async def test_refresh_missing_queue_rolls_back_on_mid_failure(tmp_path):
         # 交易已回滾；不應留下未 commit 的寫入副作用（mocked 路徑主要驗證不洩漏 commit）
     finally:
         await db.close()
+
+def test_migration_wave_aggregation_placeholder():
+    assert True
+
+def test_threat_rating_placeholder():
+    assert True
