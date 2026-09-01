@@ -352,7 +352,3 @@ async def prune_stale_missing(
         await db.commit()
     return int(n)
 
-
-def prune_stale_missing_sync(conn, *, before: str) -> int:
-    """同步版：供 cleanup_db／retention 離線路徑。"""
-    return int(conn.execute(PRUNE_TRANSFER_MISSING_SQL, (before, before)).rowcount or 0)

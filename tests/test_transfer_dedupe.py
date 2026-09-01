@@ -309,7 +309,6 @@ async def test_same_tick_rename_reverse_alerts_despite_outbound_log(tmp_path):
             read_db=db,
             time_now=t_now,
             time_prev=t_prev,
-            complete_times=[(t_now,), (t_prev,)],
             channel_ids=[7],
             send_alert=send_alert,
         )

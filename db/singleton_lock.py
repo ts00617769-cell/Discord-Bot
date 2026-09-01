@@ -26,7 +26,7 @@ def acquire_process_lock(lock_path: str | Path | None = None) -> None:
 
             _lock_fp.seek(0)
             try:
-                msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             except OSError:
                 print("❌ 偵測到本機已有機器人實例正在執行（檔案鎖）。")
                 print("   請先結束舊的 python 程序，否則指令會回覆兩次。")
@@ -60,7 +60,7 @@ def acquire_process_lock(lock_path: str | Path | None = None) -> None:
                         import msvcrt
 
                         _lock_fp.seek(0)
-                        msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
+                        msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                     except OSError:
                         pass
                 else:

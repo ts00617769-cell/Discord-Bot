@@ -282,7 +282,6 @@ class ExpTracker(commands.Cog):
                 read_db=read_db(self.bot),
                 time_now=time_now,
                 time_prev=time_prev_scan,
-                complete_times=times,
                 channel_ids=transfer_alert_channel_ids(),
                 write_lock=write_lock,
             )
