@@ -249,7 +249,6 @@ async def run_transfer_check(
     channel_ids: Sequence[int],
     send_alert: SendTransferAlert | None = None,
     bot: Any | None = None,
-    complete_times=None,
     write_lock: Any | None = None,
 ) -> None:
     if not channel_ids:

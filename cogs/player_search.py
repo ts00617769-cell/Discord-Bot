@@ -42,7 +42,50 @@ from services.timeutil import now_naive_taipei
 logger = logging.getLogger(__name__)
 
 
+
+class PlayerSearchFeedbackView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180.0)
+        self.author_id = author_id
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("只有發起查詢的玩家可以回報。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="✅ 正確", style=discord.ButtonStyle.success)
+    async def btn_correct(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_feedback(interaction, "正確")
+
+    @discord.ui.button(label="❌ 錯誤", style=discord.ButtonStyle.danger)
+    async def btn_incorrect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_feedback(interaction, "錯誤")
+
+    async def _handle_feedback(self, interaction: discord.Interaction, result: str):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        logger.info(f"Player search feedback from {interaction.user.id}: {result}")
+        try:
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("感謝您的回報！已記錄此結果。", ephemeral=True)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to handle feedback: {e}")
+
+    async def on_timeout(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
 class PlayerSearch(commands.Cog):
+
     def __init__(self, bot):
         self.bot = bot
         self.store = PlayerSearchStore(read_db(bot))
@@ -99,7 +142,8 @@ class PlayerSearch(commands.Cog):
                 payload = get_cached_search(cache_key)
                 if payload:
                     if payload.get("kind") == "embeds":
-                        await self._deliver_embeds(ctx, processing_msg, payload["embeds"])
+                        view = PlayerSearchFeedbackView(ctx.author.id)
+                        await self._deliver_embeds(ctx, processing_msg, payload["embeds"], view=view)
                         return
                     if payload.get("kind") == "text":
                         return await processing_msg.edit(content=payload["content"])
@@ -146,7 +190,8 @@ class PlayerSearch(commands.Cog):
                     set_cached_search(
                         cache_key, {"kind": "embeds", "embeds": embeds}
                     )
-                    await self._deliver_embeds(ctx, processing_msg, embeds)
+                    view = PlayerSearchFeedbackView(ctx.author.id)
+                    await self._deliver_embeds(ctx, processing_msg, embeds, view=view)
                     return
 
                 if result.kind == "no_link":
@@ -171,7 +216,8 @@ class PlayerSearch(commands.Cog):
                 set_cached_search(
                     cache_key, {"kind": "embeds", "embeds": embeds}
                 )
-                await self._deliver_embeds(ctx, processing_msg, embeds)
+                view = PlayerSearchFeedbackView(ctx.author.id)
+                await self._deliver_embeds(ctx, processing_msg, embeds, view=view)
 
         except sqlite3.DatabaseError as e:
             logger.error(f"DB error tracking '{name}': {e}\n{traceback.format_exc()}")
@@ -249,19 +295,32 @@ class PlayerSearch(commands.Cog):
             embeds[-1].set_footer(text=footer)
         return embeds
 
-    async def _deliver_embeds(self, ctx, processing_msg, embeds):
+    async def _deliver_embeds(self, ctx, processing_msg, embeds, view=None):
         if not embeds:
             try:
-                await processing_msg.edit(content="❌ 無結果可顯示。")
+                kwargs = {"content": "❌ 無結果可顯示。"}
+                if view:
+                    kwargs["view"] = None
+                await processing_msg.edit(**kwargs)
             except discord.HTTPException:
                 pass
             return
         try:
-            await processing_msg.edit(content=None, embed=embeds[0])
+            kwargs = {"content": None, "embed": embeds[0]}
+            if view is not None:
+                kwargs["view"] = view
+            msg = await processing_msg.edit(**kwargs)
+            if view is not None:
+                view.message = msg or processing_msg
         except discord.HTTPException as e:
             logger.error(f"edit processing_msg failed: {e}")
             try:
-                await ctx.send(embed=embeds[0])
+                kwargs = {"embed": embeds[0]}
+                if view is not None:
+                    kwargs["view"] = view
+                msg = await ctx.send(**kwargs)
+                if view is not None:
+                    view.message = msg
             except discord.HTTPException:
                 return
         for embed in embeds[1:]:
