@@ -14,6 +14,8 @@ from typing import Optional
 
 # (start, end, label) — 台北時間，含端點
 # 領域轉移：公告「轉移時間」；近期場次多為週三 12:00～週日 23:59
+# 遊戲預定 2026-12-31 結束營運；第33次為最後一場，勿再往後加場次。
+GAME_END_OF_SERVICE_DATE = "2026-12-31"
 REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = [
     ("2025-12-22 12:00:00", "2025-12-23 12:00:00", "第20次領域轉移"),
     ("2026-01-07 12:00:00", "2026-01-11 23:59:59", "第21次領域轉移"),
@@ -31,8 +33,7 @@ REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = [
     ("2026-12-16 12:00:00", "2026-12-20 23:59:59", "第33次領域轉移"),
 ]
 
-# 提醒維護者核對公告用；未證實日期絕不參與轉服／改名放寬邏輯。
-# 下一波待官網公告後再加入（勿放未證實預估，以免誤放寬轉服配對）。
+# 關服後不再有領域轉移；未證實日期絕不參與轉服／改名放寬邏輯。
 PROJECTED_REALM_TRANSFER_WINDOWS: list[tuple[str, str, str]] = []
 
 # 可轉職時段：公告「職業變更商品」販售職業變更幣的期間，
@@ -256,7 +257,7 @@ def transfer_calendar_health_notes(
     grace_days: int = TRANSFER_LOGIN_GRACE_DAYS,
     warn_within_days: int = 14,
 ) -> list[str]:
-    """健康摘要用：無後續窗／即將用盡時提示維護者更新日曆。"""
+    """健康摘要用：最後一場前後提示關服後不再轉移（無需再補日曆）。"""
     dt: datetime.datetime | None
     if when is None:
         from services.timeutil import now_naive_taipei
@@ -275,29 +276,20 @@ def transfer_calendar_health_notes(
         effective_end = end + grace
         if dt <= effective_end:
             remaining.append((effective_end, label))
+    eos = GAME_END_OF_SERVICE_DATE
     if not remaining:
-        projected = []
-        for start_s, _end_s, label in PROJECTED_REALM_TRANSFER_WINDOWS:
-            start = _parse(start_s)
-            if start is not None and start >= dt:
-                projected.append((start_s, label))
-        projection_note = (
-            f" 最近推算為 {projected[0][1]}（{projected[0][0]}），但未經官方證實。"
-            if projected
-            else ""
-        )
         return [
-            "⚠️ 領域轉移日曆已無後續場次；請至官網確認後更新 "
-            f"`game_event_windows.REALM_TRANSFER_WINDOWS`。{projection_note}"
+            f"ℹ️ 領域轉移日曆已無後續場次：遊戲預定 **{eos}** 結束營運，"
+            "不再有領域轉移，無需再更新 `REALM_TRANSFER_WINDOWS`。"
         ]
     remaining.sort(key=lambda x: x[0])
     last_end, last_label = remaining[-1]
     days_left = (last_end - dt).total_seconds() / 86400.0
     if days_left <= float(warn_within_days):
         return [
-            "⚠️ 領域轉移日曆即將用盡：最後有效場次 "
-            f"**{last_label}**（含寬限約至 {last_end.strftime('%Y-%m-%d')}，"
-            f"剩餘約 {days_left:.0f} 天）。請至官網確認後更新 "
-            "`game_event_windows.REALM_TRANSFER_WINDOWS`。"
+            f"ℹ️ 最後一場領域轉移：**{last_label}**"
+            f"（含寬限約至 {last_end.strftime('%Y-%m-%d')}，"
+            f"剩餘約 {days_left:.0f} 天）。遊戲預定 **{eos}** 結束營運，"
+            "之後不再有轉移，無需再補日曆。"
         ]
     return []

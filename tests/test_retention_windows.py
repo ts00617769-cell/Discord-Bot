@@ -298,15 +298,21 @@ def test_transfer_calendar_health_notes_exhausted():
     notes = transfer_calendar_health_notes("2027-01-15 12:00:00")
     assert notes
     assert any("已無後續" in n for n in notes)
+    assert any("2026-12-31" in n for n in notes)
+    assert any("無需再更新" in n for n in notes)
+    assert not any("請至官網" in n for n in notes)
 
 
 def test_transfer_calendar_health_notes_warns_before_expiry():
     from services.game_event_windows import transfer_calendar_health_notes
 
-    # 第33次結束 2026-12-20 + grace 3 日 ≈ 12-23；在 12-12 應觸發即將用盡
+    # 第33次結束 2026-12-20 + grace 3 日 ≈ 12-23；在 12-12 應提示最後一場／關服
     notes = transfer_calendar_health_notes(
         "2026-12-12 12:00:00", warn_within_days=14
     )
     assert notes
-    assert any("即將用盡" in n for n in notes)
+    assert any("最後一場" in n for n in notes)
     assert any("第33次" in n for n in notes)
+    assert any("2026-12-31" in n for n in notes)
+    assert any("無需再補日曆" in n for n in notes)
+    assert not any("請至官網" in n for n in notes)
