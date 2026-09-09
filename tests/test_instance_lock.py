@@ -7,7 +7,7 @@ import pytest
 
 from bot import PrasiaBot
 from db.singleton_lock import is_process_lock_held
-from services.sqlite_busy import is_sqlite_busy
+from services.sqlite_busy import begin_immediate, is_sqlite_busy
 
 
 def test_is_process_lock_held_missing_file(tmp_path):
@@ -27,6 +27,31 @@ def test_refuse_if_bot_running_allows_when_idle(monkeypatch):
 
     monkeypatch.setattr(cleanup_db, "_bot_appears_running", lambda: False)
     assert cleanup_db._refuse_if_bot_running(force=False) is None
+
+
+@pytest.mark.asyncio
+async def test_begin_immediate_retries_after_nested_transaction(tmp_path):
+    import aiosqlite
+
+    from db.schema import apply_migrations
+
+    db = await aiosqlite.connect(tmp_path / "begin.db")
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('stuck', '1')"
+        )
+        await begin_immediate(db)
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('ok', '1')"
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT key FROM bot_settings ORDER BY key"
+        ) as cursor:
+            assert [r[0] for r in await cursor.fetchall()] == ["ok"]
+    finally:
+        await db.close()
 
 
 def test_is_sqlite_busy():

@@ -94,6 +94,29 @@ async def test_persist_snapshot_round_rolls_back_partial_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_persist_snapshot_round_clears_leftover_implicit_transaction(tmp_path):
+    """重現正式環境：寫入連線留下隱式交易後再 BEGIN IMMEDIATE。"""
+    import aiosqlite
+
+    db = await aiosqlite.connect(tmp_path / "nested.db")
+    try:
+        await apply_migrations(db)
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('leftover', '1')"
+        )
+        # 故意不 commit，模擬共用連線殘留交易
+        await persist_snapshot_round(db, [[_row("S1", "A")]])
+        async with db.execute("SELECT COUNT(*) FROM exp_history") as cursor:
+            assert (await cursor.fetchone())[0] == 1
+        async with db.execute(
+            "SELECT value FROM bot_settings WHERE key='leftover'"
+        ) as cursor:
+            assert await cursor.fetchone() is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_persist_snapshot_round_dedupes_via_separate_read_db(tmp_path):
     import aiosqlite
 

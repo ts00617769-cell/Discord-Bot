@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from services.sqlite_busy import begin_immediate
+
 
 async def fetch_recent_complete_snapshot_times(
     db: Any, min_servers: int, *, limit: int = 10
@@ -230,7 +232,7 @@ async def persist_snapshot_round(
                 )
 
     try:
-        await db.execute("BEGIN IMMEDIATE")
+        await begin_immediate(db)
         if persist_history:
             new_rows = [
                 row

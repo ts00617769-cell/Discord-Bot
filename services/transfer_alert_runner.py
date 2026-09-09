@@ -22,6 +22,7 @@ from services.game_event_windows import (
     TRANSFER_LOGIN_GRACE_DAYS,
     is_transfer_active_period,
 )
+from services.sqlite_busy import begin_immediate
 from services.timeutil import now_naive_taipei
 from services.transfer_alert_flow import (
     filter_viable_ranked,
@@ -193,7 +194,7 @@ async def _finalize_pair(
 
 async def _refresh_missing_queue(write_db, time_now, time_prev) -> None:
     """單交易刷新消失佇列，避免中間當機留下半更新狀態。"""
-    await write_db.execute("BEGIN IMMEDIATE")
+    await begin_immediate(write_db)
     try:
         await resolve_reappeared(
             write_db, time_now=str(time_now), commit=False

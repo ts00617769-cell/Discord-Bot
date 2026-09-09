@@ -2,12 +2,34 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+_NESTED_TXN = "cannot start a transaction within a transaction"
+
+
+async def begin_immediate(db: Any) -> None:
+    """開 IMMEDIATE 交易；若連線已有隱式／殘留交易則先 rollback 再重試。
+
+    Python sqlite3 預設 isolation_level 會在 DML 時暗中 BEGIN。
+    長跑共用寫入連線若沒 commit／rollback，下一輪 BEGIN IMMEDIATE 會炸巢狀交易。
+    """
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        return
+    except sqlite3.OperationalError as e:
+        if _NESTED_TXN not in str(e).lower():
+            raise
+        logger.warning("SQLite 連線已有未結束交易，rollback 後重開 BEGIN IMMEDIATE")
+    await db.rollback()
+    await db.execute("BEGIN IMMEDIATE")
 
 
 def is_sqlite_busy(exc: BaseException) -> bool:

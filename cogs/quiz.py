@@ -16,6 +16,7 @@ from discord.ext import commands, tasks
 from services.db_lock import bot_write_lock, run_locked
 from services.discord_send import send_to_channel
 from services.error_handler import parse_env_channel_id, resolve_bot_channel
+from services.sqlite_busy import begin_immediate
 from services.timeutil import TAIPEI, now_taipei, today_taipei_str
 
 logger = logging.getLogger(__name__)
@@ -280,7 +281,7 @@ class QuizSystem(commands.Cog):
         today_str = today_taipei_str()
 
         async def _claim() -> bool:
-            await self.bot.db.execute("BEGIN IMMEDIATE")
+            await begin_immediate(self.bot.db)
             try:
                 async with self.bot.db.execute(
                     "SELECT is_active, date_str FROM active_quiz_status WHERE id = 1"
@@ -315,7 +316,7 @@ class QuizSystem(commands.Cog):
         """Discord 發送失敗時，只撤銷本次 claim 與 history。"""
 
         async def _rollback() -> None:
-            await self.bot.db.execute("BEGIN IMMEDIATE")
+            await begin_immediate(self.bot.db)
             try:
                 await self.bot.db.execute(
                     """
