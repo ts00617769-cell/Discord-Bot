@@ -450,9 +450,20 @@ class PlayerSearchStore:
                 ) != "high":
                     continue
                 class_ok = match.class_compatible(t_cls, c_cls)
-                label = (
-                    "✈️ 疑似轉服/改名後" if class_ok else "🔄 疑似轉服+轉職"
+                steal = match.transfer_steal_label(
+                    t_cls, t_sub, c_cls, c_sub, exp_diff, gap_hours,
+                    a_last=t_last, b_first=c_first,
                 )
+                if steal:
+                    label = (
+                        f"✈️ 疑似轉服/改名後（{steal}）"
+                        if class_ok
+                        else f"🔄 疑似轉服+轉職（{steal}）"
+                    )
+                else:
+                    label = (
+                        "✈️ 疑似轉服/改名後" if class_ok else "🔄 疑似轉服+轉職"
+                    )
                 candidates.append({
                     "direction": "forward",
                     "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
@@ -487,10 +498,16 @@ class PlayerSearchStore:
             same_server = c_server == t_server
             gap_hours = match.gap_hours(t_last, c_first)
             class_ok = match.class_compatible(t_cls, c_cls)
+            steal = match.transfer_steal_label(
+                t_cls, t_sub, c_cls, c_sub, exp_diff, gap_hours,
+                a_last=t_last, b_first=c_first,
+            )
             if same_server:
                 label = "✏️ 疑似同服改名" if class_ok else "🔄 疑似同服轉職"
             else:
                 label = "✈️ 疑似轉服/改名後" if class_ok else "🔄 疑似轉服+轉職"
+            if steal:
+                label = f"{label}（{steal}）"
             candidates.append({
                 "direction": "forward",
                 "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
@@ -502,6 +519,7 @@ class PlayerSearchStore:
                 "score": match.score(
                     t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
                     same_server, forward=True,
+                    a_last=t_last, b_first=c_first,
                 ),
                 "confidence": match.confidence(
                     t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,
@@ -525,6 +543,10 @@ class PlayerSearchStore:
             same_server = c_server == t_server
             gap_hours = match.gap_hours(t_first, c_last)
             class_ok = match.class_compatible(t_cls, c_cls)
+            steal = match.transfer_steal_label(
+                t_cls, t_sub, c_cls, c_sub, exp_diff, gap_hours,
+                a_last=c_last, b_first=t_first,
+            )
             if raw_diff >= 0:
                 diff_text = f"空窗偷練 +{raw_diff/100000000:,.0f} 億"
             else:
@@ -533,6 +555,8 @@ class PlayerSearchStore:
                 label = "✏️ 疑似同服改名前身" if class_ok else "🔄 疑似同服轉職前身"
             else:
                 label = "🔍 疑似前身" if class_ok else "🔄 疑似轉職前身"
+            if steal:
+                label = f"{label}（{steal}）"
             candidates.append({
                 "direction": "backward",
                 "name": c_name, "server": c_server, "lvl": c_lvl, "cls": c_cls,
@@ -544,6 +568,7 @@ class PlayerSearchStore:
                 "score": match.score(
                     t_cls, t_sub, t_lvl, exp_diff, gap_hours, c_cls, c_sub, c_lvl,
                     same_server, forward=False,
+                    a_last=c_last, b_first=t_first,
                 ),
                 "confidence": match.confidence(
                     t_cls, t_sub, c_cls, exp_diff, c_sub, gap_hours, same_server,

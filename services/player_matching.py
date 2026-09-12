@@ -193,6 +193,42 @@ def pick_soft_candidates(
     return soft_unique
 
 
+def _known_class_match(t_cls, c_cls) -> bool:
+    return (
+        class_compatible(t_cls, c_cls)
+        and not is_unknown_class(t_cls)
+        and not is_unknown_class(c_cls)
+    )
+
+
+def _sub_grades_equal(t_sub, c_sub) -> bool:
+    return t_sub is not None and c_sub is not None and t_sub == c_sub
+
+
+def transfer_steal_label(
+    t_cls,
+    t_sub,
+    c_cls,
+    c_sub,
+    exp_diff,
+    gap_h: float,
+    *,
+    a_last: Optional[str] = None,
+    b_first: Optional[str] = None,
+) -> Optional[str]:
+    """若符合轉移窗空窗偷練放寬，回傳場次 label。"""
+    from services.game_event_windows import allow_transfer_steal_high
+
+    return allow_transfer_steal_high(
+        a_last,
+        b_first,
+        obs_gap_hours=gap_h,
+        exp_diff=exp_diff,
+        class_ok=_known_class_match(t_cls, c_cls),
+        sub_equal=_sub_grades_equal(t_sub, c_sub),
+    )
+
+
 def confidence(
     t_cls,
     t_sub,
@@ -228,6 +264,13 @@ def confidence(
         ):
             return "high"
 
+    # 轉移窗：同職＋同討伐＋不重疊 → 允許較大空窗偷練
+    if transfer_steal_label(
+        t_cls, t_sub, c_cls, c_sub, exp_diff, gap_h,
+        a_last=a_last, b_first=b_first,
+    ):
+        return "high"
+
     if same_server:
         if (
             class_ok
@@ -261,6 +304,8 @@ def score(
     same_server: bool,
     *,
     forward: bool = True,
+    a_last: Optional[str] = None,
+    b_first: Optional[str] = None,
 ) -> float:
     s = exp_diff + gap_h * 1e8
     if not is_unknown_class(t_cls) and c_cls == t_cls:
@@ -282,6 +327,11 @@ def score(
         if c_lvl == t_lvl or c_lvl == t_lvl - 1:
             s -= 5e10
     if exp_diff <= 1e8:
+        s -= 1e12
+    elif transfer_steal_label(
+        t_cls, t_sub, c_cls, c_sub, exp_diff, gap_h,
+        a_last=a_last, b_first=b_first,
+    ):
         s -= 1e12
     return s
 

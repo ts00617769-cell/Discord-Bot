@@ -54,6 +54,8 @@ CLASS_CHANGE_WINDOWS: list[tuple[str, str, str]] = [
 TRANSFER_LOGIN_GRACE_DAYS = 3
 # 舊服最後上榜可略早於窗開始（申請前仍短暫留在榜上）
 TRANSFER_DISAPPEAR_PRE_HOURS = 24
+# 轉移窗內允許的最大空窗偷練（1 兆）；須同職＋同討伐＋不重疊，不可單靠 EXP
+TRANSFER_STEAL_MAX_EXP = 1.0e12
 
 _FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -156,6 +158,32 @@ def allow_delayed_transfer_high(
         return None
     # 過長空窗（遠超 grace）不放行；match 內已用窗結束+grace 卡住
     if obs_gap_hours > (14 + TRANSFER_LOGIN_GRACE_DAYS) * 24:
+        return None
+    return match_realm_transfer(a_last, b_first)
+
+
+def allow_transfer_steal_high(
+    a_last: Optional[str],
+    b_first: Optional[str],
+    *,
+    obs_gap_hours: float,
+    exp_diff: float,
+    class_ok: bool,
+    sub_equal: bool,
+) -> Optional[str]:
+    """轉移窗內允許較大空窗偷練進 high：同職＋同討伐＋因果不重疊。
+
+    單靠 EXP 接近不放行。觀測必須 a_last < b_first（不同時上榜）。
+    """
+    if not class_ok or not sub_equal:
+        return None
+    if exp_diff < 0 or exp_diff > TRANSFER_STEAL_MAX_EXP:
+        return None
+    if obs_gap_hours <= 0:
+        return None
+    earlier = _parse(a_last)
+    later = _parse(b_first)
+    if earlier is None or later is None or later <= earlier:
         return None
     return match_realm_transfer(a_last, b_first)
 

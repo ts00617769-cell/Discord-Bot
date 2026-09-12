@@ -183,6 +183,70 @@ def test_confidence_delayed_transfer_same_class_is_high():
     )
 
 
+def test_confidence_transfer_steal_yan_gui_ren_is_high():
+    """第29次轉移：同職同討伐、不重疊、空窗偷練 ~5799 億 → high。"""
+    steal = 5.799e11
+    kwargs = dict(
+        t_cls="野望鬥士",
+        t_sub=25,
+        c_cls="野望鬥士",
+        exp_diff=steal,
+        c_sub=25,
+        gap_h=4.0,
+        same_server=False,
+        a_last="2026-08-30 22:20:00",
+        b_first="2026-08-31 02:20:00",
+    )
+    assert confidence(**kwargs) == "high"
+    from services.player_matching import transfer_steal_label
+
+    assert (
+        transfer_steal_label(
+            "野望鬥士", 25, "野望鬥士", 25, steal, 4.0,
+            a_last=kwargs["a_last"], b_first=kwargs["b_first"],
+        )
+        == "第29次領域轉移"
+    )
+
+
+def test_confidence_transfer_steal_rejects_mismatch_and_overlap():
+    steal = 5.799e11
+    base = dict(
+        t_cls="野望鬥士",
+        t_sub=25,
+        c_cls="野望鬥士",
+        exp_diff=steal,
+        c_sub=25,
+        gap_h=4.0,
+        same_server=False,
+        a_last="2026-08-30 22:20:00",
+        b_first="2026-08-31 02:20:00",
+    )
+    assert confidence(**{**base, "c_cls": "太陽監視者"}) == "medium"
+    assert confidence(**{**base, "c_sub": 24}) == "medium"
+    assert (
+        confidence(
+            **{
+                **base,
+                "b_first": "2026-08-30 20:00:00",
+                "gap_h": 2.33,
+            }
+        )
+        == "medium"
+    )
+    assert confidence(**{**base, "exp_diff": 1.01e12}) == "medium"
+    assert (
+        confidence(
+            **{
+                **base,
+                "a_last": "2026-09-01 10:00:00",
+                "b_first": "2026-09-01 14:00:00",
+            }
+        )
+        == "medium"
+    )
+
+
 def test_score_prefers_same_class():
     same = score("A", 5, 60, 1e8, 1.0, "A", 5, 60, False, forward=True)
     other = score("A", 5, 60, 1e8, 1.0, "B", 5, 60, False, forward=True)
